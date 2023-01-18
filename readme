@@ -1,2 +1,7 @@
 文档
 向nvme设备提交io: doc/nvme_spec.md
+
+git add xx
+git commit --amend
+git push origin xb
+https://github.com/ssbandjl/spdk/blob/xb/doc/nvme_spec.md
