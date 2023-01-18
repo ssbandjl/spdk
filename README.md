@@ -5,6 +5,8 @@ https://github.com/ssbandjl/spdk/tree/xb
 [向nvme设备提交io](doc/nvme_spec.md)  
 [NVMe over Fabrics 目标编程指南](doc/nvmf_tgt_pg.md)  
 [NVMe over Fabrics Target](doc/nvmf.md)  
+[Event Framework](doc/event.md)  
+[Blobstore Programmer's Guide](doc/blob.md)  
 
 [![Build Status](https://travis-ci.org/spdk/spdk.svg?branch=master)](https://travis-ci.org/spdk/spdk)
 
