@@ -1,12 +1,16 @@
-# Submitting I/O to an NVMe Device {#nvme_spec}
+# Submitting I/O to an NVMe Device 提交I/O到NVME设备{#nvme_spec}
 
-## The NVMe Specification
+## The NVMe Specification 规范
 
 The NVMe specification describes a hardware interface for interacting with
 storage devices. The specification includes network transport definitions for
 remote storage as well as a hardware register layout for local PCIe devices.
 What follows here is an overview of how an I/O is submitted to a local PCIe
 device through SPDK.
+
+NVMe 规范描述了用于与存储设备交互的硬件接口。 该规范包括远程存储的网络传输定义以及本地 PCIe 设备的硬件寄存器布局。 以下是通过SPDK 将I/O 提交到本地PCIe 设备的概述
+
+
 
 NVMe devices allow host software (in our case, the SPDK NVMe driver) to allocate
 queue pairs in host memory. The term "host" is used a lot, so to clarify that's
@@ -18,6 +22,10 @@ indices). The completion queue is similarly an array of 16 byte completion
 structures, plus 2 integers (head and tail indices). There are also two 32-bit
 registers involved that are called doorbells.
 
+NVMe 设备允许主机软件（在我们的例子中是 SPDK NVMe 驱动程序）在主机内存中分配队列对。 “主机”这个词用得很多，所以要澄清一下，这是 NVMe SSD 插入的系统。 一个队列对由两个队列组成——一个提交队列和一个完成队列。 这些队列更准确地描述为固定大小条目的圆环circular rings of fixed size entries。 提交队列是一个 64 字节命令结构数组，外加 2 个整数（头索引和尾索引）。 完成队列类似地是一个 16 字节完成结构的数组，加上 2 个整数（头和尾索引）。 还涉及到两个32位的寄存器，叫做门铃doorbells
+
+
+
 An I/O is submitted to an NVMe device by constructing a 64 byte command, placing
 it into the submission queue at the current location of the submission queue
 tail index, and then writing the new index of the submission queue tail to the
@@ -25,15 +33,25 @@ submission queue tail doorbell register. It's actually valid to copy a whole set
 of commands into open slots in the ring and then write the doorbell just one
 time to submit the whole batch.
 
+一个I/O提交给NVMe设备，通过构造一个64字节的命令，在提交队列尾索引的当前位置放入提交队列，然后将提交队列尾的新索引写入提交队列尾 门铃登记。 将一整套命令复制到环中的空槽中，然后只写一次门铃以提交整批命令实际上是有效的
+
+
+
 There is a very detailed description of the command submission and completion
 process in the NVMe specification, which is conveniently available from the main
 page over at [NVM Express](https://nvmexpress.org).
+
+NVMe 规范中对命令提交和完成过程有非常详细的描述，可以从 NVM Express 的主页方便地获得。
+
+
 
 Most importantly, the command itself describes the operation and also, if
 necessary, a location in host memory containing a descriptor for host memory
 associated with the command. This host memory is the data to be written on a
 write command, or the location to place the data on a read command. Data is
 transferred to or from this location using a DMA engine on the NVMe device.
+
+最重要的是，命令本身描述了操作，如果需要，还描述了主机内存中的一个位置，其中包含与命令关联的主机内存的描述符。 该主机存储器是写入命令时要写入的数据，或者是读取命令时放置数据的位置。 使用 NVMe 设备上的 DMA 引擎将数据传输到该位置或从该位置传输数据。
 
 The completion queue works similarly, but the device is instead the one writing
 entries into the ring. Each entry contains a "phase" bit that toggles between 0
@@ -43,7 +61,9 @@ head. However, SPDK doesn't enable interrupts and instead polls on the phase
 bit to detect completions. Interrupts are very heavy operations, so polling this
 phase bit is often far more efficient.
 
-## The SPDK NVMe Driver I/O Path
+完成队列的工作方式类似，但设备是将条目写入环中的设备。 每个条目都包含一个“相位”位，该位在整个环的每个循环中在 0 和 1 之间切换。 当建立一个队列对产生中断时，中断包含完成队列头的索引。 但是，SPDK 不启用中断，而是轮询相位位来检测完成。 中断是非常繁重的操作，因此轮询此相位bit位通常效率更高。
+
+## The SPDK NVMe Driver I/O Path    SPDK NVMe 驱动程序 I/O 路径
 
 Now that we know how the ring structures work, let's cover how the SPDK NVMe
 driver uses them. The user is going to construct a queue pair at some early time
@@ -54,6 +74,8 @@ other information like which NVMe namespace the command is targeted at and which
 NVMe queue pair to use. Finally, the user provides a callback function and
 context pointer that will be called when a completion for the resulting command
 is discovered during a later call to spdk_nvme_qpair_process_completions().
+
+现在我们知道了环形结构是如何工作的，让我们来介绍一下 SPDK NVMe 驱动程序如何使用它们。 用户将在程序生命周期的早期构建一个队列对，因此这不是“热”路径的一部分。 然后，他们将调用像 spdk_nvme_ns_cmd_read() 这样的函数来执行 I/O 操作。 用户提供数据缓冲区、目标 LBA 和长度，以及其他信息，例如命令针对哪个 NVMe 命名空间以及要使用哪个 NVMe 队列对。 最后，用户提供一个回调函数和上下文指针，当在稍后调用 spdk_nvme_qpair_process_completions() 期间发现结果命令完成时将调用它们。
 
 The first stage in the driver is allocating a request object to track the operation. The
 operations are asynchronous, so it can't simply track the state of the request
@@ -69,6 +91,10 @@ which are outlined next. The number of request objects is configurable at queue
 pair creation time and if not specified, SPDK will pick a sensible number based
 on the hardware queue depth.
 
+驱动程序中的**第一阶段**是分配一个请求对象来跟踪操作。 这些操作是异步的，因此它不能简单地跟踪调用堆栈上的请求状态。 在堆上分配一个新的请求对象会太慢，因此 SPDK 在 NVMe 队列对对象中保留一组预先分配的请求对象 - struct spdk_nvme_qpair。 分配给队列对的请求数大于 NVMe 提交队列的实际队列深度，因为 SPDK 支持几个关键的便利功能。 第一个是软件排队software queueing——SPDK 将允许用户提交比硬件队列实际容纳的更多的请求，SPDK 将自动在软件中排队。 二是分裂splitting。 SPDK 会出于多种原因拆分请求，下面将概述其中的一些原因。 请求对象的数量在队列对创建时是可配置的，如果没有指定，SPDK 将根据硬件队列深度选择一个合理的数量
+
+
+
 The second stage is building the 64 byte NVMe command itself. The command is
 built into memory embedded into the request object - not directly into an NVMe
 submission queue slot. Once the command has been constructed, SPDK attempts to
@@ -80,6 +106,10 @@ particular tracker is obtained, the command's CID value is updated with the
 index of the tracker. The NVMe specification provides that CID value in the
 completion, so the request can be recovered by looking up the tracker via the
 CID value and then following the pointer.
+
+**第二阶段**是构建 64 字节 NVMe 命令本身。 该命令内置于嵌入到请求对象中的内存中，而不是直接嵌入到 NVMe 提交队列槽中。 命令构建完成后，SPDK 会尝试在 NVMe 提交队列中获取一个槽位slot。 为提交队列中的每个元素分配一个称为跟踪器tracker的对象。 跟踪器分配在一个数组中，因此可以通过索引快速查找它们。 跟踪器本身包含指向当前占用该插槽的请求的指针。 当获得特定的跟踪器时，命令的 CID 值将使用跟踪器的索引进行更新。 NVMe 规范在完成时提供了 CID 值，因此可以通过 CID 值查找跟踪器然后跟随指针来恢复请求。
+
+
 
 Once a tracker (slot) is obtained, the data buffer associated with it is
 processed to build a PRP list. That's essentially an NVMe scatter gather list,
@@ -93,6 +123,8 @@ single PRP list, so SPDK will automatically split the user operation into two
 separate requests transparently. For more information on how memory is managed,
 see @ref memory.
 
+一旦获得跟踪器（槽），就会处理与其关联的数据缓冲区以构建 PRP 列表。 这本质上是一个 NVMe 分散收集sgl列表，尽管它受到更多限制。 用户向 SPDK 提供缓冲区的虚拟地址，因此 SPDK 必须查找页表以找到支持该虚拟内存的物理地址 (pa) 或 I/O 虚拟地址 (iova)。 实际上连续的内存区域可能在物理上不连续，因此这可能会导致 PRP 列表包含多个元素。 有时这可能会导致一组物理地址实际上不能表示为单个 PRP 列表，因此 SPDK 会自动将用户操作透明地拆分为两个单独的请求。 有关如何管理内存的更多信息，请参阅用户空间的直接内存访问 (DMA)。
+
 The reason the PRP list is not built until a tracker is obtained is because the
 PRP list description must be allocated in DMA-able memory and can be quite
 large. Since SPDK typically allocates a large number of requests, we didn't want
@@ -100,15 +132,23 @@ to allocate enough space to pre-build the worst case scenario PRP list,
 especially given that the common case does not require a separate PRP list at
 all.
 
+在获得跟踪器之前不构建 PRP 列表的原因是因为 PRP 列表描述必须分配在 DMA-able 内存中并且可能非常大。 由于 SPDK 通常分配大量请求，我们不想分配足够的空间来预先构建最坏情况的 PRP 列表，特别是考虑到常见情况根本不需要单独的 PRP 列表。
+
+在NVMe over PCIe中，I/O命令支持SGL(Scatter Gather List 分散聚合表)和PRP(Physical Region Page 物理(内存)区域页), 而管理命令只支持PRP;而在NVMe over Fabrics中，无论是管理命令还是I/O命令都只支持SGL。NVMe over Fabrics既支持FC网络，又支持RDMA网络。众所周知，在RDMA编程中，SGL(Scatter/Gather List)是最基本的数据组织形式。 SGL是一个数组，该数组中的元素被称之为SGE(Scatter/Gather Element)，每一个SGE就是一个Data Segment(数据段)
+
 Each NVMe command has two PRP list elements embedded into it, so a separate PRP
 list isn't required if the request is 4KiB (or if it is 8KiB and aligned
 perfectly). Profiling shows that this section of the code is not a major
 contributor to the overall CPU use.
 
+每个 NVMe 命令都嵌入了两个 PRP 列表元素，因此如果请求是 4KiB（或者如果它是 8KiB 并且完美对齐），则不需要单独的 PRP 列表。 分析显示这部分代码并不是总体 CPU 使用的主要贡献者。
+
 With a tracker filled out, SPDK copies the 64 byte command into the actual NVMe
 submission queue slot and then rings the submission queue tail doorbell to tell
 the device to go process it. SPDK then returns back to the user, without waiting
 for a completion.
+
+填写跟踪器后，SPDK 将 64 字节命令复制到实际的 NVMe 提交队列槽中，然后按提交队列尾门铃告诉设备去处理它。 SPDK 然后返回给用户，不等待完成。
 
 The user can periodically call `spdk_nvme_qpair_process_completions()` to tell
 SPDK to examine the completion queue. Specifically, it reads the phase bit of
@@ -117,7 +157,11 @@ find the tracker, which points at the request object. The request object
 contains a function pointer that the user provided initially, which is then
 called to complete the command.
 
+用户可以定期调用 spdk_nvme_qpair_process_completions() 告诉 SPDK 检查完成队列。 具体来说，它读取下一个预期完成槽的相位位，并在翻转时查看 CID 值以找到指向请求对象的跟踪器。 请求对象包含用户最初提供的函数指针，然后调用它来完成命令。
+
 The `spdk_nvme_qpair_process_completions()` function will keep advancing to the
 next completion slot until it runs out of completions, at which point it will
 write the completion queue head doorbell to let the device know that it can use
 the completion queue slots for new completions and return.
+
+spdk_nvme_qpair_process_completions() 函数将继续前进到下一个完成槽，直到所有完成，此时它将写入完成队列头门铃，让设备知道它可以使用完成队列槽进行新的完成并返回。
