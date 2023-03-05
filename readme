@@ -9,3 +9,7 @@ https://github.com/ssbandjl/spdk/blob/xb/doc/nvme_spec.md
 
 
 bdev_malloc_create
+
+examples/blob/hello_world/hello_blob.c
+
+

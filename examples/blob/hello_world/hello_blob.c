@@ -70,6 +70,7 @@ unload_bs(struct hello_context_t *hello_context, char *msg, int bserrno)
 		if (hello_context->channel) {
 			spdk_bs_free_io_channel(hello_context->channel);
 		}
+    // 卸载 blobstore。 它将所有易失性数据刷新到磁盘
 		spdk_bs_unload(hello_context->bs, unload_complete, hello_context);
 	} else {
 		spdk_app_stop(bserrno);
@@ -197,6 +198,15 @@ blob_write(struct hello_context_t *hello_context)
 	/*
 	 * Buffers for data transfer need to be allocated via SPDK. We will
 	 * transfer 1 io_unit of 4K aligned data at offset 0 in the blob.
+   * 根据给定的 dma_flg 分配 dma/可共享内存。 它是一个具有给定大小、对齐方式和套接字 ID 的内存缓冲区。
+
+参数：
+size – 大小（以字节为单位）。
+对齐——如果非零，则分配的缓冲区对齐到对齐的倍数。 在这种情况下，它必须是二的幂。 返回的缓冲区始终至少与缓存行大小对齐。
+phys_addr – **已弃用**。 请使用 spdk_vtophys() 来检索物理地址。 传递指向变量的指针以保存分配的缓冲区的物理地址。 如果为 NULL，则不返回物理地址。
+socket_id – 用于分配内存的套接字 ID，或任何套接字的 SPDK_ENV_SOCKET_ID_ANY。
+标志——SPDK_MALLOC 标志的组合（SPDK_MALLOC_DMA、SPDK_MALLOC_SHARE）。 至少必须指定一个标志。
+
 	 */
 	hello_context->write_buff = spdk_malloc(hello_context->io_unit_size,
 						0x1000, NULL, SPDK_ENV_LCORE_ID_ANY,
@@ -264,6 +274,13 @@ resize_complete(void *cb_arg, int bserrno)
 	 * automatically when the blob is closed. It is always a
 	 * good idea to sync after making metadata changes unless
 	 * it has an unacceptable impact on application performance.
+   * *元数据存储在易失性内存中以提高性能
+* 原因，因此需要同步
+* 非易失性存储使其持久化。 这可以是
+* 手动完成，如此处所示，否则将完成
+* 当 blob 关闭时自动。 它总是一个
+* 元数据更改后同步的好主意，除非
+* 它对应用程序性能有不可接受的影响。
 	 */
 	spdk_blob_sync_md(hello_context->blob, sync_complete, hello_context);
 }
@@ -297,6 +314,7 @@ open_complete(void *cb_arg, struct spdk_blob *blob, int bserrno)
 	 * there'd usually be many blobs of various sizes. The resize
 	 * unit is a cluster.
 	 */
+  // 将 blob 的大小调整为“sz”集群。 在调用 spdk_bs_md_sync_blob() 之前，这些更改不会持久保存到磁盘。 如果在之前调整大小完成之前调用，它将失败并显示 errno -EBUSY
 	spdk_blob_resize(hello_context->blob, free, resize_complete, hello_context);
 }
 
@@ -451,6 +469,7 @@ main(int argc, char **argv)
 		 * spdk_app_stop() is called by someone (not simply when
 		 * hello_start() returns), or if an error occurs during
 		 * spdk_app_start() before hello_start() runs.
+     * 启动框架。 在调用这个函数之前，opts必须通过spdk_app_opts_init()进行初始化。 一旦启动，框架将使用提供的参数在当前系统线程上运行的 spdk_thread 上调用 start_fn。 如果设置了 opts->delay_subsystem_init（例如通过 spdk_app_parse_args() 中的 --wait-for-rpc 标志），此函数将只启动一个有限的 RPC 服务器，它只接受一些 RPC 命令——主要与预初始化有关。 使用此选项，框架不会启动，也不会调用 start_fn，直到用户发送 `rpc_framework_start_init` RPC 命令，这标志着预初始化完成并允许最终调用 start_fn。 此调用将阻塞，直到调用 spdk_app_stop()。 如果在 spdk_app_start() 中的初始化代码期间发生错误情况，此函数将在调用 start_fn 之前立即返回
 		 */
 		rc = spdk_app_start(&opts, hello_start, hello_context);
 		if (rc) {

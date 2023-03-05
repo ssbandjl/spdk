@@ -1,9 +1,11 @@
-# Block Device User Guide {#bdev}
+# Block Device User Guide 块设备用户指南 {#bdev}
 
 ## Target Audience {#bdev_ug_targetaudience}
 
 This user guide is intended for software developers who have knowledge of block storage, storage drivers, issuing JSON-RPC
-commands and storage services such as RAID, compression, crypto, and others.
+commands and storage services such as RAID, compression, crypto, and others. 
+
+本用户指南适用于了解块存储、存储驱动程序、发出 JSON-RPC 命令和存储服务（如 RAID、压缩、加密等）的软件开发人员
 
 ## Introduction {#bdev_ug_introduction}
 
@@ -13,10 +15,12 @@ often sits immediately above the device drivers in a traditional kernel
 storage stack. Specifically, this library provides the following
 functionality:
 
-* A pluggable module API for implementing block devices that interface with different types of block storage devices.
-* Driver modules for NVMe, malloc (ramdisk), Linux AIO, virtio-scsi, Ceph RBD, Pmem and Vhost-SCSI Initiator and more.
-* An application API for enumerating and claiming SPDK block devices and then performing operations (read, write, unmap, etc.) on those devices.
-* Facilities to stack block devices to create complex I/O pipelines, including logical volume management (lvol) and partition support (GPT).
+SPDK 块设备层，通常简称为 bdev，是一个 C 库，旨在等效于通常位于传统内核存储堆栈中设备驱动程序之上的操作系统块存储层。 具体来说，这个库提供了以下功能：
+
+* A pluggable module API for implementing block devices that interface with different types of block storage devices. 用于实现与不同类型的块存储设备接口的块设备的可插入模块 API。
+* Driver modules for NVMe, malloc (ramdisk), Linux AIO, virtio-scsi, Ceph RBD, Pmem and Vhost-SCSI Initiator and more. 用于 NVMe、malloc (ramdisk)、Linux AIO、virtio-scsi、Ceph RBD、Pmem 和 Vhost-SCSI Initiator 等的驱动程序模块。
+* An application API for enumerating and claiming SPDK block devices and then performing operations (read, write, unmap, etc.) on those devices. 一个应用程序 API，用于枚举和声明 SPDK 块设备，然后在这些设备上执行操作（读、写、取消映射等）。
+* Facilities to stack block devices to create complex I/O pipelines, including logical volume management (lvol) and partition support (GPT). 堆叠块设备以创建复杂 I/O 管道的工具，包括逻辑卷管理 (lvol) 和分区支持 (GPT), GUID磁碟分割表（GUID Partition Table，缩写：GPT）是一个實體硬盘的分区表的结构布局的标准。 它是可扩展固件接口（UEFI）标准（被Intel用于替代个人计算机的BIOS）的一部分，被用于替代BIOS系统中的一32bits来存储逻辑块地址和大小信息的主開機紀錄（MBR）分区表
 * Configuration of block devices via JSON-RPC.
 * Request queueing, timeout, and reset handling.
 * Multiple, lockless queues for sending I/O to block devices.
@@ -504,7 +508,7 @@ Example commands
 
 `rpc.py bdev_lvol_create lvol2 25 -u 330a6ab2-f468-11e7-983e-001e67edf35d`
 
-## Passthru {#bdev_config_passthru}
+## Passthru 直通 {#bdev_config_passthru}
 
 The SPDK Passthru virtual block device module serves as an example of how to write a
 virtual block device module. It implements the required functionality of a vbdev module
