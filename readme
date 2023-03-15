@@ -12,4 +12,23 @@ bdev_malloc_create
 
 examples/blob/hello_world/hello_blob.c
 
+块设备：
+创建daos bdev块设备
+daos cont create --pool=test-pool --label=test-cont --type=POSIX
+rpc.py bdev_daos_create daosdev0 test-pool test-cont 64 4096  # 块大小为4096， 共64块, 256KB
+rpc.py bdev_daos_delete daosdev0
+rpc.py bdev_daos_resize daosdev0 819
+
+rpc_bdev_daos_create
+    create_bdev_daos
+        daos = calloc(1, sizeof(*daos))
+        daos->oclass = daos_oclass_name2id(oclass)
+        daos->disk.fn_table = &daos_fn_table
+        bdev_get_daos_engine
+            daos_init
+        bdev_daos_io_channel_create_cb
+        spdk_bdev_register(&daos->disk)
+        *bdev = &(daos->disk)
+
+
 
