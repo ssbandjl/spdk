@@ -20,15 +20,45 @@ rpc.py bdev_daos_delete daosdev0
 rpc.py bdev_daos_resize daosdev0 819
 
 rpc_bdev_daos_create
-    create_bdev_daos
-        daos = calloc(1, sizeof(*daos))
-        daos->oclass = daos_oclass_name2id(oclass)
-        daos->disk.fn_table = &daos_fn_table
-        bdev_get_daos_engine
-            daos_init
-        bdev_daos_io_channel_create_cb
-        spdk_bdev_register(&daos->disk)
-        *bdev = &(daos->disk)
+  create_bdev_daos
+    block_size % 512 512对齐
+    daos->disk.fn_table = &daos_fn_table
+    bdev_get_daos_engine
+      daos_init()
+    bdev_daos_io_channel_create_cb
+      spdk_call_unaffinitized(_bdev_daos_io_channel_create_cb, ch)
+        rte_thread_get_affinity(&orig_cpuset)
+        spdk_unaffinitize_thread() 移除cpu亲和性
+          CPU_ZERO(&new_cpuset)
+        _bdev_daos_io_channel_create_cb
+          bdev_get_daos_engine
+          daos_pool_connect
+          daos_cont_open
+          dfs_mount(ch->pool, ch->cont, O_RDWR, &ch->dfs)
+          dfs_open
+          daos_eq_create
+        rte_thread_set_affinity(&orig_cpuset) 将cpu亲和性设回去
+      ch->poller = SPDK_POLLER_REGISTER(bdev_daos_channel_poll, ch, 0)
+    bdev_daos_io_channel_destroy_cb
+      spdk_poller_unregister
+      daos_eq_destroy
+      dfs_release
+      dfs_umount
+      daos_cont_close
+      daos_pool_disconnect
+      bdev_daos_put_engine
+    spdk_io_device_register(daos, bdev_daos_io_channel_create_cb, bdev_daos_io_channel_destroy_cb
+      thread = spdk_get_thread()
+      dev->create_cb = create_cb
+      dev->destroy_cb = destroy_cb
+      tmp = RB_INSERT(io_device_tree, &g_io_devices, dev) 红黑树
+    spdk_bdev_register
+      bdev_register(bdev)
+      bdev_open
+      bdev_examine
+      spdk_bdev_wait_for_examine(bdev_register_finished, desc)
+    *bdev = &(daos->disk)
+
 
 
 
