@@ -267,6 +267,7 @@ static struct iobuf g_iobuf = {
 	},
 };
 
+/* 红黑树头 */
 static RB_HEAD(io_device_tree, io_device) g_io_devices = RB_INITIALIZER(g_io_devices);
 
 static int

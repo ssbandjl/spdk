@@ -6718,6 +6718,7 @@ bdev_register(struct spdk_bdev *bdev)
 
 	/* Users often register their own I/O devices using the bdev name. In
 	 * order to avoid conflicts, prepend bdev_. */
+  /* 使用bdev_前缀 */
 	bdev_name = spdk_sprintf_alloc("bdev_%s", bdev->name);
 	if (!bdev_name) {
 		SPDK_ERRLOG("Unable to allocate memory for internal bdev name.\n");
@@ -7254,6 +7255,7 @@ spdk_bdev_register(struct spdk_bdev *bdev)
 	struct spdk_bdev_desc *desc;
 	int rc;
 
+  /* app线程与本地线程不相同,则打印提示信息 */
 	if (spdk_unlikely(spdk_thread_get_app_thread() != spdk_get_thread())) {
 		SPDK_LOG_DEPRECATED(bdev_register_examine_thread);
 	}

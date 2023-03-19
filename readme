@@ -49,7 +49,7 @@ rpc_bdev_daos_create
       bdev_daos_put_engine
     spdk_io_device_register(daos, bdev_daos_io_channel_create_cb, bdev_daos_io_channel_destroy_cb
       thread = spdk_get_thread()
-      dev->create_cb = create_cb
+      dev->create_cb = create_cb = bdev_daos_io_channel_create_cb
       dev->destroy_cb = destroy_cb
       tmp = RB_INSERT(io_device_tree, &g_io_devices, dev) 红黑树
     spdk_bdev_register
@@ -58,6 +58,7 @@ rpc_bdev_daos_create
       bdev_examine
       spdk_bdev_wait_for_examine(bdev_register_finished, desc)
     *bdev = &(daos->disk)
+
 
 
 

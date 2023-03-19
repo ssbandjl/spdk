@@ -7,6 +7,7 @@ https://github.com/ssbandjl/spdk/tree/xb
 [NVMe over Fabrics Target](doc/nvmf.md)  
 [Event Framework](doc/event.md)  
 [Blobstore Programmer's Guide](doc/blob.md)  
+[自己写一个块设备(bdev)](doc/bdev_module.md)  
 
 [![Build Status](https://travis-ci.org/spdk/spdk.svg?branch=master)](https://travis-ci.org/spdk/spdk)
 

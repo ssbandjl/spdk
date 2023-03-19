@@ -641,7 +641,7 @@ void spdk_poller_pause(struct spdk_poller *poller);
 void spdk_poller_resume(struct spdk_poller *poller);
 
 /**
- * Register the opaque io_device context as an I/O device.
+ * Register the opaque(不透明) io_device context as an I/O device.
  *
  * After an I/O device is registered, it can return I/O channels using the
  * spdk_get_io_channel() function.
