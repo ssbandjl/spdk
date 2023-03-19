@@ -60,6 +60,7 @@ rpc_bdev_daos_create
     *bdev = &(daos->disk)
 
 
-
+io路径
+hello_world.c
 
 

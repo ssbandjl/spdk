@@ -378,7 +378,7 @@ free_rpc_target_node(struct rpc_target_node *req)
 	free(req->alias_name);
 	free_rpc_luns(&req->luns);
 }
-
+/* ./scripts/rpc.py iscsi_create_target_node disk1 "Data Disk1" "Malloc0:0 Malloc1:1" 1:2 64 -d */
 static const struct spdk_json_object_decoder rpc_target_node_decoders[] = {
 	{"name", offsetof(struct rpc_target_node, name), spdk_json_decode_string},
 	{"alias_name", offsetof(struct rpc_target_node, alias_name), spdk_json_decode_string},
