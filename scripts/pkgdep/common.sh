@@ -93,16 +93,20 @@ install_markdownlint() {
 	local git_repo_mdl="https://github.com/markdownlint/markdownlint.git"
 	local mdl_version="v0.11.0"
 	if [ ! -d /usr/src/markdownlint ]; then
-		sudo -E git clone --branch "$mdl_version" "$git_repo_mdl" "/usr/src/markdownlint"
+		git clone --branch "$mdl_version" "$git_repo_mdl" "/usr/src/markdownlint"
+		#sudo -E git clone --branch "$mdl_version" "$git_repo_mdl" "/usr/src/markdownlint"
 		(
 			cd /usr/src/markdownlint
 			if ! hash rake &> /dev/null; then
-				sudo -E gem install rake
+				gem install rake
+				#sudo -E gem install rake
 			fi
 			if ! hash bundler &> /dev/null; then
-				sudo -E gem install bundler
+				#sudo -E gem install bundler
+				gem install bundler
 			fi
-			sudo -E rake install
+		        rake install
+			#sudo -E rake install
 		)
 	else
 		echo "Markdown lint tool already in /usr/src/markdownlint. Not installing"
