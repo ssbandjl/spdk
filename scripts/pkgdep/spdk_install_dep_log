@@ -1,0 +1,143 @@
+➜  spdk git:(master) ✗ scripts/pkgdep.sh
+➜  spdk git:(master) ✗ bash -x scripts/pkgdep.sh          
++ set -e
++ INSTALL_CRYPTO=false
++ INSTALL_DEV_TOOLS=false
++ INSTALL_PMEM=false
++ INSTALL_FUSE=false
++ INSTALL_RBD=false
++ INSTALL_RDMA=false
++ INSTALL_DOCS=false
++ INSTALL_LIBURING=false
++ INSTALL_DAOS=false
++ INSTALL_AVAHI=false
++ getopts abdfhipruADR-: optchar
++ trap 'set +e; trap - ERR; echo "Error!"; exit 1;' ERR
++++ dirname scripts/pkgdep.sh
+++ readlink -f scripts
++ scriptsdir=/root/project/stor/spdk/xb/spdk/scripts
+++ readlink -f /root/project/stor/spdk/xb/spdk/scripts/..
++ rootdir=/root/project/stor/spdk/xb/spdk
+++ uname -s
++ OS=Linux
++ [[ -e /etc/os-release ]]
++ source /etc/os-release
+++ NAME=Ubuntu
+++ VERSION='20.04.3 LTS (Focal Fossa)'
+++ ID=ubuntu
+++ ID_LIKE=debian
+++ PRETTY_NAME='Ubuntu 20.04.3 LTS'
+++ VERSION_ID=20.04
+++ HOME_URL=https://www.ubuntu.com/
+++ SUPPORT_URL=https://help.ubuntu.com/
+++ BUG_REPORT_URL=https://bugs.launchpad.net/ubuntu/
+++ PRIVACY_POLICY_URL=https://www.ubuntu.com/legal/terms-and-policies/privacy-policy
+++ VERSION_CODENAME=focal
+++ UBUNTU_CODENAME=focal
++ ID=ubuntu
++ [[ ubuntu == *\s\u\s\e* ]]
++ for id in $ID $ID_LIKE
++ [[ -e /root/project/stor/spdk/xb/spdk/scripts/pkgdep/ubuntu.sh ]]
++ source /root/project/stor/spdk/xb/spdk/scripts/pkgdep/ubuntu.sh
++++ sed 's/\.//g'
+++ VERSION_ID_NUM=2004
+++ apt-get install -y gcc g++ make libcunit1-dev libaio-dev libssl-dev libjson-c-dev libcmocka-dev uuid-dev libiscsi-dev
+正在读取软件包列表... 完成
+正在分析软件包的依赖关系树       
+正在读取状态信息... 完成       
+g++ 已经是最新版 (4:9.3.0-1ubuntu2)。
+gcc 已经是最新版 (4:9.3.0-1ubuntu2)。
+libaio-dev 已经是最新版 (0.3.112-5)。
+libiscsi-dev 已经是最新版 (1.18.0-2)。
+make 已经是最新版 (4.2.1-1.2)。
+libcmocka-dev 已经是最新版 (1.1.5-2)。
+libcunit1-dev 已经是最新版 (2.1-3-dfsg-2build1)。
+libjson-c-dev 已经是最新版 (0.13.1+dfsg-7ubuntu0.3)。
+libssl-dev 已经是最新版 (1.1.1f-1ubuntu2.17)。
+uuid-dev 已经是最新版 (2.34-0.1ubuntu9.3)。
+升级了 0 个软件包，新安装了 0 个软件包，要卸载 0 个软件包，有 165 个软件包未被升级。
+++ [[ Ubuntu == \U\b\u\n\t\u ]]
+++ [[ 2004 -ge 2204 ]]
+++ apt-get install -y python
+正在读取软件包列表... 完成
+正在分析软件包的依赖关系树       
+正在读取状态信息... 完成       
+注意，选中 'python-is-python2' 而非 'python'
+python-is-python2 已经是最新版 (2.7.17-4)。
+升级了 0 个软件包，新安装了 0 个软件包，要卸载 0 个软件包，有 165 个软件包未被升级。
+++ apt-get install -y libncurses5-dev libncursesw5-dev python3-pip python3-dev
+正在读取软件包列表... 完成
+正在分析软件包的依赖关系树       
+正在读取状态信息... 完成       
+libncurses5-dev 已经是最新版 (6.2-0ubuntu2)。
+libncursesw5-dev 已经是最新版 (6.2-0ubuntu2)。
+python3-dev 已经是最新版 (3.8.2-0ubuntu2)。
+python3-dev 已设置为手动安装。
+python3-pip 已经是最新版 (20.0.2-5ubuntu1.8)。
+升级了 0 个软件包，新安装了 0 个软件包，要卸载 0 个软件包，有 165 个软件包未被升级。
+++ pip3 install ninja
+Requirement already satisfied: ninja in /usr/local/lib/python3.8/dist-packages (1.11.1)
+++ pip3 install meson
+Requirement already satisfied: meson in /usr/local/lib/python3.8/dist-packages (0.64.1)
+++ pip3 install pyelftools
+Requirement already satisfied: pyelftools in /usr/local/lib/python3.8/dist-packages (0.29)
+++ pip3 install ijson
+Requirement already satisfied: ijson in /usr/local/lib/python3.8/dist-packages (3.1.4)
+++ pip3 install python-magic
+Requirement already satisfied: python-magic in /usr/local/lib/python3.8/dist-packages (0.4.27)
+++ pip3 install grpcio
+Requirement already satisfied: grpcio in /usr/local/lib/python3.8/dist-packages (1.51.1)
+++ pip3 install grpcio-tools
+Requirement already satisfied: grpcio-tools in /usr/local/lib/python3.8/dist-packages (1.51.1)
+Requirement already satisfied: grpcio>=1.51.1 in /usr/local/lib/python3.8/dist-packages (from grpcio-tools) (1.51.1)
+Requirement already satisfied: protobuf<5.0dev,>=4.21.6 in /usr/local/lib/python3.8/dist-packages (from grpcio-tools) (4.21.12)
+Requirement already satisfied: setuptools in /usr/lib/python3/dist-packages (from grpcio-tools) (45.2.0)
+++ pip3 install pyyaml
+Requirement already satisfied: pyyaml in /usr/lib/python3/dist-packages (5.3.1)
+++ apt-get install -y python3-configshell-fb python3-pexpect
+正在读取软件包列表... 完成
+正在分析软件包的依赖关系树       
+正在读取状态信息... 完成       
+python3-pexpect 已经是最新版 (4.6.0-1build1)。
+python3-configshell-fb 已经是最新版 (1:1.1.27-0ubuntu1)。
+升级了 0 个软件包，新安装了 0 个软件包，要卸载 0 个软件包，有 165 个软件包未被升级。
+++ [[ Ubuntu == \U\b\u\n\t\u ]]
+++ [[ 2004 -lt 1900 ]]
+++ apt-get install -y nasm
+正在读取软件包列表... 完成
+正在分析软件包的依赖关系树       
+正在读取状态信息... 完成       
+nasm 已经是最新版 (2.14.02-1)。
+升级了 0 个软件包，新安装了 0 个软件包，要卸载 0 个软件包，有 165 个软件包未被升级。
+++ apt-get install -y libnuma-dev
+正在读取软件包列表... 完成
+正在分析软件包的依赖关系树       
+正在读取状态信息... 完成       
+libnuma-dev 已经是最新版 (2.0.12-1)。
+升级了 0 个软件包，新安装了 0 个软件包，要卸载 0 个软件包，有 165 个软件包未被升级。
+++ apt-get install -y autoconf automake libtool help2man
+正在读取软件包列表... 完成
+正在分析软件包的依赖关系树       
+正在读取状态信息... 完成       
+autoconf 已经是最新版 (2.69-11.1)。
+automake 已经是最新版 (1:1.16.1-4ubuntu6)。
+libtool 已经是最新版 (2.4.6-14)。
+help2man 已经是最新版 (1.47.13)。
+升级了 0 个软件包，新安装了 0 个软件包，要卸载 0 个软件包，有 165 个软件包未被升级。
+++ apt-get install -y systemtap-sdt-dev
+正在读取软件包列表... 完成
+正在分析软件包的依赖关系树       
+正在读取状态信息... 完成       
+systemtap-sdt-dev 已经是最新版 (4.2-3ubuntu0.1)。
+升级了 0 个软件包，新安装了 0 个软件包，要卸载 0 个软件包，有 165 个软件包未被升级。
+++ [[ false == \t\r\u\e ]]
+++ [[ false == \t\r\u\e ]]
+++ [[ false == \t\r\u\e ]]
+++ [[ false == \t\r\u\e ]]
+++ [[ false == \t\r\u\e ]]
+++ [[ false == \t\r\u\e ]]
+++ [[ false == \t\r\u\e ]]
++ source /root/project/stor/spdk/xb/spdk/scripts/pkgdep/common.sh
+++ [[ false == true ]]
+++ [[ false == true ]]
++ exit 0

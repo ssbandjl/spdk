@@ -90,7 +90,7 @@ while getopts 'abdfhipruADR-:' optchar; do
 			;;
 	esac
 done
-
+# 捕获异常
 trap 'set +e; trap - ERR; echo "Error!"; exit 1;' ERR
 
 scriptsdir=$(readlink -f $(dirname $0))

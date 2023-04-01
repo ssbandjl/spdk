@@ -1,0 +1,22 @@
+spdk
+
+安装依赖:
+sudo scripts/pkgdep.sh
+sudo scripts/pkgdep.sh --all
+# 捕获异常
+trap 'set +e; trap - ERR; echo "Error!"; exit 1;' ERR
+
+
+
+
+demo: 从hello_world程序来剖析SDPK NVMe用户态驱动，对NVMe盘的初始化、管理和读写操作
+examples/nvme/hello_world/hello_world.c -> main
+spdk_env_opts_init(&opts)
+
+
+example
+打印所有nvme设备： build/examples/identify.c
+
+app more example
+
+
