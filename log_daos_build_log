@@ -1,0 +1,801 @@
+Checking for C header file spdk/nvme.h... (cached) yes
+Checking for C header file dpdk/rte_eal.h... (cached) yes
+
+rebuild:spdk for change:True, has_miss_tgt:False
+Downloading source for spdk, crc_file /home/daos/docker/daos/build/external/debug/_spdk.crc
+dir_name_cache:cache/spdk, url:https://github.com/spdk/spdk.git, subdir:/home/daos/docker/daos/build/external/debug/spdk, parent_dir:/home/daos/docker/daos/build/external/debug
+Running commands in /home/daos/docker/daos
+command:cp -r cache/spdk /home/daos/docker/daos/build/external/debug/spdk
+Running commands in /home/daos/docker/daos/build/external/debug/spdk
+command:git checkout v21.07
+M       configure
+M       dpdk
+M       include/spdk/pci_ids.h
+M       lib/blob/blobstore.c
+M       lib/env_dpdk/init.c
+M       lib/env_dpdk/pci_vmd.c
+M       lib/vmd/vmd.c
+M       lib/vmd/vmd.h
+M       lib/vmd/vmd_spec.h
+HEAD is now at adeb049... SPDK 21.07
+Running commands in /home/daos/docker/daos/build/external/debug/spdk
+command:git submodule init
+command:git submodule update
+Checking whether patchelf program exists.../bin/patchelf
+Running commands in /home/daos/docker/daos/build/external/debug/spdk
+command:./configure --prefix="/opt/daos/prereq/debug/spdk" --without-crypto --with-rdma --disable-unit-tests --enable-examples --without-isal --without-vtune --with-shared
++ trap 'echo -e "\n\nConfiguration failed\n\n" >&2' ERR
++++ dirname ./configure
+++ readlink -f .
++ rootdir=/home/daos/docker/daos/build/external/debug/spdk
++ source /home/daos/docker/daos/build/external/debug/spdk/scripts/common.sh
+++ [[ -e /bin/wpdk_common.sh ]]
++ sed -r 's/CONFIG_([[:alnum:]_]+)=(.*)/CONFIG[\1]=\2/g' /home/daos/docker/daos/build/external/debug/spdk/CONFIG
++ declare -A CONFIG
++ source /home/daos/docker/daos/build/external/debug/spdk/CONFIG.sh
+++ CONFIG[PREFIX]=/usr/local
+++ CONFIG[ARCH]=native
+++ CONFIG[CROSS_PREFIX]=
+++ CONFIG[DEBUG]=n
+++ CONFIG[WERROR]=n
+++ CONFIG[LTO]=n
+++ CONFIG[PGO_CAPTURE]=n
+++ CONFIG[PGO_USE]=n
+++ CONFIG[COVERAGE]=n
+++ CONFIG[ASAN]=n
+++ CONFIG[UBSAN]=n
+++ CONFIG[TSAN]=n
+++ CONFIG[TESTS]=y
+++ CONFIG[UNIT_TESTS]=y
+++ CONFIG[EXAMPLES]=y
+++ CONFIG[APPS]=y
+++ CONFIG[CET]=n
+++ CONFIG[ENV]=
+++ CONFIG[DPDK_DIR]=
+++ CONFIG[DPDK_LIB_DIR]=
+++ CONFIG[DPDK_INC_DIR]=
+++ CONFIG[DPDK_PKG_CONFIG]=n
+++ CONFIG[WPDK_DIR]=
+++ CONFIG[FIO_PLUGIN]=n
+++ CONFIG[FIO_SOURCE_DIR]=/usr/src/fio
+++ CONFIG[RDMA]=n
+++ CONFIG[RDMA_SEND_WITH_INVAL]=n
+++ CONFIG[RDMA_SET_ACK_TIMEOUT]=n
+++ CONFIG[RDMA_PROV]=verbs
+++ CONFIG[NVME_CUSE]=n
+++ CONFIG[FC]=n
+++ CONFIG[FC_PATH]=
+++ CONFIG[RBD]=n
+++ CONFIG[VHOST]=y
+++ CONFIG[VIRTIO]=y
+++ CONFIG[VFIO_USER]=n
+++ CONFIG[VFIO_USER_DIR]=
+++ CONFIG[PMDK]=n
+++ CONFIG[PMDK_DIR]=
+++ CONFIG[REDUCE]=n
+++ CONFIG[ISCSI_INITIATOR]=n
+++ CONFIG[CRYPTO]=n
+++ CONFIG[SHARED]=n
+++ CONFIG[VTUNE]=n
+++ CONFIG[VTUNE_DIR]=
+++ CONFIG[IPSEC_MB]=n
+++ CONFIG[OCF]=n
+++ CONFIG[OCF_PATH]=
+++ CONFIG[CUSTOMOCF]=n
+++ CONFIG[ISAL]=y
+++ CONFIG[URING]=n
+++ CONFIG[URING_PATH]=
+++ CONFIG[FUSE]=n
+++ CONFIG[RAID5]=n
+++ CONFIG[IDXD]=n
+++ CONFIG[USDT]=n
+++ CONFIG[IDXD_KERNEL]=n
++ rm /home/daos/docker/daos/build/external/debug/spdk/CONFIG.sh
++ for i in '"$@"'
++ case "$i" in
++ for i in '"$@"'
++ case "$i" in
++ for i in '"$@"'
++ case "$i" in
++ for i in '"$@"'
++ case "$i" in
++ for i in '"$@"'
++ case "$i" in
++ for i in '"$@"'
++ case "$i" in
++ for i in '"$@"'
++ case "$i" in
++ for i in '"$@"'
++ case "$i" in
++ /home/daos/docker/daos/build/external/debug/spdk/scripts/detect_cc.sh --cc= --cxx= --lto=n --ld= --cross-prefix=
+++ grep DEFAULT_CC= /home/daos/docker/daos/build/external/debug/spdk/mk/cc.mk
+++ sed s/DEFAULT_CC=//
++ CC=cc
+++ grep CC_TYPE= /home/daos/docker/daos/build/external/debug/spdk/mk/cc.mk
+++ cut -d = -f 2
++ CC_TYPE=gcc
+++ cc -dumpmachine
++ arch=x86_64-redhat-linux
+++ uname -s
++ sys_name=Linux
++ [[ x86_64-redhat-linux == *mingw* ]]
++ [[ x86_64-redhat-linux == *windows* ]]
++ [[ y = \y ]]
++ [[ x86_64-redhat-linux != x86_64* ]]
++ [[ Linux != \L\i\n\u\x ]]
++ [[ x86_64-redhat-linux == x86_64* ]]
+++ nasm -v
+++ awk '{print $3}'
+++ awk -Fr '{print $1}'
++ ver=
++ lt '' 2.14
++ cmp_versions '' '<' 2.14
++ local ver1 ver1_l
++ local ver2 ver2_l
++ IFS=.-:
++ read -ra ver1
++ IFS=.-:
++ read -ra ver2
++ local 'op=<'
++ ver1_l=0
++ ver2_l=2
++ local lt=0 gt=0 eq=0 v
++ case "$op" in
++ : 1
++ (( v = 0 ))
++ (( v < (ver1_l > ver2_l ? ver1_l : ver2_l) ))
+++ decimal ''
+++ local d=
+++ [[ '' =~ ^[0-9]+$ ]]
+++ [[ '' =~ ^0x ]]
+++ [[ '' =~ ^[a-f0-9]+$ ]]
+++ echo 0
++ ver1[v]=0
+++ decimal 2
+++ local d=2
+++ [[ 2 =~ ^[0-9]+$ ]]
+++ echo 2
++ ver2[v]=2
++ (( ver1[v] > ver2[v] ))
++ (( ver1[v] < ver2[v] ))
++ return 0
++ CONFIG[ISAL]=n
++ CONFIG[CRYPTO]=n
++ CONFIG[IPSEC_MB]=n
++ CONFIG[REDUCE]=n
++ HAVE_NASM=n
++ echo 'Notice: ISA-L, compression & crypto require NASM version 2.14 or newer. Turning off default ISA-L and crypto features.'
+Notice: ISA-L, compression & crypto require NASM version 2.14 or newer. Turning off default ISA-L and crypto features.
++ for i in '"$@"'
++ case "$i" in
++ CONFIG[PREFIX]=/opt/daos/prereq/debug/spdk
++ for i in '"$@"'
++ case "$i" in
++ CONFIG[CRYPTO]=n
++ for i in '"$@"'
++ case "$i" in
++ CONFIG[RDMA]=y
++ CONFIG[RDMA_PROV]=verbs
++ for i in '"$@"'
++ case "$i" in
++ CONFIG[UNIT_TESTS]=n
++ for i in '"$@"'
++ case "$i" in
++ CONFIG[EXAMPLES]=y
++ for i in '"$@"'
++ case "$i" in
++ CONFIG[ISAL]=n
++ for i in '"$@"'
++ case "$i" in
++ CONFIG[VTUNE_DIR]=
++ CONFIG[VTUNE]=n
++ for i in '"$@"'
++ case "$i" in
++ CONFIG[SHARED]=y
++ [[ x86_64-redhat-linux == x86_64* ]]
++ BUILD_CMD=("$CC" -o /dev/null -x c $CPPFLAGS $CFLAGS $LDFLAGS "-march=native")
++ BUILD_CMD+=(-I/usr/local/include -L/usr/local/lib)
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \n ]]
++ [[ n = \y ]]
++ '[' -z '' ']'
++ CONFIG[ENV]=/home/daos/docker/daos/build/external/debug/spdk/lib/env_dpdk
++ echo 'Using default SPDK env in /home/daos/docker/daos/build/external/debug/spdk/lib/env_dpdk'
+Using default SPDK env in /home/daos/docker/daos/build/external/debug/spdk/lib/env_dpdk
++ [[ -z '' ]]
++ [[ n == n ]]
++ '[' '!' -f /home/daos/docker/daos/build/external/debug/spdk/dpdk/config/meson.build ']'
++ CONFIG[DPDK_DIR]=/home/daos/docker/daos/build/external/debug/spdk/dpdk/build
++ echo 'Using default DPDK in /home/daos/docker/daos/build/external/debug/spdk/dpdk/build'
+Using default DPDK in /home/daos/docker/daos/build/external/debug/spdk/dpdk/build
++ [[ n == y ]]
++ [[ Linux == \W\i\n\d\o\w\s ]]
++ '[' -n '' ']'
++ '[' n = y ']'
++ [[ n = \y ]]
++ [[ Linux == \F\r\e\e\B\S\D ]]
++ [[ Linux != \L\i\n\u\x ]]
++ '[' y = y ']'
++ [[ ! verbs == \v\e\r\b\s ]]
++ echo -e '#include <infiniband/verbs.h>\n#include <rdma/rdma_verbs.h>\n' 'int main(void) { return 0; }\n'
++ cc -o /dev/null -x c -march=native -I/usr/local/include -L/usr/local/lib -libverbs -lrdmacm -
++ echo -e '#include <infiniband/verbs.h>\n' 'int main(void) { return !!IBV_WR_SEND_WITH_INV; }\n'
++ cc -o /dev/null -x c -march=native -I/usr/local/include -L/usr/local/lib -c -
++ CONFIG[RDMA_SEND_WITH_INVAL]=y
++ echo -e '#include <rdma/rdma_cma.h>\n' 'int main(void) { return !!RDMA_OPTION_ID_ACK_TIMEOUT; }\n'
++ cc -o /dev/null -x c -march=native -I/usr/local/include -L/usr/local/lib -c -
++ CONFIG[RDMA_SET_ACK_TIMEOUT]=n
++ echo 'RDMA_OPTION_ID_ACK_TIMEOUT is not supported'
+RDMA_OPTION_ID_ACK_TIMEOUT is not supported
++ '[' verbs == mlx5_dv ']'
++ echo 'Using '\''verbs'\'' RDMA provider'
+Using 'verbs' RDMA provider
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \y ]]
++ [[ n = \y ]]
++ '[' n = y ']'
++ [[ n = \y ]]
++ [[ n = \y ]]
+++ grep -cE '^\s*CONFIG_[[:alnum:]_]+=' /home/daos/docker/daos/build/external/debug/spdk/CONFIG
++ (( 57 != 57 ))
++ echo -n 'Creating mk/config.mk...'
+Creating mk/config.mk...+ cp -f /home/daos/docker/daos/build/external/debug/spdk/CONFIG /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_RDMA=.*#CONFIG_RDMA\?=y#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_CROSS_PREFIX=.*#CONFIG_CROSS_PREFIX\?=#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_UNIT_TESTS=.*#CONFIG_UNIT_TESTS\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_PGO_USE=.*#CONFIG_PGO_USE\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_FUSE=.*#CONFIG_FUSE\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_ISAL=.*#CONFIG_ISAL\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_VTUNE_DIR=.*#CONFIG_VTUNE_DIR\?=#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_CUSTOMOCF=.*#CONFIG_CUSTOMOCF\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_CRYPTO=.*#CONFIG_CRYPTO\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_EXAMPLES=.*#CONFIG_EXAMPLES\?=y#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_OCF_PATH=.*#CONFIG_OCF_PATH\?=#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_SHARED=.*#CONFIG_SHARED\?=y#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_DPDK_INC_DIR=.*#CONFIG_DPDK_INC_DIR\?=#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_DPDK_LIB_DIR=.*#CONFIG_DPDK_LIB_DIR\?=#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_VIRTIO=.*#CONFIG_VIRTIO\?=y#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_ENV=.*#CONFIG_ENV\?=/home/daos/docker/daos/build/external/debug/spdk/lib/env_dpdk#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_TESTS=.*#CONFIG_TESTS\?=y#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_IPSEC_MB=.*#CONFIG_IPSEC_MB\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_APPS=.*#CONFIG_APPS\?=y#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_UBSAN=.*#CONFIG_UBSAN\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_DPDK_DIR=.*#CONFIG_DPDK_DIR\?=/home/daos/docker/daos/build/external/debug/spdk/dpdk/build#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_ISCSI_INITIATOR=.*#CONFIG_ISCSI_INITIATOR\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_DPDK_PKG_CONFIG=.*#CONFIG_DPDK_PKG_CONFIG\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_ASAN=.*#CONFIG_ASAN\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_LTO=.*#CONFIG_LTO\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_CET=.*#CONFIG_CET\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_URING_PATH=.*#CONFIG_URING_PATH\?=#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_USDT=.*#CONFIG_USDT\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_VTUNE=.*#CONFIG_VTUNE\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_VHOST=.*#CONFIG_VHOST\?=y#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_RAID5=.*#CONFIG_RAID5\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_NVME_CUSE=.*#CONFIG_NVME_CUSE\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_WPDK_DIR=.*#CONFIG_WPDK_DIR\?=#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_URING=.*#CONFIG_URING\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_PMDK_DIR=.*#CONFIG_PMDK_DIR\?=#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_VFIO_USER=.*#CONFIG_VFIO_USER\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_RDMA_SEND_WITH_INVAL=.*#CONFIG_RDMA_SEND_WITH_INVAL\?=y#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_IDXD_KERNEL=.*#CONFIG_IDXD_KERNEL\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_FC_PATH=.*#CONFIG_FC_PATH\?=#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_FC=.*#CONFIG_FC\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_PMDK=.*#CONFIG_PMDK\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_RDMA_SET_ACK_TIMEOUT=.*#CONFIG_RDMA_SET_ACK_TIMEOUT\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_PREFIX=.*#CONFIG_PREFIX\?=/opt/daos/prereq/debug/spdk#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_RDMA_PROV=.*#CONFIG_RDMA_PROV\?=verbs#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_RBD=.*#CONFIG_RBD\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_ARCH=.*#CONFIG_ARCH\?=native#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_PGO_CAPTURE=.*#CONFIG_PGO_CAPTURE\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_REDUCE=.*#CONFIG_REDUCE\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_VFIO_USER_DIR=.*#CONFIG_VFIO_USER_DIR\?=#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_FIO_SOURCE_DIR=.*#CONFIG_FIO_SOURCE_DIR\?=/usr/src/fio#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_TSAN=.*#CONFIG_TSAN\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_IDXD=.*#CONFIG_IDXD\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_WERROR=.*#CONFIG_WERROR\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_OCF=.*#CONFIG_OCF\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_FIO_PLUGIN=.*#CONFIG_FIO_PLUGIN\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_DEBUG=.*#CONFIG_DEBUG\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ for key in '"${!CONFIG[@]}"'
++ sed -i.bak -r 's#[[:space:]]*CONFIG_COVERAGE=.*#CONFIG_COVERAGE\?=n#g' /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk
++ rm -f /home/daos/docker/daos/build/external/debug/spdk/mk/config.mk.bak
++ echo done.
+done.
++ echo -n 'Creating mk/cc.flags.mk...'
+Creating mk/cc.flags.mk...+ rm -f /home/daos/docker/daos/build/external/debug/spdk/mk/cc.flags.mk
++ '[' -n '' ']'
++ '[' -n '' ']'
++ '[' -n '' ']'
++ '[' -n '' ']'
++ echo done.
+done.
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_RDMA=y
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_CROSS_PREFIX=
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_UNIT_TESTS=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_PGO_USE=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_FUSE=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_ISAL=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_VTUNE_DIR=
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_CUSTOMOCF=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_CRYPTO=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_EXAMPLES=y
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_OCF_PATH=
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_SHARED=y
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_DPDK_INC_DIR=
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_DPDK_LIB_DIR=
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_VIRTIO=y
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_ENV=/home/daos/docker/daos/build/external/debug/spdk/lib/env_dpdk
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_TESTS=y
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_IPSEC_MB=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_APPS=y
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_UBSAN=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_DPDK_DIR=/home/daos/docker/daos/build/external/debug/spdk/dpdk/build
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_ISCSI_INITIATOR=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_DPDK_PKG_CONFIG=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_ASAN=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_LTO=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_CET=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_URING_PATH=
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_USDT=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_VTUNE=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_VHOST=y
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_RAID5=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_NVME_CUSE=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_WPDK_DIR=
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_URING=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_PMDK_DIR=
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_VFIO_USER=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_RDMA_SEND_WITH_INVAL=y
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_IDXD_KERNEL=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_FC_PATH=
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_FC=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_PMDK=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_RDMA_SET_ACK_TIMEOUT=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_PREFIX=/opt/daos/prereq/debug/spdk
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_RDMA_PROV=verbs
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_RBD=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_ARCH=native
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_PGO_CAPTURE=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_REDUCE=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_VFIO_USER_DIR=
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_FIO_SOURCE_DIR=/usr/src/fio
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_TSAN=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_IDXD=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_WERROR=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_OCF=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_FIO_PLUGIN=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_DEBUG=n
++ for conf in '"${!CONFIG[@]}"'
++ echo CONFIG_COVERAGE=n
++ [[ Linux == \F\r\e\e\B\S\D ]]
++ echo 'Type '\''make'\'' to build.'
+Type 'make' to build.
++ exit 0
+command:make -j 1
+The Meson build system
+Version: 0.55.1
+Source dir: /home/daos/docker/daos/build/external/debug/spdk/dpdk
+Build dir: /home/daos/docker/daos/build/external/debug/spdk/dpdk/build-tmp
+Build type: native build
+Program cat found: YES
+Project name: DPDK
+Project version: 21.05.0
+Using 'CC' from environment with value: 'cc'
+Using 'CC' from environment with value: 'cc'
+C compiler for the host machine: cc (gcc 4.8.5 "cc (GCC) 4.8.5 20150623 (Red Hat 4.8.5-44)")
+C linker for the host machine: cc ld.bfd 2.27-44
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Program pkg-config found: YES
+Program check-symbols.sh found: YES
+Program options-ibverbs-static.sh found: YES
+Program binutils-avx512-check.sh found: YES
+Program python3 found: YES (/usr/bin/python3)
+Program cat found: YES
+Program ../buildtools/symlink-drivers-solibs.sh found: YES (/bin/sh /home/daos/docker/daos/build/external/debug/spdk/dpdk/config/../buildtools/symlink-drivers-solibs.sh)
+Checking for size of "void *" : 8
+Checking for size of "void *" : 8
+Library m found: YES
+Library numa found: YES
+Has header "numaif.h" : YES 
+Library libfdt found: NO
+Library libexecinfo found: NO
+Found pkg-config: /bin/pkg-config (0.27.1)
+Run-time dependency libbsd found: NO (tried pkgconfig)
+Run-time dependency libpcap found: NO (tried pkgconfig)
+Library pcap found: NO
+Compiler for C supports arguments -Wextra: YES 
+config/meson.build:245: WARNING: Consider using the built-in warning_level option instead of using "-Wextra".
+Compiler for C supports arguments -Wcast-qual: YES 
+Compiler for C supports arguments -Wdeprecated: YES 
+Compiler for C supports arguments -Wformat: YES 
+Compiler for C supports arguments -Wformat-nonliteral: YES 
+Compiler for C supports arguments -Wformat-security: YES 
+Compiler for C supports arguments -Wmissing-declarations: YES 
+Compiler for C supports arguments -Wmissing-prototypes: YES 
+Compiler for C supports arguments -Wnested-externs: YES 
+Compiler for C supports arguments -Wold-style-definition: YES 
+Compiler for C supports arguments -Wpointer-arith: YES 
+Compiler for C supports arguments -Wsign-compare: YES 
+Compiler for C supports arguments -Wstrict-prototypes: YES 
+Compiler for C supports arguments -Wundef: YES 
+Compiler for C supports arguments -Wwrite-strings: YES 
+Compiler for C supports arguments -Wno-address-of-packed-member -Waddress-of-packed-member: NO 
+Compiler for C supports arguments -Wno-packed-not-aligned -Wpacked-not-aligned: NO 
+Compiler for C supports arguments -Wno-missing-field-initializers -Wmissing-field-initializers: YES 
+Fetching value of define "__SSE4_2__" : 1 
+Fetching value of define "__AES__" : 1 
+Fetching value of define "__AVX__" : 1 
+Fetching value of define "__AVX2__" : 1 
+Fetching value of define "__AVX512BW__" :  
+Fetching value of define "__AVX512CD__" :  
+Fetching value of define "__AVX512DQ__" :  
+Fetching value of define "__AVX512F__" :  
+Fetching value of define "__AVX512VL__" :  
+Fetching value of define "__PCLMUL__" : 1 
+Fetching value of define "__RDRND__" : 1 
+Fetching value of define "__RDSEED__" : 1 
+Fetching value of define "__VPCLMULQDQ__" :  
+Compiler for C supports arguments -Wno-format-truncation -Wformat-truncation: NO 
+Checking for function "getentropy" : NO 
+Fetching value of define "__PCLMUL__" : 1 (cached)
+Fetching value of define "__AVX512F__" :  (cached)
+Compiler for C supports arguments -mpclmul: YES 
+Compiler for C supports arguments -maes: YES 
+Compiler for C supports arguments -mavx512f: NO 
+Run-time dependency jansson found: NO (tried pkgconfig)
+Fetching value of define "__AVX2__" : 1 (cached)
+Fetching value of define "__AVX512F__" :  (cached)
+Fetching value of define "__AVX512VL__" :  (cached)
+Fetching value of define "__AVX512CD__" :  (cached)
+Fetching value of define "__AVX512BW__" :  (cached)
+Compiler for C supports arguments -mavx512f -mavx512vl -mavx512cd -mavx512bw: NO 
+Has header "linux/userfaultfd.h" : YES 
+Fetching value of define "__AVX512F__" :  (cached)
+Fetching value of define "__AVX512DQ__" :  (cached)
+Compiler for C supports arguments -mavx512f -mavx512dq: NO 
+Run-time dependency libelf found: NO (tried pkgconfig)
+Compiler for C supports arguments -Wno-format-truncation -Wformat-truncation: NO (cached)
+Program doxygen found: NO
+Program sphinx-build found: NO
+Configuring rte_build_config.h using configuration
+Message: 
+=================
+Libraries Enabled
+=================
+
+libs:
+        kvargs, telemetry, eal, ring, rcu, mempool, mbuf, net, 
+        meter, ethdev, pci, cmdline, hash, timer, compressdev, cryptodev, 
+        power, reorder, security, vhost, 
+
+Message: 
+===============
+Drivers Enabled
+===============
+
+common:
+
+bus:
+        pci, vdev, 
+mempool:
+        ring, 
+net:
+
+raw:
+
+crypto:
+
+compress:
+
+regex:
+
+vdpa:
+
+event:
+
+baseband:
+
+
+Message: 
+=================
+Content Skipped
+=================
+
+libs:
+        metrics:        not needed by SPDK
+        acl:    not needed by SPDK
+        bbdev:  not needed by SPDK
+        bitratestats:   not needed by SPDK
+        cfgfile:        not needed by SPDK
+        distributor:    not needed by SPDK
+        efd:    not needed by SPDK
+        eventdev:       not needed by SPDK
+        gro:    not needed by SPDK
+        gso:    not needed by SPDK
+        ip_frag:        not needed by SPDK
+        jobstats:       not needed by SPDK
+        kni:    not needed by SPDK
+        latencystats:   not needed by SPDK
+        lpm:    not needed by SPDK
+        member: not needed by SPDK
+        pdump:  not needed by SPDK
+        rawdev: not needed by SPDK
+        regexdev:       not needed by SPDK
+        rib:    not needed by SPDK
+        sched:  not needed by SPDK
+        stack:  not needed by SPDK
+        ipsec:  not needed by SPDK
+        fib:    not needed by SPDK
+        port:   not needed by SPDK
+        table:  not needed by SPDK
+        pipeline:       not needed by SPDK
+        flow_classify:  not needed by SPDK
+        bpf:    not needed by SPDK
+        graph:  not needed by SPDK
+        node:   not needed by SPDK
+
+drivers:
+        common/cpt:     explicitly disabled via build config
+        common/dpaax:   explicitly disabled via build config
+        common/iavf:    explicitly disabled via build config
+        common/mvep:    explicitly disabled via build config
+        common/octeontx:        explicitly disabled via build config
+        common/octeontx2:       explicitly disabled via build config
+        bus/dpaa:       explicitly disabled via build config
+        bus/fslmc:      explicitly disabled via build config
+        bus/ifpga:      explicitly disabled via build config
+        bus/vmbus:      explicitly disabled via build config
+        common/cnxk:    explicitly disabled via build config
+        common/mlx5:    explicitly disabled via build config
+        common/qat:     explicitly disabled via build config
+        common/sfc_efx: explicitly disabled via build config
+        mempool/bucket: explicitly disabled via build config
+        mempool/cnxk:   explicitly disabled via build config
+        mempool/dpaa:   explicitly disabled via build config
+        mempool/dpaa2:  explicitly disabled via build config
+        mempool/octeontx:       explicitly disabled via build config
+        mempool/octeontx2:      explicitly disabled via build config
+        mempool/stack:  explicitly disabled via build config
+        net/af_packet:  explicitly disabled via build config
+        net/af_xdp:     explicitly disabled via build config
+        net/ark:        explicitly disabled via build config
+        net/atlantic:   explicitly disabled via build config
+        net/avp:        explicitly disabled via build config
+        net/axgbe:      explicitly disabled via build config
+        net/bnx2x:      explicitly disabled via build config
+        net/bnxt:       explicitly disabled via build config
+        net/bonding:    explicitly disabled via build config
+        net/cxgbe:      explicitly disabled via build config
+        net/dpaa:       explicitly disabled via build config
+        net/dpaa2:      explicitly disabled via build config
+        net/e1000:      explicitly disabled via build config
+        net/ena:        explicitly disabled via build config
+        net/enetc:      explicitly disabled via build config
+        net/enic:       explicitly disabled via build config
+        net/failsafe:   explicitly disabled via build config
+        net/fm10k:      explicitly disabled via build config
+        net/hinic:      explicitly disabled via build config
+        net/hns3:       explicitly disabled via build config
+        net/i40e:       explicitly disabled via build config
+        net/iavf:       explicitly disabled via build config
+        net/ice:        explicitly disabled via build config
+        net/igc:        explicitly disabled via build config
+        net/ionic:      explicitly disabled via build config
+        net/ipn3ke:     explicitly disabled via build config
+        net/ixgbe:      explicitly disabled via build config
+        net/kni:        explicitly disabled via build config
+        net/liquidio:   explicitly disabled via build config
+        net/memif:      explicitly disabled via build config
+        net/mlx4:       explicitly disabled via build config
+        net/mlx5:       explicitly disabled via build config
+        net/mvneta:     explicitly disabled via build config
+        net/mvpp2:      explicitly disabled via build config
+        net/netvsc:     explicitly disabled via build config
+        net/nfb:        explicitly disabled via build config
+        net/nfp:        explicitly disabled via build config
+        net/null:       explicitly disabled via build config
+        net/octeontx:   explicitly disabled via build config
+        net/octeontx2:  explicitly disabled via build config
+        net/octeontx_ep:        explicitly disabled via build config
+        net/pcap:       explicitly disabled via build config
+        net/pfe:        explicitly disabled via build config
+        net/qede:       explicitly disabled via build config
+        net/ring:       explicitly disabled via build config
+        net/sfc:        explicitly disabled via build config
+        net/softnic:    explicitly disabled via build config
+        net/szedata2:   explicitly disabled via build config
+        net/tap:        explicitly disabled via build config
+        net/thunderx:   explicitly disabled via build config
+        net/txgbe:      explicitly disabled via build config
+        net/vdev_netvsc:        explicitly disabled via build config
+        net/vhost:      explicitly disabled via build config
+        net/virtio:     explicitly disabled via build config
+        net/vmxnet3:    explicitly disabled via build config
+        raw/dpaa2_cmdif:        explicitly disabled via build config
+        raw/dpaa2_qdma: explicitly disabled via build config
+        raw/ifpga:      explicitly disabled via build config
+        raw/ioat:       explicitly disabled via build config
+        raw/ntb:        explicitly disabled via build config
+        raw/octeontx2_dma:      explicitly disabled via build config
+        raw/octeontx2_ep:       explicitly disabled via build config
+        raw/skeleton:   explicitly disabled via build config
+        crypto/aesni_gcm:       explicitly disabled via build config
+        crypto/aesni_mb:        explicitly disabled via build config
+        crypto/armv8:   explicitly disabled via build config
+        crypto/bcmfs:   explicitly disabled via build config
+        crypto/caam_jr: explicitly disabled via build config
+        crypto/ccp:     explicitly disabled via build config
+        crypto/dpaa_sec:        explicitly disabled via build config
+        crypto/dpaa2_sec:       explicitly disabled via build config
+        crypto/kasumi:  explicitly disabled via build config
+        crypto/mvsam:   explicitly disabled via build config
+        crypto/nitrox:  explicitly disabled via build config
+        crypto/null:    explicitly disabled via build config
+        crypto/octeontx:        explicitly disabled via build config
+        crypto/octeontx2:       explicitly disabled via build config
+        crypto/openssl: explicitly disabled via build config
+        crypto/scheduler:       explicitly disabled via build config
+        crypto/snow3g:  explicitly disabled via build config
+        crypto/virtio:  explicitly disabled via build config
+        crypto/zuc:     explicitly disabled via build config
+        compress/isal:  explicitly disabled via build config
+        compress/mlx5:  explicitly disabled via build config
+        compress/octeontx:      explicitly disabled via build config
+        compress/zlib:  explicitly disabled via build config
+        regex/mlx5:     explicitly disabled via build config
+        regex/octeontx2:        explicitly disabled via build config
+        vdpa/ifc:       explicitly disabled via build config
+        vdpa/mlx5:      explicitly disabled via build config
+        event/cnxk:     explicitly disabled via build config
+        event/dlb2:     explicitly disabled via build config
+        event/dpaa:     explicitly disabled via build config
+        event/dpaa2:    explicitly disabled via build config
+        event/dsw:      explicitly disabled via build config
+        event/octeontx2:        explicitly disabled via build config
+        event/opdl:     explicitly disabled via build config
+        event/skeleton: explicitly disabled via build config
+        event/sw:       explicitly disabled via build config
+        event/octeontx: explicitly disabled via build config
+        baseband/acc100:        explicitly disabled via build config
+        baseband/fpga_5gnr_fec: explicitly disabled via build config
+        baseband/fpga_lte_fec:  explicitly disabled via build config
+        baseband/null:  explicitly disabled via build config
+        baseband/turbo_sw:      explicitly disabled via build config
+
+
+Build targets in project: 99
+
+Found ninja-1.10.2 at /bin/ninja
+ninja: Entering directory `/home/daos/docker/daos/build/external/debug/spdk/dpdk/build-tmp'
+[14/260] Generating symbol file lib/librte_telemetry.so.21.2.p/librte_telemetry.so.21.2.symbols^Cscons: Build interrupted.
+
+ninja: build stopped: interrupted by user.
+make[1]: *** [all] Error 2

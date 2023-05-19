@@ -243,3 +243,32 @@ docker run -it -d --privileged --cap-add=ALL --name spdk -v /root/project/stor/s
 docker start spdk
 docker exec -u root -it spdk bash -c 'cd /home/xb/project/stor/spdk/xb/spdk;exec "${SHELL:-sh}"'
 docker exec -it spdk /bin/bash
+
+POSIX 容器可以通过 NVMe-oF 协议导出块设备。 这需要在第三方节点（例如专用节点或在客户端节点或 DAOS 存储节点上的特定核心上运行）上设置单独的 SPDK 服务，将 DAOS 容器导出为 NVMe 目标。 本节介绍如何配置 SPDK DAOS bdev 并通过 NVMe-oF 协议访问它。 它假定已经配置了 DAOS 系统。
+
+git clone https://github.com/spdk/spdk.git
+git submodule update --init
+./configure --with-daos
+make -j 16
+
+sudo HUGE_EVEN_ALLOC=yes scripts/setup.sh
+sudo ./build/bin/nvmf_tgt -m [21,22,23,24]
+
+POOL_UUID="${POOL:-pool_label}"
+CONT_UUID="${CONT:-const_label}"
+DISK_UUID="${UUID:-`uuidgen`}"
+NR_DISKS="${1:-1}"
+BIND_IP="${TARGET_IP:-172.31.91.61}"
+
+sudo ./scripts/rpc.py nvmf_create_transport -t TCP -u 2097152 -i 2097152
+
+for i in $(seq 1 "$NR_DISKS"); do
+    sudo ./scripts/rpc.py bdev_daos_create disk$i ${POOL_UUID} ${CONT_UUID} 1048576 4096 --uuid ${DISK_UUID}
+    subsystem=nqn.2016-06.io.spdk$i:cnode$i
+    sudo scripts/rpc.py nvmf_create_subsystem $subsystem -a -s SPDK0000000000000$i -d SPDK_Virtual_Controller_$i
+    sudo scripts/rpc.py nvmf_subsystem
+
+test_daos
+cc -o /dev/null -x c -march=native -I/usr/local/include -L/usr/local/lib -I/opt/daos/include -L/opt/daos/lib64 -lgurt -ldaos -ldaos_common -ldfs test_daos_dfs.c
+
+--with-shared

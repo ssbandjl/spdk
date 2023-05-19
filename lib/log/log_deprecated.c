@@ -103,6 +103,7 @@ spdk_log_deprecated(struct spdk_deprecation *dep, const char *file, uint32_t lin
 	}
 }
 
+typedef int (*spdk_log_for_each_deprecation_fn)(void *ctx, struct spdk_deprecation *deprecation);
 int
 spdk_log_for_each_deprecation(void *ctx, spdk_log_for_each_deprecation_fn fn)
 {
