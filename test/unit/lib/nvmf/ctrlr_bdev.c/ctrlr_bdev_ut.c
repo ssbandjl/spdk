@@ -488,6 +488,7 @@ test_nvmf_bdev_ctrlr_identify_ns(void)
 	CU_ASSERT(nsdata.nuse == 10);
 	CU_ASSERT(nsdata.nlbaf == 0);
 	CU_ASSERT(nsdata.flbas.format == 0);
+	CU_ASSERT(nsdata.flbas.msb_format == 0);
 	CU_ASSERT(nsdata.nacwu == 0);
 	CU_ASSERT(nsdata.lbaf[0].lbads == spdk_u32log2(4096));
 	CU_ASSERT(nsdata.lbaf[0].ms == 512);
@@ -516,6 +517,7 @@ test_nvmf_bdev_ctrlr_identify_ns(void)
 	CU_ASSERT(nsdata.nuse == 10);
 	CU_ASSERT(nsdata.nlbaf == 0);
 	CU_ASSERT(nsdata.flbas.format == 0);
+	CU_ASSERT(nsdata.flbas.msb_format == 0);
 	CU_ASSERT(nsdata.nacwu == 0);
 	CU_ASSERT(nsdata.lbaf[0].lbads == spdk_u32log2(4096));
 	CU_ASSERT(nsdata.noiob == SPDK_BDEV_IO_NUM_CHILD_IOV);
@@ -741,9 +743,7 @@ test_nvmf_bdev_ctrlr_cmd(void)
 	memset(&rsp, 0, sizeof(rsp));
 
 	rc = nvmf_bdev_ctrlr_copy_cmd(&bdev, NULL, &ch, &req);
-	CU_ASSERT(rc == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE);
-	CU_ASSERT(rsp.nvme_cpl.status.sct == SPDK_NVME_SCT_GENERIC);
-	CU_ASSERT(rsp.nvme_cpl.status.sc == SPDK_NVME_SC_INVALID_OPCODE);
+	CU_ASSERT(rc == SPDK_NVMF_REQUEST_EXEC_STATUS_ASYNCHRONOUS);
 
 	MOCK_SET(spdk_bdev_io_type_supported, true);
 
@@ -840,6 +840,7 @@ test_nvmf_bdev_ctrlr_nvme_passthru(void)
 	req.qpair = &qpair;
 	req.cmd = (union nvmf_h2c_msg *)&cmd;
 	req.rsp = &rsp;
+	spdk_iov_one(req.iov, &req.iovcnt, NULL, 0);
 
 	cmd.nsid = 1;
 	cmd.opc = 0xFF;

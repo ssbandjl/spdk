@@ -1,5 +1,6 @@
 #  SPDX-License-Identifier: BSD-3-Clause
 #  Copyright (C) 2016 Intel Corporation
+#  Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES
 #  All rights reserved.
 #
 
@@ -52,8 +53,6 @@ function load_ib_rdma_modules() {
 
 	modprobe ib_cm
 	modprobe ib_core
-	# Newer kernels do not have the ib_ucm module
-	modprobe ib_ucm || true
 	modprobe ib_umad
 	modprobe ib_uverbs
 	modprobe iw_cm
@@ -295,6 +294,14 @@ function gather_supported_nvmf_pci_devs() {
 	e810+=(${pci_bus_cache["$intel:0x159b"]})
 	# X722 10G
 	x722+=(${pci_bus_cache["$intel:0x37d2"]})
+	# BlueField 3
+	mlx+=(${pci_bus_cache["$mellanox:0xa2dc"]})
+	# ConnectX-7
+	mlx+=(${pci_bus_cache["$mellanox:0x1021"]})
+	# BlueField 2
+	mlx+=(${pci_bus_cache["$mellanox:0xa2d6"]})
+	# ConnectX-6 Dx
+	mlx+=(${pci_bus_cache["$mellanox:0x101d"]})
 	# ConnectX-5
 	mlx+=(${pci_bus_cache["$mellanox:0x1017"]})
 	mlx+=(${pci_bus_cache["$mellanox:0x1019"]})
@@ -354,7 +361,7 @@ function gather_supported_nvmf_pci_devs() {
 	fi
 
 	# E810 cards also need irdma driver to be around.
-	if ((${#e810[@]} > 0)) && [[ $TEST_TRANSPORT == rdma ]]; then
+	if [[ $SPDK_TEST_NVMF_NICS == e810 && $TEST_TRANSPORT == rdma ]]; then
 		if [[ -e /sys/module/irdma/parameters/roce_ena ]]; then
 			# Our tests don't play well with iWARP protocol. Make sure we use RoCEv2 instead.
 			(($(< /sys/module/irdma/parameters/roce_ena) != 1)) && modprobe -r irdma

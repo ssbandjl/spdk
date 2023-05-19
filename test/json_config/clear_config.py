@@ -37,7 +37,6 @@ def get_bdev_delete_method(bdev):
     delete_method_map = {'bdev_malloc_create': "bdev_malloc_delete",
                          'bdev_null_create': "bdev_null_delete",
                          'bdev_rbd_create': "bdev_rbd_delete",
-                         'bdev_pmem_create': "bdev_pmem_delete",
                          'bdev_aio_create': "bdev_aio_delete",
                          'bdev_error_create': "bdev_error_delete",
                          'bdev_split_create': "bdev_split_delete",
@@ -129,6 +128,18 @@ def clear_nbd_subsystem(args, nbd_config):
         destroy_method = get_nbd_destroy_method(nbd)
         if destroy_method:
             args.client.call(destroy_method, {'nbd_device': nbd['params']['nbd_device']})
+
+
+def get_ublk_destroy_method(ublk):
+    delete_method_map = {'ublk_start_disk': "ublk_stop_disk"}
+    return delete_method_map[ublk['method']]
+
+
+def clear_ublk_subsystem(args, ublk_config):
+    for ublk in ublk_config:
+        destroy_method = get_ublk_destroy_method(ublk)
+        if destroy_method:
+            args.client.call(destroy_method, {'ublk_device': ublk['params']['ublk_device']})
 
 
 def clear_net_framework_subsystem(args, net_framework_config):

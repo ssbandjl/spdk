@@ -14,6 +14,7 @@ remove_attach_helper() {
 	local hotplug_events=$1
 	local hotplug_wait=$2
 	local use_bdev=$3
+	local nvme_count=${#nvmes[@]}
 	local dev
 
 	# We need to make sure we wait long enough for hotplug to initialize the devices
@@ -65,7 +66,7 @@ remove_attach_helper() {
 		done
 
 		# Wait now for hotplug to reattach to the devices
-		sleep "$hotplug_wait"
+		sleep "$((hotplug_wait * nvme_count))"
 	done
 }
 
@@ -74,7 +75,7 @@ run_hotplug() {
 
 	"$SPDK_EXAMPLE_DIR/hotplug" \
 		-i 0 \
-		-t $((hotplug_events * hotplug_wait + hotplug_wait * 3)) \
+		-t 0 \
 		-n $((hotplug_events * nvme_count)) \
 		-r $((hotplug_events * nvme_count)) \
 		-l warning &

@@ -102,13 +102,14 @@ mdns_bdev_nvme_start_discovery(void *_entry_ctx)
 static void
 free_mdns_discovery_entry_ctx(struct mdns_discovery_ctx *ctx)
 {
-	struct mdns_discovery_entry_ctx *entry_ctx = NULL;
+	struct mdns_discovery_entry_ctx *entry_ctx, *tmp;
 
 	if (!ctx) {
 		return;
 	}
 
-	TAILQ_FOREACH(entry_ctx, &ctx->mdns_discovery_entry_ctxs, tailq) {
+	TAILQ_FOREACH_SAFE(entry_ctx, &ctx->mdns_discovery_entry_ctxs, tailq, tmp) {
+		TAILQ_REMOVE(&ctx->mdns_discovery_entry_ctxs, entry_ctx, tailq);
 		free(entry_ctx);
 	}
 }
@@ -315,7 +316,6 @@ mdns_resolve_callback(
 			SPDK_ERRLOG("Unable to derive nvme transport type  for service %s\n", ctx->svcname);
 			break;
 		}
-		trid->adrfam = get_spdk_nvme_adrfam_from_avahi_addr(address);
 		snprintf(trid->traddr, sizeof(trid->traddr), "%s", ipaddr);
 		snprintf(trid->trsvcid, sizeof(trid->trsvcid), "%s", port_str);
 		snprintf(trid->subnqn, sizeof(trid->subnqn), "%s", subnqn);
@@ -326,7 +326,8 @@ mdns_resolve_callback(
 				free(trid);
 				avahi_free(subnqn);
 				avahi_free(proto);
-				break;
+				avahi_service_resolver_free(r);
+				return;
 			}
 		}
 		entry_ctx = create_mdns_discovery_entry_ctx(ctx, trid);
@@ -440,7 +441,7 @@ start_mdns_discovery_poller(void *arg)
 
 	assert(arg);
 	TAILQ_INSERT_TAIL(&g_mdns_discovery_ctxs, ctx, tailq);
-	ctx->poller = SPDK_POLLER_REGISTER(bdev_nvme_avahi_iterate, ctx, 1000 * 1000);
+	ctx->poller = SPDK_POLLER_REGISTER(bdev_nvme_avahi_iterate, ctx, 100 * 1000);
 }
 
 int

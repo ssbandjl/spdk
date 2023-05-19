@@ -25,6 +25,10 @@ nvme_simple_copy
 nvme_bp
 nvme_boot_partition
 
+# Waiting on Flexible Data Placement support in CI
+nvme_fdp
+nvme_flexible_data_placement
+
 # Waiting on significant test rewrite
 nvme_opal
 nvme_opal_bdevio
@@ -64,7 +68,6 @@ build_shared_native_dpdk_rpm
 build_shared_rpm_with_rpmed_dpdk
 iscsi_tgt_digest
 iscsi_tgt_data_digest
-iscsi_tgt_pmem
 iscsi_tgt_ext4test
 iscsi_tgt_digests
 iscsi_tgt_multiconnection

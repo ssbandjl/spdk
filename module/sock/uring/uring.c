@@ -28,7 +28,7 @@
 #define SPDK_SOCK_CMG_INFO_SIZE (sizeof(struct cmsghdr) + sizeof(struct sock_extended_err))
 
 enum spdk_sock_task_type {
-	SPDK_SOCK_TASK_POLLIN = 0,
+	SPDK_SOCK_TASK_READ = 0,
 	SPDK_SOCK_TASK_ERRQUEUE,
 	SPDK_SOCK_TASK_WRITE,
 	SPDK_SOCK_TASK_CANCEL,
@@ -37,6 +37,18 @@ enum spdk_sock_task_type {
 #if defined(SO_ZEROCOPY) && defined(MSG_ZEROCOPY)
 #define SPDK_ZEROCOPY
 #endif
+
+/* We don't know how big the buffers that the user posts will be, but this
+ * is the maximum we'll ever allow it to receive in a single command.
+ * If the user buffers are smaller, it will just receive less. */
+#define URING_MAX_RECV_SIZE (128 * 1024)
+
+/* We don't know how many buffers the user will post, but this is the
+ * maximum number we'll take from the pool to post per group. */
+#define URING_BUF_POOL_SIZE 128
+
+/* We use 1 just so it's not zero and we can validate it's right. */
+#define URING_BUF_GROUP_ID 1
 
 enum spdk_uring_sock_task_status {
 	SPDK_URING_SOCK_TASK_NOT_IN_USE = 0,
@@ -62,13 +74,14 @@ struct spdk_uring_sock {
 	struct spdk_uring_sock_group_impl	*group;
 	struct spdk_uring_task			write_task;
 	struct spdk_uring_task			errqueue_task;
-	struct spdk_uring_task			pollin_task;
+	struct spdk_uring_task			read_task;
 	struct spdk_uring_task			cancel_task;
 	struct spdk_pipe			*recv_pipe;
 	void					*recv_buf;
 	int					recv_buf_sz;
 	bool					zcopy;
 	bool					pending_recv;
+	bool					pending_group_remove;
 	int					zcopy_send_flags;
 	int					connection_status;
 	int					placement_id;
@@ -88,8 +101,8 @@ struct spdk_uring_sock_group_impl {
 };
 
 static struct spdk_sock_impl_opts g_spdk_uring_sock_impl_opts = {
-	.recv_buf_size = MIN_SO_RCVBUF_SIZE,
-	.send_buf_size = MIN_SO_SNDBUF_SIZE,
+	.recv_buf_size = DEFAULT_SO_RCVBUF_SIZE,
+	.send_buf_size = DEFAULT_SO_SNDBUF_SIZE,
 	.enable_recv_pipe = true,
 	.enable_quickack = false,
 	.enable_placement_id = PLACEMENT_NONE,
@@ -275,6 +288,7 @@ uring_sock_alloc_pipe(struct spdk_uring_sock *sock, int sz)
 	struct iovec diov[2];
 	int sbytes;
 	ssize_t bytes;
+	int rc;
 
 	if (sock->recv_buf_sz == sz) {
 		return 0;
@@ -293,13 +307,14 @@ uring_sock_alloc_pipe(struct spdk_uring_sock *sock, int sz)
 	}
 
 	/* Round up to next 64 byte multiple */
-	new_buf = calloc(SPDK_ALIGN_CEIL(sz + 1, 64), sizeof(uint8_t));
-	if (!new_buf) {
+	rc = posix_memalign((void **)&new_buf, 64, sz);
+	if (rc != 0) {
 		SPDK_ERRLOG("socket recv buf allocation failed\n");
 		return -ENOMEM;
 	}
+	memset(new_buf, 0, sz);
 
-	new_pipe = spdk_pipe_create(new_buf, sz + 1);
+	new_pipe = spdk_pipe_create(new_buf, sz);
 	if (new_pipe == NULL) {
 		SPDK_ERRLOG("socket pipe allocation failed\n");
 		free(new_buf);
@@ -483,7 +498,7 @@ uring_sock_create(const char *ip, int port,
 	hints.ai_flags |= AI_NUMERICHOST;
 	rc = getaddrinfo(ip, portnum, &hints, &res0);
 	if (rc != 0) {
-		SPDK_ERRLOG("getaddrinfo() failed (errno=%d)\n", errno);
+		SPDK_ERRLOG("getaddrinfo() failed %s (%d)\n", gai_strerror(rc), rc);
 		return NULL;
 	}
 
@@ -784,7 +799,7 @@ uring_sock_read(struct spdk_uring_sock *sock)
 		bytes = sock_readv(sock->fd, iov, 2);
 		if (bytes > 0) {
 			spdk_pipe_writer_advance(sock->recv_pipe, bytes);
-			if (sock->base.group_impl) {
+			if (sock->base.group_impl && !sock->pending_recv) {
 				group = __uring_group_impl(sock->base.group_impl);
 				TAILQ_INSERT_TAIL(&group->pending_recv, sock, link);
 				sock->pending_recv = true;
@@ -795,12 +810,31 @@ uring_sock_read(struct spdk_uring_sock *sock)
 	return bytes;
 }
 
+static int
+uring_sock_recv_next(struct spdk_sock *_sock, void **_buf, void **ctx)
+{
+	struct spdk_uring_sock *sock = __uring_sock(_sock);
+
+	if (sock->connection_status < 0) {
+		errno = -sock->connection_status;
+		return -1;
+	}
+
+	errno = -ENOTSUP;
+	return -1;
+}
+
 static ssize_t
 uring_sock_readv(struct spdk_sock *_sock, struct iovec *iov, int iovcnt)
 {
 	struct spdk_uring_sock *sock = __uring_sock(_sock);
 	int rc, i;
 	size_t len;
+
+	if (sock->connection_status < 0) {
+		errno = -sock->connection_status;
+		return -1;
+	}
 
 	if (sock->recv_pipe == NULL) {
 		return sock_readv(sock->fd, iov, iovcnt);
@@ -1019,6 +1053,10 @@ _sock_prep_errqueue(struct spdk_sock *_sock)
 		return;
 	}
 
+	if (sock->pending_group_remove) {
+		return;
+	}
+
 	assert(sock->group != NULL);
 	sock->group->io_queued++;
 
@@ -1073,14 +1111,18 @@ _sock_flush(struct spdk_sock *_sock)
 }
 
 static void
-_sock_prep_pollin(struct spdk_sock *_sock)
+_sock_prep_read(struct spdk_sock *_sock)
 {
 	struct spdk_uring_sock *sock = __uring_sock(_sock);
-	struct spdk_uring_task *task = &sock->pollin_task;
+	struct spdk_uring_task *task = &sock->read_task;
 	struct io_uring_sqe *sqe;
 
-	/* Do not prepare pollin event */
-	if (task->status == SPDK_URING_SOCK_TASK_IN_PROCESS || (sock->pending_recv && !sock->zcopy)) {
+	/* Do not prepare read event */
+	if (task->status == SPDK_URING_SOCK_TASK_IN_PROCESS) {
+		return;
+	}
+
+	if (sock->pending_group_remove) {
 		return;
 	}
 
@@ -1088,7 +1130,12 @@ _sock_prep_pollin(struct spdk_sock *_sock)
 	sock->group->io_queued++;
 
 	sqe = io_uring_get_sqe(&sock->group->uring);
-	io_uring_prep_poll_add(sqe, sock->fd, POLLIN | POLLERR);
+	io_uring_prep_recv(sqe, sock->fd, NULL, URING_MAX_RECV_SIZE, 0);
+	/* Because we're using buffer select but have no logic to actually
+	 * post buffers, the recv will complete with ENOBUFS whenever there
+	 * is data on the socket, turning it into a POLLIN operation. */
+	sqe->buf_group = URING_BUF_GROUP_ID;
+	sqe->flags |= IOSQE_BUFFER_SELECT;
 	io_uring_sqe_set_data(sqe, task);
 	task->status = SPDK_URING_SOCK_TASK_IN_PROCESS;
 }
@@ -1147,47 +1194,84 @@ sock_uring_group_reap(struct spdk_uring_sock_group_impl *group, int max, int max
 
 		task->status = SPDK_URING_SOCK_TASK_NOT_IN_USE;
 
-		if (spdk_unlikely(status <= 0)) {
-			if (status == -EAGAIN || status == -EWOULDBLOCK || (status == -ENOBUFS && sock->zcopy)) {
-				continue;
-			}
-		}
-
 		switch (task->type) {
-		case SPDK_SOCK_TASK_POLLIN:
-#ifdef SPDK_ZEROCOPY
-			if ((status & POLLERR) == POLLERR) {
-				_sock_prep_errqueue(&sock->base);
-			}
-#endif
-			if ((status & POLLIN) == POLLIN) {
+		case SPDK_SOCK_TASK_READ:
+			if (status == -EAGAIN || status == -EWOULDBLOCK) {
+				/* This likely shouldn't happen, but would indicate that the
+				 * kernel didn't have enough resources to queue a task internally. */
+				_sock_prep_read(&sock->base);
+			} else if (status == -ECANCELED) {
+				continue;
+			} else if (status == -ENOBUFS) {
+				/* There's data in the socket. */
 				if (sock->base.cb_fn != NULL &&
 				    sock->pending_recv == false) {
 					sock->pending_recv = true;
 					TAILQ_INSERT_TAIL(&group->pending_recv, sock, link);
 				}
+
+				_sock_prep_read(&sock->base);
+			} else if (spdk_unlikely(status <= 0)) {
+				sock->connection_status = status < 0 ? status : -ECONNRESET;
+				spdk_sock_abort_requests(&sock->base);
+
+				/* The user needs to be notified that this socket is dead. */
+				if (sock->base.cb_fn != NULL &&
+				    sock->pending_recv == false) {
+					sock->pending_recv = true;
+					TAILQ_INSERT_TAIL(&group->pending_recv, sock, link);
+				}
+			} else {
+				/* This shouldn't happen. We've never provided any buffers. */
+				assert(false);
+				_sock_prep_read(&sock->base);
 			}
 			break;
 		case SPDK_SOCK_TASK_WRITE:
-			task->last_req = NULL;
-			task->iov_cnt = 0;
-			is_zcopy = task->is_zcopy;
-			task->is_zcopy = false;
-			if (spdk_unlikely(status) < 0) {
+			if (status == -EAGAIN || status == -EWOULDBLOCK ||
+			    (status == -ENOBUFS && sock->zcopy) ||
+			    status == -ECANCELED) {
+				continue;
+			} else if (spdk_unlikely(status) < 0) {
 				sock->connection_status = status;
 				spdk_sock_abort_requests(&sock->base);
+
+				/* The user needs to be notified that this socket is dead. */
+				if (sock->base.cb_fn != NULL &&
+				    sock->pending_recv == false) {
+					sock->pending_recv = true;
+					TAILQ_INSERT_TAIL(&group->pending_recv, sock, link);
+				}
 			} else {
+				task->last_req = NULL;
+				task->iov_cnt = 0;
+				is_zcopy = task->is_zcopy;
+				task->is_zcopy = false;
 				sock_complete_write_reqs(&sock->base, status, is_zcopy);
 			}
 
 			break;
 #ifdef SPDK_ZEROCOPY
 		case SPDK_SOCK_TASK_ERRQUEUE:
-			if (spdk_unlikely(status == -ECANCELED)) {
-				sock->connection_status = status;
+			if (status == -EAGAIN || status == -EWOULDBLOCK) {
+				_sock_prep_errqueue(&sock->base);
+			} else if (status == -ECANCELED) {
+				continue;
+			} else if (spdk_unlikely(status <= 0)) {
+				sock->connection_status = status < 0 ? status : -ECONNRESET;
+				spdk_sock_abort_requests(&sock->base);
+
+				/* The user needs to be notified that this socket is dead. */
+				if (sock->base.cb_fn != NULL &&
+				    sock->pending_recv == false) {
+					sock->pending_recv = true;
+					TAILQ_INSERT_TAIL(&group->pending_recv, sock, link);
+				}
 				break;
+			} else {
+				_sock_check_zcopy(&sock->base, status);
+				_sock_prep_errqueue(&sock->base);
 			}
-			_sock_check_zcopy(&sock->base, status);
 			break;
 #endif
 		case SPDK_SOCK_TASK_CANCEL:
@@ -1207,14 +1291,12 @@ sock_uring_group_reap(struct spdk_uring_sock_group_impl *group, int max, int max
 			break;
 		}
 
-		if (spdk_unlikely(sock->base.cb_fn == NULL) ||
-		    (sock->recv_pipe == NULL || spdk_pipe_reader_bytes_available(sock->recv_pipe) == 0)) {
+		/* If the socket's cb_fn is NULL, do not add it to socks array */
+		if (spdk_unlikely(sock->base.cb_fn == NULL)) {
+			assert(sock->pending_recv == true);
 			sock->pending_recv = false;
 			TAILQ_REMOVE(&group->pending_recv, sock, link);
-			if (spdk_unlikely(sock->base.cb_fn == NULL)) {
-				/* If the socket's cb_fn is NULL, do not add it to socks array */
-				continue;
-			}
+			continue;
 		}
 
 		socks[count++] = &sock->base;
@@ -1271,57 +1353,7 @@ end:
 	return count;
 }
 
-static int
-_sock_flush_client(struct spdk_sock *_sock)
-{
-	struct spdk_uring_sock *sock = __uring_sock(_sock);
-	struct msghdr msg = {};
-	struct iovec iovs[IOV_BATCH_SIZE];
-	int iovcnt;
-	ssize_t rc;
-	int flags = sock->zcopy_send_flags;
-	int retval;
-	bool is_zcopy = false;
-
-	/* Can't flush from within a callback or we end up with recursive calls */
-	if (_sock->cb_cnt > 0) {
-		return 0;
-	}
-
-	/* Gather an iov */
-	iovcnt = spdk_sock_prep_reqs(_sock, iovs, 0, NULL, &flags);
-	if (iovcnt == 0) {
-		return 0;
-	}
-
-	/* Perform the vectored write */
-	msg.msg_iov = iovs;
-	msg.msg_iovlen = iovcnt;
-	rc = sendmsg(sock->fd, &msg, flags | MSG_DONTWAIT);
-	if (rc <= 0) {
-		if (errno == EAGAIN || errno == EWOULDBLOCK) {
-			return 0;
-		}
-		return rc;
-	}
-
-#ifdef SPDK_ZEROCOPY
-	is_zcopy = flags & MSG_ZEROCOPY;
-#endif
-	retval = sock_complete_write_reqs(_sock, rc, is_zcopy);
-	if (retval < 0) {
-		/* if the socket is closed, return to avoid heap-use-after-free error */
-		return retval;
-	}
-
-#ifdef SPDK_ZEROCOPY
-	if (sock->zcopy && !TAILQ_EMPTY(&_sock->pending_reqs)) {
-		_sock_check_zcopy(_sock, 0);
-	}
-#endif
-
-	return 0;
-}
+static int uring_sock_flush(struct spdk_sock *_sock);
 
 static void
 uring_sock_writev_async(struct spdk_sock *_sock, struct spdk_sock_request *req)
@@ -1338,8 +1370,8 @@ uring_sock_writev_async(struct spdk_sock *_sock, struct spdk_sock_request *req)
 
 	if (!sock->group) {
 		if (_sock->queued_iovcnt >= IOV_BATCH_SIZE) {
-			rc = _sock_flush_client(_sock);
-			if (rc) {
+			rc = uring_sock_flush(_sock);
+			if (rc < 0 && errno != EAGAIN) {
 				spdk_sock_abort_requests(_sock);
 			}
 		}
@@ -1488,8 +1520,8 @@ uring_sock_group_impl_add_sock(struct spdk_sock_group_impl *_group,
 	sock->write_task.sock = sock;
 	sock->write_task.type = SPDK_SOCK_TASK_WRITE;
 
-	sock->pollin_task.sock = sock;
-	sock->pollin_task.type = SPDK_SOCK_TASK_POLLIN;
+	sock->read_task.sock = sock;
+	sock->read_task.type = SPDK_SOCK_TASK_READ;
 
 	sock->errqueue_task.sock = sock;
 	sock->errqueue_task.type = SPDK_SOCK_TASK_ERRQUEUE;
@@ -1515,6 +1547,14 @@ uring_sock_group_impl_add_sock(struct spdk_sock_group_impl *_group,
 		}
 	}
 
+	/* We get an async read going immediately */
+	_sock_prep_read(&sock->base);
+#ifdef SPDK_ZEROCOPY
+	if (sock->zcopy) {
+		_sock_prep_errqueue(_sock);
+	}
+#endif
+
 	return 0;
 }
 
@@ -1535,7 +1575,6 @@ uring_sock_group_impl_poll(struct spdk_sock_group_impl *_group, int max_events,
 				continue;
 			}
 			_sock_flush(_sock);
-			_sock_prep_pollin(_sock);
 		}
 	}
 
@@ -1570,6 +1609,8 @@ uring_sock_group_impl_remove_sock(struct spdk_sock_group_impl *_group,
 	struct spdk_uring_sock *sock = __uring_sock(_sock);
 	struct spdk_uring_sock_group_impl *group = __uring_group_impl(_group);
 
+	sock->pending_group_remove = true;
+
 	if (sock->write_task.status != SPDK_URING_SOCK_TASK_NOT_IN_USE) {
 		_sock_prep_cancel_task(_sock, &sock->write_task);
 		/* Since spdk_sock_group_remove_sock is not asynchronous interface, so
@@ -1580,11 +1621,11 @@ uring_sock_group_impl_remove_sock(struct spdk_sock_group_impl *_group,
 		}
 	}
 
-	if (sock->pollin_task.status != SPDK_URING_SOCK_TASK_NOT_IN_USE) {
-		_sock_prep_cancel_task(_sock, &sock->pollin_task);
+	if (sock->read_task.status != SPDK_URING_SOCK_TASK_NOT_IN_USE) {
+		_sock_prep_cancel_task(_sock, &sock->read_task);
 		/* Since spdk_sock_group_remove_sock is not asynchronous interface, so
 		 * currently can use a while loop here. */
-		while ((sock->pollin_task.status != SPDK_URING_SOCK_TASK_NOT_IN_USE) ||
+		while ((sock->read_task.status != SPDK_URING_SOCK_TASK_NOT_IN_USE) ||
 		       (sock->cancel_task.status != SPDK_URING_SOCK_TASK_NOT_IN_USE)) {
 			uring_sock_group_impl_poll(_group, 32, NULL);
 		}
@@ -1602,7 +1643,7 @@ uring_sock_group_impl_remove_sock(struct spdk_sock_group_impl *_group,
 
 	/* Make sure the cancelling the tasks above didn't cause sending new requests */
 	assert(sock->write_task.status == SPDK_URING_SOCK_TASK_NOT_IN_USE);
-	assert(sock->pollin_task.status == SPDK_URING_SOCK_TASK_NOT_IN_USE);
+	assert(sock->read_task.status == SPDK_URING_SOCK_TASK_NOT_IN_USE);
 	assert(sock->errqueue_task.status == SPDK_URING_SOCK_TASK_NOT_IN_USE);
 
 	if (sock->pending_recv) {
@@ -1615,6 +1656,7 @@ uring_sock_group_impl_remove_sock(struct spdk_sock_group_impl *_group,
 		spdk_sock_map_release(&g_map, sock->placement_id);
 	}
 
+	sock->pending_group_remove = false;
 	sock->group = NULL;
 	return 0;
 }
@@ -1645,12 +1687,69 @@ static int
 uring_sock_flush(struct spdk_sock *_sock)
 {
 	struct spdk_uring_sock *sock = __uring_sock(_sock);
+	struct msghdr msg = {};
+	struct iovec iovs[IOV_BATCH_SIZE];
+	int iovcnt;
+	ssize_t rc;
+	int flags = sock->zcopy_send_flags;
+	int retval;
+	bool is_zcopy = false;
+	struct spdk_uring_task *task = &sock->errqueue_task;
 
-	if (!sock->group) {
-		return _sock_flush_client(_sock);
+	/* Can't flush from within a callback or we end up with recursive calls */
+	if (_sock->cb_cnt > 0) {
+		errno = EAGAIN;
+		return -1;
 	}
 
-	return 0;
+	/* Can't flush while a write is already outstanding */
+	if (sock->write_task.status != SPDK_URING_SOCK_TASK_NOT_IN_USE) {
+		errno = EAGAIN;
+		return -1;
+	}
+
+	/* Gather an iov */
+	iovcnt = spdk_sock_prep_reqs(_sock, iovs, 0, NULL, &flags);
+	if (iovcnt == 0) {
+		/* Nothing to send */
+		return 0;
+	}
+
+	/* Perform the vectored write */
+	msg.msg_iov = iovs;
+	msg.msg_iovlen = iovcnt;
+	rc = sendmsg(sock->fd, &msg, flags | MSG_DONTWAIT);
+	if (rc <= 0) {
+		if (rc == 0 || errno == EAGAIN || errno == EWOULDBLOCK || (errno == ENOBUFS && sock->zcopy)) {
+			errno = EAGAIN;
+		}
+		return -1;
+	}
+
+#ifdef SPDK_ZEROCOPY
+	is_zcopy = flags & MSG_ZEROCOPY;
+#endif
+	retval = sock_complete_write_reqs(_sock, rc, is_zcopy);
+	if (retval < 0) {
+		/* if the socket is closed, return to avoid heap-use-after-free error */
+		errno = ENOTCONN;
+		return -1;
+	}
+
+#ifdef SPDK_ZEROCOPY
+	/* At least do once to check zero copy case */
+	if (sock->zcopy && !TAILQ_EMPTY(&_sock->pending_reqs)) {
+		retval = recvmsg(sock->fd, &task->msg, MSG_ERRQUEUE);
+		if (retval < 0) {
+			if (errno == EWOULDBLOCK || errno == EAGAIN) {
+				return rc;
+			}
+		}
+		_sock_check_zcopy(_sock, retval);;
+	}
+#endif
+
+	return rc;
 }
 
 static struct spdk_net_impl g_uring_net_impl = {
@@ -1664,6 +1763,7 @@ static struct spdk_net_impl g_uring_net_impl = {
 	.readv		= uring_sock_readv,
 	.readv_async	= uring_sock_readv_async,
 	.writev		= uring_sock_writev,
+	.recv_next	= uring_sock_recv_next,
 	.writev_async	= uring_sock_writev_async,
 	.flush          = uring_sock_flush,
 	.set_recvlowat	= uring_sock_set_recvlowat,
@@ -1675,7 +1775,7 @@ static struct spdk_net_impl g_uring_net_impl = {
 	.group_impl_get_optimal	= uring_sock_group_impl_get_optimal,
 	.group_impl_create	= uring_sock_group_impl_create,
 	.group_impl_add_sock	= uring_sock_group_impl_add_sock,
-	.group_impl_remove_sock = uring_sock_group_impl_remove_sock,
+	.group_impl_remove_sock	= uring_sock_group_impl_remove_sock,
 	.group_impl_poll	= uring_sock_group_impl_poll,
 	.group_impl_close	= uring_sock_group_impl_close,
 	.get_opts		= uring_sock_impl_get_opts,

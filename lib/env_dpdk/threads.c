@@ -8,6 +8,8 @@
 #include <rte_config.h>
 #include <rte_lcore.h>
 
+#include "spdk/cpuset.h"
+
 uint32_t
 spdk_env_get_core_count(void)
 {
@@ -18,6 +20,12 @@ uint32_t
 spdk_env_get_current_core(void)
 {
 	return rte_lcore_id();
+}
+
+uint32_t
+spdk_env_get_main_core(void)
+{
+	return rte_get_main_lcore();
 }
 
 uint32_t
@@ -61,6 +69,17 @@ spdk_env_get_socket_id(uint32_t core)
 	}
 
 	return rte_lcore_to_socket_id(core);
+}
+
+void
+spdk_env_get_cpuset(struct spdk_cpuset *cpuset)
+{
+	uint32_t i;
+
+	spdk_cpuset_zero(cpuset);
+	SPDK_ENV_FOREACH_CORE(i) {
+		spdk_cpuset_set_cpu(cpuset, i, true);
+	}
 }
 
 int

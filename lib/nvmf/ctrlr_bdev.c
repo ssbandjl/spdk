@@ -129,6 +129,7 @@ nvmf_bdev_ctrlr_identify_ns(struct spdk_nvmf_ns *ns, struct spdk_nvme_ns_data *n
 	nsdata->nuse = num_blocks;
 	nsdata->nlbaf = 0;
 	nsdata->flbas.format = 0;
+	nsdata->flbas.msb_format = 0;
 	nsdata->nacwu = spdk_bdev_get_acwu(bdev) - 1; /* nacwu is 0-based */
 	if (!dif_insert_or_strip) {
 		nsdata->lbaf[0].ms = spdk_bdev_get_md_size(bdev);
@@ -180,19 +181,17 @@ nvmf_bdev_ctrlr_identify_ns(struct spdk_nvmf_ns *ns, struct spdk_nvme_ns_data *n
 	SPDK_STATIC_ASSERT(sizeof(nsdata->eui64) == sizeof(ns->opts.eui64), "size mismatch");
 	memcpy(&nsdata->eui64, ns->opts.eui64, sizeof(nsdata->eui64));
 
-	if (spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_COPY)) {
-		max_copy = spdk_bdev_get_max_copy(bdev);
-		if (max_copy == 0 || max_copy > UINT16_MAX) {
-			/* Zero means copy size is unlimited */
-			nsdata->mcl = UINT16_MAX;
-			nsdata->mssrl = UINT16_MAX;
-		} else {
-			nsdata->mcl = max_copy;
-			nsdata->mssrl = max_copy;
-		}
+	/* For now we support just one source range for copy command */
+	nsdata->msrc = 0;
 
-		/* For now we support just one source range */
-		nsdata->msrc = 0;
+	max_copy = spdk_bdev_get_max_copy(bdev);
+	if (max_copy == 0 || max_copy > UINT16_MAX) {
+		/* Zero means copy size is unlimited */
+		nsdata->mcl = UINT16_MAX;
+		nsdata->mssrl = UINT16_MAX;
+	} else {
+		nsdata->mcl = max_copy;
+		nsdata->mssrl = max_copy;
 	}
 }
 
@@ -581,7 +580,7 @@ nvmf_bdev_ctrlr_unmap(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
 	uint16_t nr, i;
 	struct spdk_nvme_cmd *cmd = &req->cmd->nvme_cmd;
 	struct spdk_nvme_cpl *response = &req->rsp->nvme_cpl;
-	struct spdk_nvme_dsm_range *dsm_range;
+	struct spdk_iov_xfer ix;
 	uint64_t lba;
 	uint32_t lba_count;
 	int rc;
@@ -611,10 +610,15 @@ nvmf_bdev_ctrlr_unmap(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
 		unmap_ctx->count--;	/* dequeued */
 	}
 
-	dsm_range = (struct spdk_nvme_dsm_range *)req->data;
+	spdk_iov_xfer_init(&ix, req->iov, req->iovcnt);
+
 	for (i = unmap_ctx->range_index; i < nr; i++) {
-		lba = dsm_range[i].starting_lba;
-		lba_count = dsm_range[i].length;
+		struct spdk_nvme_dsm_range dsm_range = { 0 };
+
+		spdk_iov_xfer_to_buf(&ix, &dsm_range, sizeof(dsm_range));
+
+		lba = dsm_range.starting_lba;
+		lba_count = dsm_range.length;
 
 		unmap_ctx->count++;
 
@@ -667,7 +671,8 @@ nvmf_bdev_ctrlr_copy_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
 	struct spdk_nvme_cmd *cmd = &req->cmd->nvme_cmd;
 	struct spdk_nvme_cpl *response = &req->rsp->nvme_cpl;
 	uint64_t sdlba = ((uint64_t)cmd->cdw11 << 32) + cmd->cdw10;
-	struct spdk_nvme_scc_source_range *range;
+	struct spdk_nvme_scc_source_range range = { 0 };
+	struct spdk_iov_xfer ix;
 	int rc;
 
 	SPDK_DEBUGLOG(nvmf, "Copy command: SDLBA %lu, NR %u, desc format %u, PRINFOR %u, "
@@ -689,14 +694,10 @@ nvmf_bdev_ctrlr_copy_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 	}
 
-	if (!spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_COPY)) {
-		SPDK_NOTICELOG("Copy command not supported by bdev\n");
-		response->status.sct = SPDK_NVME_SCT_GENERIC;
-		response->status.sc = SPDK_NVME_SC_INVALID_OPCODE;
-		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
-	}
-
-	/* We support only one source range */
+	/*
+	 * We support only one source range, and rely on this with the xfer
+	 * below.
+	 */
 	if (cmd->cdw12_bits.copy.nr > 0) {
 		response->status.sct = SPDK_NVME_SCT_COMMAND_SPECIFIC;
 		response->status.sc = SPDK_NVME_SC_CMD_SIZE_LIMIT_SIZE_EXCEEDED;
@@ -709,8 +710,10 @@ nvmf_bdev_ctrlr_copy_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 	}
 
-	range = req->data;
-	rc = spdk_bdev_copy_blocks(desc, ch, sdlba, range->slba, range->nlb + 1,
+	spdk_iov_xfer_init(&ix, req->iov, req->iovcnt);
+	spdk_iov_xfer_to_buf(&ix, &range, sizeof(range));
+
+	rc = spdk_bdev_copy_blocks(desc, ch, sdlba, range.slba, range.nlb + 1,
 				   nvmf_bdev_ctrlr_complete_cmd, req);
 	if (spdk_unlikely(rc)) {
 		if (rc == -ENOMEM) {
@@ -732,7 +735,14 @@ nvmf_bdev_ctrlr_nvme_passthru_io(struct spdk_bdev *bdev, struct spdk_bdev_desc *
 {
 	int rc;
 
-	rc = spdk_bdev_nvme_io_passthru(desc, ch, &req->cmd->nvme_cmd, req->data, req->length,
+	if (spdk_unlikely(req->iovcnt != 1)) {
+		req->rsp->nvme_cpl.status.sct = SPDK_NVME_SCT_GENERIC;
+		req->rsp->nvme_cpl.status.sc = SPDK_NVME_SC_INTERNAL_DEVICE_ERROR;
+		req->rsp->nvme_cpl.status.dnr = 1;
+		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+	}
+
+	rc = spdk_bdev_nvme_io_passthru(desc, ch, &req->cmd->nvme_cmd, req->iov[0].iov_base, req->length,
 					nvmf_bdev_ctrlr_complete_cmd, req);
 	if (spdk_unlikely(rc)) {
 		if (rc == -ENOMEM) {
@@ -755,9 +765,16 @@ spdk_nvmf_bdev_ctrlr_nvme_passthru_admin(struct spdk_bdev *bdev, struct spdk_bde
 {
 	int rc;
 
+	if (spdk_unlikely(req->iovcnt != 1)) {
+		req->rsp->nvme_cpl.status.sct = SPDK_NVME_SCT_GENERIC;
+		req->rsp->nvme_cpl.status.sc = SPDK_NVME_SC_INTERNAL_DEVICE_ERROR;
+		req->rsp->nvme_cpl.status.dnr = 1;
+		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+	}
+
 	req->cmd_cb_fn = cb_fn;
 
-	rc = spdk_bdev_nvme_admin_passthru(desc, ch, &req->cmd->nvme_cmd, req->data, req->length,
+	rc = spdk_bdev_nvme_admin_passthru(desc, ch, &req->cmd->nvme_cmd, req->iov[0].iov_base, req->length,
 					   nvmf_bdev_ctrlr_complete_admin_cmd, req);
 	if (spdk_unlikely(rc)) {
 		if (rc == -ENOMEM) {

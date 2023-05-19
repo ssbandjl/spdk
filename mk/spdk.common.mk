@@ -97,8 +97,8 @@ COMMON_CFLAGS += -Werror
 endif
 
 ifeq ($(CONFIG_LTO),y)
-COMMON_CFLAGS += -flto
-LDFLAGS += -flto
+COMMON_CFLAGS += -flto=auto
+LDFLAGS += -flto=auto
 endif
 
 ifeq ($(CONFIG_PGO_CAPTURE),y)
@@ -154,14 +154,8 @@ endif
 SYS_LIBS =
 
 ifeq ($(OS),FreeBSD)
-SYS_LIBS += -L/usr/local/lib
+SYS_LIBS += -lexecinfo -L/usr/local/lib
 COMMON_CFLAGS += -I/usr/local/include
-endif
-
-# Attach only if PMDK lib specified with configure
-ifneq ($(CONFIG_PMDK_DIR),)
-LIBS += -L$(CONFIG_PMDK_DIR)/src/nondebug
-COMMON_CFLAGS += -I$(CONFIG_PMDK_DIR)/src/include
 endif
 
 ifeq ($(CONFIG_RDMA),y)
@@ -238,6 +232,10 @@ ifneq ($(CONFIG_DAOS_DIR),)
 CFLAGS += -I$(CONFIG_DAOS_DIR)/include
 LDFLAGS += -L$(CONFIG_DAOS_DIR)/lib64
 endif
+endif
+
+ifeq ($(CONFIG_UBLK),y)
+SYS_LIBS += -luring
 endif
 
 #Attach only if FreeBSD and RDMA is specified with configure
@@ -334,7 +332,9 @@ CFLAGS   += $(COMMON_CFLAGS) -Wno-pointer-sign -Wstrict-prototypes -Wold-style-d
 CXXFLAGS += $(COMMON_CFLAGS) -std=c++11
 
 SYS_LIBS += -lrt
+ifneq ($(OS),FreeBSD)
 SYS_LIBS += -luuid
+endif
 SYS_LIBS += -lssl
 SYS_LIBS += -lcrypto
 SYS_LIBS += -lm

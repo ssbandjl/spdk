@@ -259,7 +259,7 @@ dump_nvmf_subsystem(struct spdk_json_write_ctx *w, struct spdk_nvmf_subsystem *s
 				json_write_hex_str(w, ns_opts.eui64, sizeof(ns_opts.eui64));
 			}
 
-			if (!spdk_mem_all_zero(&ns_opts.uuid, sizeof(ns_opts.uuid))) {
+			if (!spdk_uuid_is_null(&ns_opts.uuid)) {
 				char uuid_str[SPDK_UUID_STRING_LEN];
 
 				spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), &ns_opts.uuid);
@@ -622,6 +622,7 @@ enum nvmf_rpc_listen_op {
 struct nvmf_rpc_listener_ctx {
 	char				*nqn;
 	char				*tgt_name;
+	bool				secure_channel;
 	struct spdk_nvmf_tgt		*tgt;
 	struct spdk_nvmf_transport	*transport;
 	struct spdk_nvmf_subsystem	*subsystem;
@@ -641,6 +642,7 @@ static const struct spdk_json_object_decoder nvmf_rpc_listener_decoder[] = {
 	{"nqn", offsetof(struct nvmf_rpc_listener_ctx, nqn), spdk_json_decode_string},
 	{"listen_address", offsetof(struct nvmf_rpc_listener_ctx, address), decode_rpc_listen_address},
 	{"tgt_name", offsetof(struct nvmf_rpc_listener_ctx, tgt_name), spdk_json_decode_string, true},
+	{"secure_channel", offsetof(struct nvmf_rpc_listener_ctx, secure_channel), spdk_json_decode_bool, true},
 };
 
 static void
@@ -893,6 +895,13 @@ rpc_nvmf_subsystem_add_listener(struct spdk_jsonrpc_request *request,
 	ctx->op = NVMF_RPC_LISTEN_ADD;
 	spdk_nvmf_listen_opts_init(&ctx->opts, sizeof(ctx->opts));
 	ctx->opts.transport_specific = params;
+	if (subsystem->flags.allow_any_host == 1 && ctx->secure_channel == true) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Cannot establish secure channel, when 'allow_any_host' is set");
+		nvmf_rpc_listener_ctx_free(ctx);
+		return;
+	}
+	ctx->opts.secure_channel = ctx->secure_channel;
 
 	rc = spdk_nvmf_subsystem_pause(subsystem, 0, nvmf_rpc_listen_paused, ctx);
 	if (rc != 0) {
@@ -1221,7 +1230,7 @@ nvmf_rpc_ns_paused(struct spdk_nvmf_subsystem *subsystem,
 	SPDK_STATIC_ASSERT(sizeof(ns_opts.eui64) == sizeof(ctx->ns_params.eui64), "size mismatch");
 	memcpy(ns_opts.eui64, ctx->ns_params.eui64, sizeof(ns_opts.eui64));
 
-	if (!spdk_mem_all_zero(&ctx->ns_params.uuid, sizeof(ctx->ns_params.uuid))) {
+	if (!spdk_uuid_is_null(&ctx->ns_params.uuid)) {
 		ns_opts.uuid = ctx->ns_params.uuid;
 	}
 
@@ -1453,9 +1462,9 @@ rpc_nvmf_subsystem_add_host(struct spdk_jsonrpc_request *request,
 	struct spdk_nvmf_tgt *tgt;
 	int rc;
 
-	if (spdk_json_decode_object(params, nvmf_rpc_subsystem_host_decoder,
-				    SPDK_COUNTOF(nvmf_rpc_subsystem_host_decoder),
-				    &ctx)) {
+	if (spdk_json_decode_object_relaxed(params, nvmf_rpc_subsystem_host_decoder,
+					    SPDK_COUNTOF(nvmf_rpc_subsystem_host_decoder),
+					    &ctx)) {
 		SPDK_ERRLOG("spdk_json_decode_object failed\n");
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
 		nvmf_rpc_host_ctx_free(&ctx);
@@ -1479,7 +1488,7 @@ rpc_nvmf_subsystem_add_host(struct spdk_jsonrpc_request *request,
 		return;
 	}
 
-	rc = spdk_nvmf_subsystem_add_host(subsystem, ctx.host);
+	rc = spdk_nvmf_subsystem_add_host(subsystem, ctx.host, params);
 	if (rc != 0) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Internal error");
 		nvmf_rpc_host_ctx_free(&ctx);
@@ -1925,11 +1934,31 @@ nvmf_rpc_tgt_add_transport_done(void *cb_arg, int status)
 }
 
 static void
+nvmf_rpc_create_transport_done(void *cb_arg, struct spdk_nvmf_transport *transport)
+{
+	struct nvmf_rpc_create_transport_ctx *ctx = cb_arg;
+
+	if (!transport) {
+		SPDK_ERRLOG("Failed to create transport.\n");
+		spdk_jsonrpc_send_error_response(ctx->request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Failed to create transport.");
+		nvmf_rpc_create_transport_ctx_free(ctx);
+		return;
+	}
+
+	ctx->transport = transport;
+
+	spdk_nvmf_tgt_add_transport(spdk_nvmf_get_tgt(ctx->tgt_name), transport,
+				    nvmf_rpc_tgt_add_transport_done, ctx);
+}
+
+static void
 rpc_nvmf_create_transport(struct spdk_jsonrpc_request *request,
 			  const struct spdk_json_val *params)
 {
 	struct nvmf_rpc_create_transport_ctx *ctx;
 	struct spdk_nvmf_tgt *tgt;
+	int rc;
 
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) {
@@ -1989,20 +2018,15 @@ rpc_nvmf_create_transport(struct spdk_jsonrpc_request *request,
 
 	/* Transport can parse additional params themselves */
 	ctx->opts.transport_specific = params;
+	ctx->request = request;
 
-	ctx->transport = spdk_nvmf_transport_create(ctx->trtype, &ctx->opts);
-
-	if (!ctx->transport) {
+	rc = spdk_nvmf_transport_create_async(ctx->trtype, &ctx->opts, nvmf_rpc_create_transport_done, ctx);
+	if (rc) {
 		SPDK_ERRLOG("Transport type '%s' create failed\n", ctx->trtype);
 		spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
 						     "Transport type '%s' create failed", ctx->trtype);
 		nvmf_rpc_create_transport_ctx_free(ctx);
-		return;
 	}
-
-	/* add transport to target */
-	ctx->request = request;
-	spdk_nvmf_tgt_add_transport(tgt, ctx->transport, nvmf_rpc_tgt_add_transport_done, ctx);
 }
 SPDK_RPC_REGISTER("nvmf_create_transport", rpc_nvmf_create_transport, SPDK_RPC_RUNTIME)
 

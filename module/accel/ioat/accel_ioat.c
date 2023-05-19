@@ -7,7 +7,7 @@
 
 #include "spdk/stdinc.h"
 
-#include "spdk_internal/accel_module.h"
+#include "spdk/accel_module.h"
 #include "spdk/log.h"
 #include "spdk/likely.h"
 
@@ -163,11 +163,6 @@ ioat_submit_tasks(struct spdk_io_channel *ch, struct spdk_accel_task *accel_task
 	struct ioat_io_channel *ioat_ch = spdk_io_channel_get_ctx(ch);
 	struct spdk_accel_task *tmp;
 	int rc = 0;
-
-	if (accel_task->flags == ACCEL_FLAG_PERSISTENT) {
-		SPDK_ERRLOG("IOAT does not support durable destinations.\n");
-		return -EINVAL;
-	}
 
 	do {
 		switch (accel_task->op_code) {

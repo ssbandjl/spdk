@@ -4,16 +4,14 @@
 #  Copyright (c) 2022 Dell Inc, or its subsidiaries.
 
 
-def bdev_set_options(client, bdev_io_pool_size=None, bdev_io_cache_size=None, bdev_auto_examine=None,
-                     small_buf_pool_size=None, large_buf_pool_size=None):
+def bdev_set_options(client, bdev_io_pool_size=None, bdev_io_cache_size=None,
+                     bdev_auto_examine=None):
     """Set parameters for the bdev subsystem.
 
     Args:
         bdev_io_pool_size: number of bdev_io structures in shared buffer pool (optional)
         bdev_io_cache_size: maximum number of bdev_io structures cached per thread (optional)
         bdev_auto_examine: if set to false, the bdev layer will not examine every disks automatically (optional)
-        small_buf_pool_size: maximum number of small buffer (8KB buffer) pool size (optional)
-        large_buf_pool_size: maximum number of large buffer (64KB buffer) pool size (optional)
     """
     params = {}
 
@@ -23,10 +21,6 @@ def bdev_set_options(client, bdev_io_pool_size=None, bdev_io_cache_size=None, bd
         params['bdev_io_cache_size'] = bdev_io_cache_size
     if bdev_auto_examine is not None:
         params["bdev_auto_examine"] = bdev_auto_examine
-    if small_buf_pool_size:
-        params['small_buf_pool_size'] = small_buf_pool_size
-    if large_buf_pool_size:
-        params['large_buf_pool_size'] = large_buf_pool_size
     return client.call('bdev_set_options', params)
 
 
@@ -78,17 +72,6 @@ def bdev_compress_delete(client, name):
     return client.call('bdev_compress_delete', params)
 
 
-def bdev_compress_set_pmd(client, pmd):
-    """Set pmd options for the bdev compress.
-
-    Args:
-        pmd: 0 = auto-select, 1 = QAT, 2 = ISAL, 3 = mlx5_pci
-    """
-    params = {'pmd': pmd}
-
-    return client.call('bdev_compress_set_pmd', params)
-
-
 def bdev_compress_get_orphans(client, name=None):
     """Get a list of comp bdevs that do not have a pmem file (aka orphaned).
 
@@ -104,23 +87,33 @@ def bdev_compress_get_orphans(client, name=None):
     return client.call('bdev_compress_get_orphans', params)
 
 
-def bdev_crypto_create(client, base_bdev_name, name, crypto_pmd, key, cipher=None, key2=None):
+def bdev_crypto_create(client, base_bdev_name, name, crypto_pmd=None, key=None, cipher=None, key2=None, key_name=None):
     """Construct a crypto virtual block device.
 
     Args:
         base_bdev_name: name of the underlying base bdev
         name: name for the crypto vbdev
-        crypto_pmd: name of of the DPDK crypto driver to use
+        crypto_pmd: name of the DPDK crypto driver to use
         key: key
+        cipher: crypto algorithm to use
+        key2: Optional second part of the key
+        key_name: The key name to use in crypto operations
 
     Returns:
         Name of created virtual block device.
     """
-    params = {'base_bdev_name': base_bdev_name, 'name': name, 'crypto_pmd': crypto_pmd, 'key': key}
-    if cipher:
-        params['cipher'] = cipher
-    if key2:
+    params = {'base_bdev_name': base_bdev_name, 'name': name}
+
+    if crypto_pmd is not None:
+        params['crypto_pmd'] = crypto_pmd
+    if key is not None:
+        params['key'] = key
+    if key2 is not None:
         params['key2'] = key2
+    if cipher is not None:
+        params['cipher'] = cipher
+    if key_name is not None:
+        params['key_name'] = key_name
     return client.call('bdev_crypto_create', params)
 
 
@@ -184,6 +177,20 @@ def bdev_ocf_get_stats(client, name):
     params = {'name': name}
 
     return client.call('bdev_ocf_get_stats', params)
+
+
+def bdev_ocf_reset_stats(client, name):
+    """Reset statistics of chosen OCF block device
+
+    Args:
+        name: name of OCF bdev
+
+    Returns:
+        None
+    """
+    params = {'name': name}
+
+    return client.call('bdev_ocf_reset_stats', params)
 
 
 def bdev_ocf_get_bdevs(client, name=None):
@@ -269,13 +276,14 @@ def bdev_ocf_flush_status(client, name):
     return client.call('bdev_ocf_flush_status', params)
 
 
-def bdev_malloc_create(client, num_blocks, block_size, name=None, uuid=None, optimal_io_boundary=None,
+def bdev_malloc_create(client, num_blocks, block_size, physical_block_size=None, name=None, uuid=None, optimal_io_boundary=None,
                        md_size=None, md_interleave=None, dif_type=None, dif_is_head_of_md=None):
     """Construct a malloc block device.
 
     Args:
         num_blocks: size of block device in blocks
         block_size: Data block size of device; must be a power of 2 and at least 512
+        physical_block_size: Physical block size of device; must be a power of 2 and at least 512 (optional)
         name: name of block device (optional)
         uuid: UUID of block device (optional)
         optimal_io_boundary: Split on optimal IO boundary, in number of blocks, default 0 (disabled, optional)
@@ -288,6 +296,8 @@ def bdev_malloc_create(client, num_blocks, block_size, name=None, uuid=None, opt
         Name of created block device.
     """
     params = {'num_blocks': num_blocks, 'block_size': block_size}
+    if physical_block_size:
+        params['physical_block_size'] = physical_block_size
     if name:
         params['name'] = name
     if uuid:
@@ -316,7 +326,7 @@ def bdev_malloc_delete(client, name):
     return client.call('bdev_malloc_delete', params)
 
 
-def bdev_null_create(client, num_blocks, block_size, name, uuid=None, md_size=None,
+def bdev_null_create(client, num_blocks, block_size, name, physical_block_size=None, uuid=None, md_size=None,
                      dif_type=None, dif_is_head_of_md=None):
     """Construct a null block device.
 
@@ -324,6 +334,7 @@ def bdev_null_create(client, num_blocks, block_size, name, uuid=None, md_size=No
         num_blocks: size of block device in blocks
         block_size: block size of device; data part size must be a power of 2 and at least 512
         name: name of block device
+        physical_block_size: physical block size of the device; data part size must be a power of 2 and at least 512 (optional)
         uuid: UUID of block device (optional)
         md_size: metadata size of device (optional)
         dif_type: protection information type (optional)
@@ -334,6 +345,8 @@ def bdev_null_create(client, num_blocks, block_size, name, uuid=None, md_size=No
     """
     params = {'name': name, 'num_blocks': num_blocks,
               'block_size': block_size}
+    if physical_block_size:
+        params['physical_block_size'] = physical_block_size
     if uuid:
         params['uuid'] = uuid
     if md_size:
@@ -382,7 +395,7 @@ def bdev_raid_get_bdevs(client, category):
     return client.call('bdev_raid_get_bdevs', params)
 
 
-def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size=None, strip_size_kb=None):
+def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size=None, strip_size_kb=None, uuid=None):
     """Create raid bdev. Either strip size arg will work but one is required.
 
     Args:
@@ -391,6 +404,7 @@ def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size=None, stri
         strip_size_kb: strip size of raid bdev in KB, supported values like 8, 16, 32, 64, 128, 256, etc
         raid_level: raid level of raid bdev, supported values 0
         base_bdevs: Space separated names of Nvme bdevs in double quotes, like "Nvme0n1 Nvme1n1 Nvme2n1"
+        uuid: UUID for this raid bdev (optional)
 
     Returns:
         None
@@ -402,6 +416,9 @@ def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size=None, stri
 
     if strip_size_kb:
         params['strip_size_kb'] = strip_size_kb
+
+    if uuid:
+        params['uuid'] = uuid
 
     return client.call('bdev_raid_create', params)
 
@@ -533,7 +550,7 @@ def bdev_nvme_set_options(client, action_on_timeout=None, timeout_us=None, timeo
                           delay_cmd_submit=None, transport_retry_count=None, bdev_retry_count=None,
                           transport_ack_timeout=None, ctrlr_loss_timeout_sec=None, reconnect_delay_sec=None,
                           fast_io_fail_timeout_sec=None, disable_auto_failback=None, generate_uuids=None,
-                          transport_tos=None, nvme_error_stat=None, rdma_srq_size=None):
+                          transport_tos=None, nvme_error_stat=None, rdma_srq_size=None, io_path_stat=None):
     """Set options for the bdev nvme. This is startup command.
 
     Args:
@@ -577,6 +594,7 @@ def bdev_nvme_set_options(client, action_on_timeout=None, timeout_us=None, timeo
         The default is 0 which means no TOS is applied. (optional)
         nvme_error_stat: Enable collecting NVMe error counts. (optional)
         rdma_srq_size: Set the size of a shared rdma receive queue. Default: 0 (disabled) (optional)
+        io_path_stat: Enable collection I/O path stat of each io path. (optional)
 
     """
     params = {}
@@ -654,6 +672,9 @@ def bdev_nvme_set_options(client, action_on_timeout=None, timeout_us=None, timeo
     if rdma_srq_size is not None:
         params['rdma_srq_size'] = rdma_srq_size
 
+    if io_path_stat is not None:
+        params['io_path_stat'] = io_path_stat
+
     return client.call('bdev_nvme_set_options', params)
 
 
@@ -677,7 +698,7 @@ def bdev_nvme_attach_controller(client, name, trtype, traddr, adrfam=None, trsvc
                                 hostsvcid=None, prchk_reftag=None, prchk_guard=None,
                                 hdgst=None, ddgst=None, fabrics_timeout=None, multipath=None, num_io_queues=None,
                                 ctrlr_loss_timeout_sec=None, reconnect_delay_sec=None,
-                                fast_io_fail_timeout_sec=None, psk=None):
+                                fast_io_fail_timeout_sec=None, psk=None, max_bdevs=None):
     """Construct block device for each NVMe namespace in the attached controller.
 
     Args:
@@ -713,6 +734,7 @@ def bdev_nvme_attach_controller(client, name, trtype, traddr, adrfam=None, trsvc
         If fast_io_fail_timeout_sec is not zero, it has to be not less than reconnect_delay_sec and less than
         ctrlr_loss_timeout_sec if ctrlr_loss_timeout_sec is not -1. (optional)
         psk: Set PSK and enable TCP SSL socket implementation (optional)
+        max_bdevs: Size of the name array for newly created bdevs. Default is 128. (optional)
 
     Returns:
         Names of created block devices.
@@ -774,6 +796,9 @@ def bdev_nvme_attach_controller(client, name, trtype, traddr, adrfam=None, trsvc
 
     if psk:
         params['psk'] = psk
+
+    if max_bdevs is not None:
+        params['max_bdevs'] = max_bdevs
 
     return client.call('bdev_nvme_attach_controller', params)
 
@@ -943,18 +968,38 @@ def bdev_nvme_set_preferred_path(client, name, cntlid):
     return client.call('bdev_nvme_set_preferred_path', params)
 
 
-def bdev_nvme_set_multipath_policy(client, name, policy):
+def bdev_nvme_set_multipath_policy(client, name, policy, selector, rr_min_io):
     """Set multipath policy of the NVMe bdev
 
     Args:
         name: NVMe bdev name
         policy: Multipath policy (active_passive or active_active)
+        selector: Multipath selector (round_robin, queue_depth)
+        rr_min_io: Number of IO to route to a path before switching to another one (optional)
     """
 
     params = {'name': name,
               'policy': policy}
+    if selector:
+        params['selector'] = selector
+    if rr_min_io:
+        params['rr_min_io'] = rr_min_io
 
     return client.call('bdev_nvme_set_multipath_policy', params)
+
+
+def bdev_nvme_get_path_iostat(client, name):
+    """Get I/O statistics for IO paths of the block device.
+
+    Args:
+        name: bdev name to query
+
+    Returns:
+        I/O statistics for IO paths of the requested block device.
+    """
+    params = {'name': name}
+
+    return client.call('bdev_nvme_get_path_iostat', params)
 
 
 def bdev_nvme_cuse_register(client, name):
@@ -1009,7 +1054,7 @@ def bdev_zone_block_delete(client, name):
     return client.call('bdev_zone_block_delete', params)
 
 
-def bdev_rbd_register_cluster(client, name, user=None, config_param=None, config_file=None, key_file=None):
+def bdev_rbd_register_cluster(client, name, user=None, config_param=None, config_file=None, key_file=None, core_mask=None):
     """Create a Rados Cluster object of the Ceph RBD backend.
 
     Args:
@@ -1018,6 +1063,7 @@ def bdev_rbd_register_cluster(client, name, user=None, config_param=None, config
         config_param: map of config keys to values (optional)
         config_file: file path of Ceph configuration file (optional)
         key_file: file path of Ceph key file (optional)
+        core_mask: core mask for librbd IO context threads (optional)
 
     Returns:
         Name of registered Rados Cluster object.
@@ -1032,6 +1078,8 @@ def bdev_rbd_register_cluster(client, name, user=None, config_param=None, config
         params['config_file'] = config_file
     if key_file is not None:
         params['key_file'] = key_file
+    if core_mask is not None:
+        params['core_mask'] = core_mask
 
     return client.call('bdev_rbd_register_cluster', params)
 
@@ -1123,17 +1171,20 @@ def bdev_rbd_resize(client, name, new_size):
     return client.call('bdev_rbd_resize', params)
 
 
-def bdev_error_create(client, base_name):
+def bdev_error_create(client, base_name, uuid=None):
     """Construct an error injection block device.
 
     Args:
         base_name: base bdev name
+        uuid: UUID for this bdev (optional)
     """
     params = {'base_name': base_name}
+    if uuid is not None:
+        params['uuid'] = uuid
     return client.call('bdev_error_create', params)
 
 
-def bdev_delay_create(client, base_bdev_name, name, avg_read_latency, p99_read_latency, avg_write_latency, p99_write_latency):
+def bdev_delay_create(client, base_bdev_name, name, avg_read_latency, p99_read_latency, avg_write_latency, p99_write_latency, uuid=None):
     """Construct a delay block device.
 
     Args:
@@ -1143,6 +1194,7 @@ def bdev_delay_create(client, base_bdev_name, name, avg_read_latency, p99_read_l
         p99_read_latency: complete 1% of read ops with this delay
         avg_write_latency: complete 99% of write ops with this delay
         p99_write_latency: complete 1% of write ops with this delay
+        uuid: UUID of block device (optional)
 
     Returns:
         Name of created block device.
@@ -1155,6 +1207,8 @@ def bdev_delay_create(client, base_bdev_name, name, avg_read_latency, p99_read_l
         'avg_write_latency': avg_write_latency,
         'p99_write_latency': p99_write_latency,
     }
+    if uuid:
+        params['uuid'] = uuid
     return client.call('bdev_delay_create', params)
 
 
@@ -1238,33 +1292,6 @@ def bdev_iscsi_delete(client, name):
     """
     params = {'name': name}
     return client.call('bdev_iscsi_delete', params)
-
-
-def bdev_pmem_create(client, pmem_file, name):
-    """Construct a libpmemblk block device.
-
-    Args:
-        pmem_file: path to pmemblk pool file
-        name: name of block device
-
-    Returns:
-        Name of created block device.
-    """
-    params = {
-        'pmem_file': pmem_file,
-        'name': name
-    }
-    return client.call('bdev_pmem_create', params)
-
-
-def bdev_pmem_delete(client, name):
-    """Remove pmem bdev from the system.
-
-    Args:
-        name: name of pmem bdev to delete
-    """
-    params = {'name': name}
-    return client.call('bdev_pmem_delete', params)
 
 
 def bdev_passthru_create(client, base_bdev_name, name):

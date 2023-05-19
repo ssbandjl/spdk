@@ -39,7 +39,6 @@
 	spdk_nvme_ctrlr_set_trid;
 	spdk_nvme_ctrlr_reset_subsystem;
 	spdk_nvme_ctrlr_reset;
-	spdk_nvme_ctrlr_prepare_for_reset;
 	spdk_nvme_ctrlr_reset_async;
 	spdk_nvme_ctrlr_reset_poll_async;
 	spdk_nvme_ctrlr_disconnect;
@@ -117,12 +116,14 @@
 	spdk_nvme_ctrlr_set_remove_cb;
 	spdk_nvme_ctrlr_get_memory_domains;
 	spdk_nvme_ctrlr_get_discovery_log_page;
+	spdk_nvme_ctrlr_get_registers;
 
 	spdk_nvme_poll_group_create;
 	spdk_nvme_poll_group_add;
 	spdk_nvme_poll_group_remove;
 	spdk_nvme_poll_group_destroy;
 	spdk_nvme_poll_group_process_completions;
+	spdk_nvme_poll_group_all_connected;
 	spdk_nvme_poll_group_get_ctx;
 
 	spdk_nvme_ns_get_data;
@@ -136,6 +137,7 @@
 	spdk_nvme_ns_get_size;
 	spdk_nvme_ns_get_pi_type;
 	spdk_nvme_ns_get_md_size;
+	spdk_nvme_ns_get_format_index;
 	spdk_nvme_ns_supports_extended_lba;
 	spdk_nvme_ns_supports_compare;
 	spdk_nvme_ns_get_dealloc_logical_block_read_value;
@@ -164,6 +166,8 @@
 	spdk_nvme_ns_cmd_reservation_release;
 	spdk_nvme_ns_cmd_reservation_acquire;
 	spdk_nvme_ns_cmd_reservation_report;
+	spdk_nvme_ns_cmd_io_mgmt_recv;
+	spdk_nvme_ns_cmd_io_mgmt_send;
 	spdk_nvme_ns_cmd_compare;
 	spdk_nvme_ns_cmd_comparev;
 	spdk_nvme_ns_cmd_comparev_with_md;
@@ -181,6 +185,7 @@
 	spdk_nvme_qpair_print_completion;
 	spdk_nvme_qpair_get_id;
 	spdk_nvme_qpair_get_num_outstanding_reqs;
+	spdk_nvme_qpair_set_abort_dnr;
 
 	spdk_nvme_print_command;
 	spdk_nvme_print_completion;

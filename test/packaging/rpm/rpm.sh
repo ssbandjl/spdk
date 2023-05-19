@@ -7,6 +7,7 @@
 testdir=$(readlink -f "$(dirname "$0")")
 rootdir=$(readlink -f "$testdir/../../../")
 source "$rootdir/test/common/autotest_common.sh"
+shopt -s extglob
 
 builddir=$SPDK_TEST_STORAGE/test-rpm
 
@@ -23,7 +24,7 @@ export MAKEFLAGS BUILDDIR DEPS
 install_uninstall_rpms() {
 	local rpms
 
-	rpms=("${1:-$builddir/rpm/}/x86_64/"*.rpm)
+	rpms=("${1:-$builddir/rpm/}/$(uname -m)/"*.rpm)
 
 	sudo rpm -i "${rpms[@]}"
 	# Check if we can find one of the apps in the PATH now and verify if it doesn't miss
@@ -47,9 +48,16 @@ build_shared_rpm() {
 }
 
 build_rpm_with_rpmed_dpdk() {
-	local es=0
+	local es=0 dpdk_rpms=()
 
-	sudo dnf install -y dpdk-devel
+	dpdk_rpms=(/var/spdk/dependencies/autotest/dpdk/dpdk?(-devel).rpm)
+	if ((${#dpdk_rpms[@]} == 2)); then # dpdk, dpdk-devel
+		echo "INFO: Installing DPDK from local package: $(rpm -q --queryformat="%{VERSION}" "${dpdk_rpms[0]}")" >&2
+		sudo rpm -i "${dpdk_rpms[@]}"
+	else
+		echo "WARNING: No local packages found, trying to install DPDK from the remote" >&2
+		sudo dnf install -y dpdk-devel
+	fi
 	build_rpm --with-shared --with-dpdk || es=$?
 
 	if ((es == 11)); then
@@ -85,16 +93,20 @@ build_rpm_from_gen_spec() {
 }
 
 build_shared_native_dpdk_rpm() {
+	[[ -e /tmp/spdk-ld-path ]] # autobuild dependency
+	source /tmp/spdk-ld-path
 	build_rpm --with-shared --with-dpdk="$SPDK_RUN_EXTERNAL_DPDK"
 }
 
 run_test "build_shared_rpm" build_shared_rpm
+run_test "build_rpm_from_gen_spec" build_rpm_from_gen_spec
+
 if ((RUN_NIGHTLY == 1)); then
 	run_test "build_shared_rpm_with_rpmed_dpdk" build_rpm_with_rpmed_dpdk
-	run_test "build_rpm_from_gen_spec" build_rpm_from_gen_spec
-	if [[ -n $SPDK_TEST_NATIVE_DPDK ]]; then
-		run_test "build_shared_native_dpdk_rpm" build_shared_native_dpdk_rpm
-	fi
+fi
+
+if [[ -n $SPDK_TEST_NATIVE_DPDK ]]; then
+	run_test "build_shared_native_dpdk_rpm" build_shared_native_dpdk_rpm
 fi
 
 rm -rf "$builddir"

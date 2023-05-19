@@ -530,14 +530,14 @@ _nvme_pcie_ctrlr_create_io_qpair(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme
 	int	rc;
 
 	/* Statistics may already be allocated in the case of controller reset */
-	if (!pqpair->stat) {
-		if (qpair->poll_group) {
-			struct nvme_pcie_poll_group *group = SPDK_CONTAINEROF(qpair->poll_group,
-							     struct nvme_pcie_poll_group, group);
+	if (qpair->poll_group) {
+		struct nvme_pcie_poll_group *group = SPDK_CONTAINEROF(qpair->poll_group,
+						     struct nvme_pcie_poll_group, group);
 
-			pqpair->stat = &group->stats;
-			pqpair->shared_stats = true;
-		} else {
+		pqpair->stat = &group->stats;
+		pqpair->shared_stats = true;
+	} else {
+		if (pqpair->stat == NULL) {
 			pqpair->stat = calloc(1, sizeof(*pqpair->stat));
 			if (!pqpair->stat) {
 				SPDK_ERRLOG("Failed to allocate qpair statistics\n");
@@ -546,7 +546,6 @@ _nvme_pcie_ctrlr_create_io_qpair(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme
 			}
 		}
 	}
-
 
 	rc = nvme_pcie_ctrlr_cmd_create_io_cq(ctrlr, qpair, nvme_completion_create_cq_cb, qpair);
 
@@ -925,13 +924,13 @@ nvme_pcie_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t max_
 		}
 
 		tr = &pqpair->tr[cpl->cid];
-		/* Prefetch the req's STAILQ_ENTRY since we'll need to access it
-		 * as part of putting the req back on the qpair's free list.
-		 */
-		__builtin_prefetch(&tr->req->stailq);
 		pqpair->sq_head = cpl->sqhd;
 
 		if (tr->req) {
+			/* Prefetch the req's STAILQ_ENTRY since we'll need to access it
+			 * as part of putting the req back on the qpair's free list.
+			 */
+			__builtin_prefetch(&tr->req->stailq);
 			nvme_pcie_qpair_complete_tracker(qpair, tr, cpl, true);
 		} else {
 			SPDK_ERRLOG("cpl does not map to outstanding cmd\n");
@@ -973,7 +972,7 @@ nvme_pcie_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t max_
 
 		if (nvme_qpair_get_state(qpair) == NVME_QPAIR_DISCONNECTING) {
 			rc = nvme_ctrlr_disable_poll(qpair->ctrlr);
-			if (rc == 0) {
+			if (rc != -EAGAIN) {
 				nvme_transport_ctrlr_disconnect_qpair_done(qpair);
 			}
 		}
@@ -1583,7 +1582,7 @@ static build_req_fn const g_nvme_pcie_build_req_table[][2] = {
 
 static int
 nvme_pcie_qpair_build_metadata(struct spdk_nvme_qpair *qpair, struct nvme_tracker *tr,
-			       bool sgl_supported, bool dword_aligned)
+			       bool sgl_supported, bool mptr_sgl_supported, bool dword_aligned)
 {
 	void *md_payload;
 	struct nvme_request *req = tr->req;
@@ -1597,7 +1596,7 @@ nvme_pcie_qpair_build_metadata(struct spdk_nvme_qpair *qpair, struct nvme_tracke
 		}
 
 		mapping_length = req->md_size;
-		if (sgl_supported && dword_aligned) {
+		if (sgl_supported && mptr_sgl_supported && dword_aligned) {
 			assert(req->cmd.psdt == SPDK_NVME_PSDT_SGL_MPTR_CONTIG);
 			req->cmd.psdt = SPDK_NVME_PSDT_SGL_MPTR_SGL;
 
@@ -1633,6 +1632,7 @@ nvme_pcie_qpair_submit_request(struct spdk_nvme_qpair *qpair, struct nvme_reques
 	struct nvme_pcie_qpair	*pqpair = nvme_pcie_qpair(qpair);
 	enum nvme_payload_type	payload_type;
 	bool			sgl_supported;
+	bool			mptr_sgl_supported;
 	bool			dword_aligned = true;
 
 	if (spdk_unlikely(nvme_qpair_is_admin_queue(qpair))) {
@@ -1663,6 +1663,8 @@ nvme_pcie_qpair_submit_request(struct spdk_nvme_qpair *qpair, struct nvme_reques
 		 */
 		sgl_supported = (ctrlr->flags & SPDK_NVME_CTRLR_SGL_SUPPORTED) != 0 &&
 				!nvme_qpair_is_admin_queue(qpair);
+		mptr_sgl_supported = (ctrlr->flags & SPDK_NVME_CTRLR_MPTR_SGL_SUPPORTED) != 0 &&
+				     !nvme_qpair_is_admin_queue(qpair);
 
 		if (sgl_supported) {
 			/* Don't use SGL for DSM command */
@@ -1687,7 +1689,7 @@ nvme_pcie_qpair_submit_request(struct spdk_nvme_qpair *qpair, struct nvme_reques
 			goto exit;
 		}
 
-		rc = nvme_pcie_qpair_build_metadata(qpair, tr, sgl_supported, dword_aligned);
+		rc = nvme_pcie_qpair_build_metadata(qpair, tr, sgl_supported, mptr_sgl_supported, dword_aligned);
 		if (rc < 0) {
 			assert(rc == -EFAULT);
 			rc = 0;
@@ -1798,7 +1800,7 @@ nvme_pcie_poll_group_get_stats(struct spdk_nvme_transport_poll_group *tgroup,
 
 	stats = calloc(1, sizeof(*stats));
 	if (!stats) {
-		SPDK_ERRLOG("Can't allocate memory for RDMA stats\n");
+		SPDK_ERRLOG("Can't allocate memory for stats\n");
 		return -ENOMEM;
 	}
 	stats->trtype = SPDK_NVME_TRANSPORT_PCIE;

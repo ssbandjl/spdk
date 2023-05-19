@@ -69,8 +69,8 @@ struct spdk_posix_sock_group_impl {
 };
 
 static struct spdk_sock_impl_opts g_spdk_posix_sock_impl_opts = {
-	.recv_buf_size = MIN_SO_RCVBUF_SIZE,
-	.send_buf_size = MIN_SO_SNDBUF_SIZE,
+	.recv_buf_size = DEFAULT_SO_RCVBUF_SIZE,
+	.send_buf_size = DEFAULT_SO_SNDBUF_SIZE,
 	.enable_recv_pipe = true,
 	.enable_quickack = false,
 	.enable_placement_id = PLACEMENT_NONE,
@@ -80,7 +80,10 @@ static struct spdk_sock_impl_opts g_spdk_posix_sock_impl_opts = {
 	.tls_version = 0,
 	.enable_ktls = false,
 	.psk_key = NULL,
-	.psk_identity = NULL
+	.psk_key_size = 0,
+	.psk_identity = NULL,
+	.get_key = NULL,
+	.get_key_ctx = NULL
 };
 
 static struct spdk_sock_map g_map = {
@@ -121,7 +124,10 @@ posix_sock_copy_impl_opts(struct spdk_sock_impl_opts *dest, const struct spdk_so
 	SET_FIELD(tls_version);
 	SET_FIELD(enable_ktls);
 	SET_FIELD(psk_key);
+	SET_FIELD(psk_key_size);
 	SET_FIELD(psk_identity);
+	SET_FIELD(get_key);
+	SET_FIELD(get_key_ctx);
 
 #undef SET_FIELD
 #undef FIELD_OK
@@ -255,6 +261,7 @@ posix_sock_alloc_pipe(struct spdk_posix_sock *sock, int sz)
 	struct iovec diov[2];
 	int sbytes;
 	ssize_t bytes;
+	int rc;
 
 	if (sock->recv_buf_sz == sz) {
 		return 0;
@@ -273,13 +280,14 @@ posix_sock_alloc_pipe(struct spdk_posix_sock *sock, int sz)
 	}
 
 	/* Round up to next 64 byte multiple */
-	new_buf = calloc(SPDK_ALIGN_CEIL(sz + 1, 64), sizeof(uint8_t));
-	if (!new_buf) {
+	rc = posix_memalign((void **)&new_buf, 64, sz);
+	if (rc != 0) {
 		SPDK_ERRLOG("socket recv buf allocation failed\n");
 		return -ENOMEM;
 	}
+	memset(new_buf, 0, sz);
 
-	new_pipe = spdk_pipe_create(new_buf, sz + 1);
+	new_pipe = spdk_pipe_create(new_buf, sz);
 	if (new_pipe == NULL) {
 		SPDK_ERRLOG("socket pipe allocation failed\n");
 		free(new_buf);
@@ -517,46 +525,42 @@ posix_sock_tls_psk_server_cb(SSL *ssl,
 			     unsigned char *psk,
 			     unsigned int max_psk_len)
 {
-	long key_len;
-	unsigned char *default_psk;
+	const char *cipher = NULL;
 	struct spdk_sock_impl_opts *impl_opts;
+	int rc;
 
 	impl_opts = SSL_get_app_data(ssl);
-
-	if (impl_opts->psk_key == NULL) {
-		SPDK_ERRLOG("PSK is not set\n");
-		goto err;
-	}
-	SPDK_DEBUGLOG(sock_posix, "Length of Client's PSK ID %lu\n", strlen(impl_opts->psk_identity));
+	SPDK_DEBUGLOG(sock_posix, "Received PSK ID '%s'\n", id);
 	if (id == NULL) {
 		SPDK_ERRLOG("Received empty PSK ID\n");
-		goto err;
-	}
-	SPDK_DEBUGLOG(sock_posix,  "Received PSK ID '%s'\n", id);
-	if (strcmp(impl_opts->psk_identity, id) != 0) {
-		SPDK_ERRLOG("Unknown Client's PSK ID\n");
-		goto err;
+		return 0;
 	}
 
 	SPDK_DEBUGLOG(sock_posix, "Length of Client's PSK KEY %u\n", max_psk_len);
-	default_psk = OPENSSL_hexstr2buf(impl_opts->psk_key, &key_len);
-	if (default_psk == NULL) {
-		SPDK_ERRLOG("Could not unhexlify PSK\n");
-		goto err;
+
+	if (impl_opts->get_key) {
+		rc = impl_opts->get_key(psk, max_psk_len, &cipher, id, impl_opts->get_key_ctx);
+		assert(cipher == NULL);
+		return rc > 0 ? rc : 0;
+	} else {
+		if (impl_opts->psk_key == NULL) {
+			SPDK_ERRLOG("PSK is not set\n");
+			return 0;
+		}
+
+		SPDK_DEBUGLOG(sock_posix, "Length of Client's PSK ID %lu\n", strlen(impl_opts->psk_identity));
+		if (strcmp(impl_opts->psk_identity, id) != 0) {
+			SPDK_ERRLOG("Unknown Client's PSK ID\n");
+			return 0;
+		}
+		if (impl_opts->psk_key_size > max_psk_len) {
+			SPDK_ERRLOG("PSK too long\n");
+			return 0;
+		}
+
+		memcpy(psk, impl_opts->psk_key, impl_opts->psk_key_size);
+		return impl_opts->psk_key_size;
 	}
-	if (key_len > max_psk_len) {
-		SPDK_ERRLOG("Insufficient buffer size to copy PSK\n");
-		OPENSSL_free(default_psk);
-		goto err;
-	}
-
-	memcpy(psk, default_psk, key_len);
-	OPENSSL_free(default_psk);
-
-	return key_len;
-
-err:
-	return 0;
 }
 
 static unsigned int
@@ -567,7 +571,6 @@ posix_sock_tls_psk_client_cb(SSL *ssl, const char *hint,
 			     unsigned int max_psk_len)
 {
 	long key_len;
-	unsigned char *default_psk;
 	struct spdk_sock_impl_opts *impl_opts;
 
 	impl_opts = SSL_get_app_data(ssl);
@@ -580,23 +583,17 @@ posix_sock_tls_psk_client_cb(SSL *ssl, const char *hint,
 		SPDK_ERRLOG("PSK is not set\n");
 		goto err;
 	}
-	default_psk = OPENSSL_hexstr2buf(impl_opts->psk_key, &key_len);
-	if (default_psk == NULL) {
-		SPDK_ERRLOG("Could not unhexlify PSK\n");
-		goto err;
-	}
+	key_len = impl_opts->psk_key_size;
 	if ((strlen(impl_opts->psk_identity) + 1 > max_identity_len)
 	    || (key_len > max_psk_len)) {
-		OPENSSL_free(default_psk);
 		SPDK_ERRLOG("PSK ID or Key buffer is not sufficient\n");
 		goto err;
 	}
 	spdk_strcpy_pad(identity, impl_opts->psk_identity, strlen(impl_opts->psk_identity), 0);
 	SPDK_DEBUGLOG(sock_posix, "Sending PSK identity '%s'\n", identity);
 
-	memcpy(psk, default_psk, key_len);
+	memcpy(psk, impl_opts->psk_key, key_len);
 	SPDK_DEBUGLOG(sock_posix, "Provided out-of-band (OOB) PSK for TLS1.3 client\n");
-	OPENSSL_free(default_psk);
 
 	return key_len;
 
@@ -1176,7 +1173,8 @@ _sock_check_zcopy(struct spdk_sock *sock)
 		 * we encounter one match we can stop looping as soon as a
 		 * non-match is found.
 		 */
-		for (idx = serr->ee_info; idx <= serr->ee_data; idx++) {
+		idx = serr->ee_info;
+		while (true) {
 			found = false;
 			TAILQ_FOREACH_SAFE(req, &sock->pending_reqs, internal.link, treq) {
 				if (!req->internal.is_zcopy) {
@@ -1194,6 +1192,16 @@ _sock_check_zcopy(struct spdk_sock *sock)
 				} else if (found) {
 					break;
 				}
+			}
+
+			if (idx == serr->ee_data) {
+				break;
+			}
+
+			if (idx == UINT32_MAX) {
+				idx = 0;
+			} else {
+				idx++;
 			}
 		}
 	}
@@ -1213,14 +1221,15 @@ _sock_flush(struct spdk_sock *sock)
 	int retval;
 	struct spdk_sock_request *req;
 	int i;
-	ssize_t rc;
+	ssize_t rc, sent;
 	unsigned int offset;
 	size_t len;
 	bool is_zcopy = false;
 
 	/* Can't flush from within a callback or we end up with recursive calls */
 	if (sock->cb_cnt > 0) {
-		return 0;
+		errno = EAGAIN;
+		return -1;
 	}
 
 #ifdef SPDK_ZEROCOPY
@@ -1251,11 +1260,13 @@ _sock_flush(struct spdk_sock *sock)
 		rc = sendmsg(psock->fd, &msg, flags);
 	}
 	if (rc <= 0) {
-		if (errno == EAGAIN || errno == EWOULDBLOCK || (errno == ENOBUFS && psock->zcopy)) {
-			return 0;
+		if (rc == 0 || errno == EAGAIN || errno == EWOULDBLOCK || (errno == ENOBUFS && psock->zcopy)) {
+			errno = EAGAIN;
 		}
-		return rc;
+		return -1;
 	}
+
+	sent = rc;
 
 	if (is_zcopy) {
 		/* Handling overflow case, because we use psock->sendmsg_idx - 1 for the
@@ -1288,7 +1299,7 @@ _sock_flush(struct spdk_sock *sock)
 			if (len > (size_t)rc) {
 				/* This element was partially sent. */
 				req->internal.offset += rc;
-				return 0;
+				return sent;
 			}
 
 			offset = 0;
@@ -1320,7 +1331,7 @@ _sock_flush(struct spdk_sock *sock)
 		req = TAILQ_FIRST(&sock->queued_reqs);
 	}
 
-	return 0;
+	return sent;
 }
 
 static int
@@ -1522,6 +1533,35 @@ posix_sock_writev(struct spdk_sock *_sock, struct iovec *iov, int iovcnt)
 	}
 }
 
+static int
+posix_sock_recv_next(struct spdk_sock *_sock, void **buf, void **ctx)
+{
+	struct spdk_posix_sock *sock = __posix_sock(_sock);
+	struct iovec iov;
+	ssize_t rc;
+
+	if (sock->recv_pipe != NULL) {
+		errno = ENOTSUP;
+		return -1;
+	}
+
+	iov.iov_len = spdk_sock_group_get_buf(_sock->group_impl->group, &iov.iov_base, ctx);
+	if (iov.iov_len == 0) {
+		errno = ENOBUFS;
+		return -1;
+	}
+
+	rc = posix_sock_readv(_sock, &iov, 1);
+	if (rc <= 0) {
+		spdk_sock_group_provide_buf(_sock->group_impl->group, iov.iov_base, iov.iov_len, *ctx);
+		return rc;
+	}
+
+	*buf = iov.iov_base;
+
+	return rc;
+}
+
 static void
 posix_sock_writev_async(struct spdk_sock *sock, struct spdk_sock_request *req)
 {
@@ -1532,7 +1572,7 @@ posix_sock_writev_async(struct spdk_sock *sock, struct spdk_sock_request *req)
 	/* If there are a sufficient number queued, just flush them out immediately. */
 	if (sock->queued_iovcnt >= IOV_BATCH_SIZE) {
 		rc = _sock_flush(sock);
-		if (rc) {
+		if (rc < 0 && errno != EAGAIN) {
 			spdk_sock_abort_requests(sock);
 		}
 	}
@@ -1876,7 +1916,7 @@ posix_sock_group_impl_poll(struct spdk_sock_group_impl *_group, int max_events,
 	 * group. */
 	TAILQ_FOREACH_SAFE(sock, &_group->socks, link, tmp) {
 		rc = _sock_flush(sock);
-		if (rc) {
+		if (rc < 0 && errno != EAGAIN) {
 			spdk_sock_abort_requests(sock);
 		}
 	}
@@ -2020,6 +2060,7 @@ static struct spdk_net_impl g_posix_net_impl = {
 	.readv		= posix_sock_readv,
 	.readv_async	= posix_sock_readv_async,
 	.writev		= posix_sock_writev,
+	.recv_next	= posix_sock_recv_next,
 	.writev_async	= posix_sock_writev_async,
 	.flush		= posix_sock_flush,
 	.set_recvlowat	= posix_sock_set_recvlowat,
@@ -2068,6 +2109,7 @@ static struct spdk_net_impl g_ssl_net_impl = {
 	.recv		= posix_sock_recv,
 	.readv		= posix_sock_readv,
 	.writev		= posix_sock_writev,
+	.recv_next	= posix_sock_recv_next,
 	.writev_async	= posix_sock_writev_async,
 	.flush		= posix_sock_flush,
 	.set_recvlowat	= posix_sock_set_recvlowat,

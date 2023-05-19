@@ -12,6 +12,7 @@ from . import accel
 from . import app
 from . import bdev
 from . import blobfs
+from . import compressdev
 from . import env_dpdk
 from . import dsa
 from . import iaa
@@ -20,10 +21,10 @@ from . import iscsi
 from . import log
 from . import lvol
 from . import nbd
+from . import ublk
 from . import notify
 from . import nvme
 from . import nvmf
-from . import pmem
 from . import subsystem
 from . import trace
 from . import vhost
@@ -32,6 +33,7 @@ from . import sock
 from . import vfio_user
 from . import iobuf
 from . import dpdk_cryptodev
+from . import mlx5
 from . import client as rpc_client
 
 

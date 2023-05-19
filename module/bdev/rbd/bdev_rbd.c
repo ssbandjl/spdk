@@ -38,11 +38,8 @@ struct bdev_rbd {
 	rbd_image_t image;
 
 	rbd_image_info_t info;
-	pthread_mutex_t mutex;
 	struct spdk_thread *main_td;
 	struct spdk_thread *destruct_td;
-	uint32_t ch_count;
-	struct spdk_io_channel *group_ch;
 
 	TAILQ_ENTRY(bdev_rbd) tailq;
 	struct spdk_poller *reset_timer;
@@ -51,6 +48,7 @@ struct bdev_rbd {
 
 struct bdev_rbd_io_channel {
 	struct bdev_rbd *disk;
+	struct spdk_io_channel *group_ch;
 };
 
 struct bdev_rbd_io {
@@ -66,6 +64,7 @@ struct bdev_rbd_cluster {
 	char **config_param;
 	char *config_file;
 	char *key_file;
+	char *core_mask;
 	rados_t cluster;
 	uint32_t ref;
 	STAILQ_ENTRY(bdev_rbd_cluster) link;
@@ -85,6 +84,7 @@ bdev_rbd_cluster_free(struct bdev_rbd_cluster *entry)
 	free(entry->key_file);
 	free(entry->user_id);
 	free(entry->name);
+	free(entry->core_mask);
 	free(entry);
 }
 
@@ -124,6 +124,11 @@ bdev_rbd_free(struct bdev_rbd *rbd)
 		return;
 	}
 
+	if (rbd->image) {
+		rbd_flush(rbd->image);
+		rbd_close(rbd->image);
+	}
+
 	free(rbd->disk.name);
 	free(rbd->rbd_name);
 	free(rbd->user_id);
@@ -141,7 +146,6 @@ bdev_rbd_free(struct bdev_rbd *rbd)
 		rados_shutdown(rbd->cluster);
 	}
 
-	pthread_mutex_destroy(&rbd->mutex);
 	free(rbd);
 }
 
@@ -200,6 +204,7 @@ bdev_rados_cluster_init(const char *user_id, const char *const *config,
 			if (ret < 0) {
 				SPDK_ERRLOG("Failed to set %s = %s\n", entry[0], entry[1]);
 				rados_shutdown(*cluster);
+				*cluster = NULL;
 				return -1;
 			}
 			entry += 2;
@@ -209,6 +214,7 @@ bdev_rados_cluster_init(const char *user_id, const char *const *config,
 		if (ret < 0) {
 			SPDK_ERRLOG("Failed to read conf file\n");
 			rados_shutdown(*cluster);
+			*cluster = NULL;
 			return -1;
 		}
 	}
@@ -217,6 +223,7 @@ bdev_rados_cluster_init(const char *user_id, const char *const *config,
 	if (ret < 0) {
 		SPDK_ERRLOG("Failed to connect to rbd_pool\n");
 		rados_shutdown(*cluster);
+		*cluster = NULL;
 		return -1;
 	}
 
@@ -297,7 +304,6 @@ bdev_rbd_init_context(void *arg)
 	}
 
 	rc = rbd_stat(rbd->image, &rbd->info, sizeof(rbd->info));
-	rbd_close(rbd->image);
 	if (rc < 0) {
 		SPDK_ERRLOG("Failed to stat specified rbd device\n");
 		return NULL;
@@ -333,14 +339,9 @@ bdev_rbd_init(struct bdev_rbd *rbd)
 		return -1;
 	}
 
-	return ret;
-}
+	rbd->main_td = spdk_get_thread();
 
-static void
-bdev_rbd_exit(rbd_image_t image)
-{
-	rbd_flush(image);
-	rbd_close(image);
+	return ret;
 }
 
 static void
@@ -383,11 +384,12 @@ bdev_rbd_finish_aiocb(rbd_completion_t cb, void *arg)
 		if ((int)rbd_io->total_len != io_status) {
 			bio_status = SPDK_BDEV_IO_STATUS_FAILED;
 		}
-	} else {
-		/* For others, 0 means success */
-		if (io_status != 0) {
-			bio_status = SPDK_BDEV_IO_STATUS_FAILED;
-		}
+#ifdef LIBRBD_SUPPORTS_COMPARE_AND_WRITE_IOVEC
+	} else if (bdev_io->type == SPDK_BDEV_IO_TYPE_COMPARE_AND_WRITE && io_status == -EILSEQ) {
+		bio_status = SPDK_BDEV_IO_STATUS_MISCOMPARE;
+#endif
+	} else if (io_status != 0) { /* For others, 0 means success */
+		bio_status = SPDK_BDEV_IO_STATUS_FAILED;
 	}
 
 	rbd_aio_release(cb);
@@ -409,25 +411,50 @@ _bdev_rbd_start_aio(struct bdev_rbd *disk, struct spdk_bdev_io *bdev_io,
 		goto err;
 	}
 
-	if (bdev_io->type == SPDK_BDEV_IO_TYPE_READ) {
+	switch (bdev_io->type) {
+	case SPDK_BDEV_IO_TYPE_READ:
 		rbd_io->total_len = len;
 		if (spdk_likely(iovcnt == 1)) {
-			ret = rbd_aio_read(image, offset, iov[0].iov_len, iov[0].iov_base, rbd_io->comp);
+			ret = rbd_aio_read(image, offset, iov[0].iov_len, iov[0].iov_base,
+					   rbd_io->comp);
 		} else {
 			ret = rbd_aio_readv(image, iov, iovcnt, offset, rbd_io->comp);
 		}
-	} else if (bdev_io->type == SPDK_BDEV_IO_TYPE_WRITE) {
+		break;
+	case SPDK_BDEV_IO_TYPE_WRITE:
 		if (spdk_likely(iovcnt == 1)) {
-			ret = rbd_aio_write(image, offset, iov[0].iov_len, iov[0].iov_base, rbd_io->comp);
+			ret = rbd_aio_write(image, offset, iov[0].iov_len, iov[0].iov_base,
+					    rbd_io->comp);
 		} else {
 			ret = rbd_aio_writev(image, iov, iovcnt, offset, rbd_io->comp);
 		}
-	} else if (bdev_io->type == SPDK_BDEV_IO_TYPE_UNMAP) {
+		break;
+	case SPDK_BDEV_IO_TYPE_UNMAP:
 		ret = rbd_aio_discard(image, offset, len, rbd_io->comp);
-	} else if (bdev_io->type == SPDK_BDEV_IO_TYPE_FLUSH) {
+		break;
+	case SPDK_BDEV_IO_TYPE_FLUSH:
 		ret = rbd_aio_flush(image, rbd_io->comp);
-	} else if (bdev_io->type == SPDK_BDEV_IO_TYPE_WRITE_ZEROES) {
-		ret = rbd_aio_write_zeroes(image, offset, len, rbd_io->comp, /* zero_flags */ 0, /* op_flags */ 0);
+		break;
+	case SPDK_BDEV_IO_TYPE_WRITE_ZEROES:
+		ret = rbd_aio_write_zeroes(image, offset, len, rbd_io->comp, /* zero_flags */ 0,
+					   /* op_flags */ 0);
+		break;
+#ifdef LIBRBD_SUPPORTS_COMPARE_AND_WRITE_IOVEC
+	case SPDK_BDEV_IO_TYPE_COMPARE_AND_WRITE:
+		ret = rbd_aio_compare_and_writev(image, offset, iov /* cmp */, iovcnt,
+						 bdev_io->u.bdev.fused_iovs /* write */,
+						 bdev_io->u.bdev.fused_iovcnt,
+						 rbd_io->comp, NULL,
+						 /* op_flags */ 0);
+		break;
+#endif
+	default:
+		/* This should not happen.
+		 * Function should only be called with supported io types in bdev_rbd_submit_request
+		 */
+		SPDK_ERRLOG("Unsupported IO type =%d\n", bdev_io->type);
+		ret = -ENOTSUP;
+		break;
 	}
 
 	if (ret < 0) {
@@ -531,7 +558,6 @@ _bdev_rbd_destruct_done(void *io_device)
 	struct bdev_rbd *rbd = io_device;
 
 	assert(rbd != NULL);
-	assert(rbd->ch_count == 0);
 
 	spdk_bdev_destruct_done(&rbd->disk, 0);
 	bdev_rbd_free(rbd);
@@ -590,14 +616,12 @@ static void
 bdev_rbd_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io,
 		    bool success)
 {
-	struct bdev_rbd *disk = (struct bdev_rbd *)bdev_io->bdev->ctxt;
-
 	if (!success) {
 		bdev_rbd_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
 		return;
 	}
 
-	spdk_thread_exec_msg(disk->main_td, bdev_rbd_start_aio, bdev_io);
+	bdev_rbd_start_aio(bdev_io);
 }
 
 static void
@@ -618,7 +642,10 @@ bdev_rbd_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io
 	case SPDK_BDEV_IO_TYPE_UNMAP:
 	case SPDK_BDEV_IO_TYPE_FLUSH:
 	case SPDK_BDEV_IO_TYPE_WRITE_ZEROES:
-		spdk_thread_exec_msg(disk->main_td, bdev_rbd_start_aio, bdev_io);
+#ifdef LIBRBD_SUPPORTS_COMPARE_AND_WRITE_IOVEC
+	case SPDK_BDEV_IO_TYPE_COMPARE_AND_WRITE:
+#endif
+		bdev_rbd_start_aio(bdev_io);
 		break;
 
 	case SPDK_BDEV_IO_TYPE_RESET:
@@ -642,6 +669,9 @@ bdev_rbd_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
 	case SPDK_BDEV_IO_TYPE_FLUSH:
 	case SPDK_BDEV_IO_TYPE_RESET:
 	case SPDK_BDEV_IO_TYPE_WRITE_ZEROES:
+#ifdef LIBRBD_SUPPORTS_COMPARE_AND_WRITE_IOVEC
+	case SPDK_BDEV_IO_TYPE_COMPARE_AND_WRITE:
+#endif
 		return true;
 
 	default:
@@ -649,121 +679,25 @@ bdev_rbd_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
 	}
 }
 
-static void
-bdev_rbd_free_channel_resources(struct bdev_rbd *disk)
-{
-	assert(disk != NULL);
-	assert(disk->main_td == spdk_get_thread());
-	assert(disk->ch_count == 0);
-
-	spdk_put_io_channel(disk->group_ch);
-	if (disk->image) {
-		bdev_rbd_exit(disk->image);
-	}
-
-	disk->main_td = NULL;
-	disk->group_ch = NULL;
-}
-
-static void *
-bdev_rbd_handle(void *arg)
-{
-	struct bdev_rbd *disk = arg;
-	void *ret = arg;
-
-	if (rbd_open(disk->io_ctx, disk->rbd_name, &disk->image, NULL) < 0) {
-		SPDK_ERRLOG("Failed to open specified rbd device\n");
-		ret = NULL;
-	}
-
-	return ret;
-}
-
-static int
-_bdev_rbd_create_cb(struct bdev_rbd *disk)
-{
-	disk->group_ch = spdk_get_io_channel(&rbd_if);
-	assert(disk->group_ch != NULL);
-
-	if (spdk_call_unaffinitized(bdev_rbd_handle, disk) == NULL) {
-		bdev_rbd_free_channel_resources(disk);
-		return -1;
-	}
-
-	return 0;
-}
-
 static int
 bdev_rbd_create_cb(void *io_device, void *ctx_buf)
 {
 	struct bdev_rbd_io_channel *ch = ctx_buf;
 	struct bdev_rbd *disk = io_device;
-	int rc;
 
 	ch->disk = disk;
-	pthread_mutex_lock(&disk->mutex);
-	if (disk->ch_count == 0) {
-		assert(disk->main_td == NULL);
-		rc = _bdev_rbd_create_cb(disk);
-		if (rc) {
-			SPDK_ERRLOG("Cannot create channel for disk=%p\n", disk);
-			pthread_mutex_unlock(&disk->mutex);
-			return rc;
-		}
-
-		disk->main_td = spdk_get_thread();
-	}
-
-	disk->ch_count++;
-	pthread_mutex_unlock(&disk->mutex);
+	ch->group_ch = spdk_get_io_channel(&rbd_if);
+	assert(ch->group_ch != NULL);
 
 	return 0;
 }
 
 static void
-_bdev_rbd_destroy_cb(void *ctx)
-{
-	struct bdev_rbd *disk = ctx;
-
-	pthread_mutex_lock(&disk->mutex);
-	assert(disk->ch_count > 0);
-	disk->ch_count--;
-
-	if (disk->ch_count > 0) {
-		/* A new channel was created between when message was sent and this function executed */
-		pthread_mutex_unlock(&disk->mutex);
-		return;
-	}
-
-	bdev_rbd_free_channel_resources(disk);
-	pthread_mutex_unlock(&disk->mutex);
-}
-
-static void
 bdev_rbd_destroy_cb(void *io_device, void *ctx_buf)
 {
-	struct bdev_rbd *disk = io_device;
-	struct spdk_thread *thread;
+	struct bdev_rbd_io_channel *ch = ctx_buf;
 
-	pthread_mutex_lock(&disk->mutex);
-	assert(disk->ch_count > 0);
-	disk->ch_count--;
-	if (disk->ch_count == 0) {
-		assert(disk->main_td != NULL);
-		if (disk->main_td != spdk_get_thread()) {
-			/* The final channel was destroyed on a different thread
-			 * than where the first channel was created. Pass a message
-			 * to the main thread to unregister the poller. */
-			disk->ch_count++;
-			thread = disk->main_td;
-			pthread_mutex_unlock(&disk->mutex);
-			spdk_thread_send_msg(thread, _bdev_rbd_destroy_cb, disk);
-			return;
-		}
-
-		bdev_rbd_free_channel_resources(disk);
-	}
-	pthread_mutex_unlock(&disk->mutex);
+	spdk_put_io_channel(ch->group_ch);
 }
 
 static struct spdk_io_channel *
@@ -916,6 +850,10 @@ dump_single_cluster_entry(struct bdev_rbd_cluster *entry, struct spdk_json_write
 		spdk_json_write_named_string(w, "key_file", entry->key_file);
 	}
 
+	if (entry->core_mask) {
+		spdk_json_write_named_string(w, "core_mask", entry->core_mask);
+	}
+
 	spdk_json_write_object_end(w);
 }
 
@@ -971,10 +909,42 @@ static const struct spdk_bdev_fn_table rbd_fn_table = {
 };
 
 static int
+rbd_thread_set_cpumask(struct spdk_cpuset *set)
+{
+#ifdef __linux__
+	uint32_t lcore;
+	cpu_set_t mask;
+
+	assert(set != NULL);
+	CPU_ZERO(&mask);
+
+	/* get the core id on current spdk_cpuset and set to cpu_set_t */
+	for (lcore = 0; lcore < SPDK_CPUSET_SIZE; lcore++) {
+		if (spdk_cpuset_get_cpu(set, lcore)) {
+			CPU_SET(lcore, &mask);
+		}
+	}
+
+	/* change current thread core mask */
+	if (sched_setaffinity(0, sizeof(mask), &mask) < 0) {
+		SPDK_ERRLOG("Set non SPDK thread cpu mask error (errno=%d)\n", errno);
+		return -1;
+	}
+
+	return 0;
+#else
+	SPDK_ERRLOG("SPDK non spdk thread cpumask setup supports only Linux platform now.\n");
+	return -ENOTSUP;
+#endif
+}
+
+
+static int
 rbd_register_cluster(const char *name, const char *user_id, const char *const *config_param,
-		     const char *config_file, const char *key_file)
+		     const char *config_file, const char *key_file, const char *core_mask)
 {
 	struct bdev_rbd_cluster *entry;
+	struct spdk_cpuset rbd_core_mask = {};
 	int rc;
 
 	pthread_mutex_lock(&g_map_bdev_rbd_cluster_mutex);
@@ -1032,6 +1002,29 @@ rbd_register_cluster(const char *name, const char *user_id, const char *const *c
 		}
 	}
 
+	if (core_mask) {
+		entry->core_mask = strdup(core_mask);
+		if (entry->core_mask == NULL) {
+			SPDK_ERRLOG("Core_mask=%s allocation failed on entry = %p\n", core_mask, entry);
+			goto err_handle;
+		}
+
+		if (spdk_cpuset_parse(&rbd_core_mask, entry->core_mask) < 0) {
+			SPDK_ERRLOG("Invalid cpumask=%s on entry = %p\n", entry->core_mask, entry);
+			goto err_handle;
+		}
+
+		if (rbd_thread_set_cpumask(&rbd_core_mask) < 0) {
+			SPDK_ERRLOG("Failed to change rbd threads to core_mask %s on entry = %p\n", core_mask, entry);
+			goto err_handle;
+		}
+	}
+
+
+	/* If rbd thread core mask is given, rados_create() must execute with
+	 * the affinity set by rbd_thread_set_cpumask(). The affinity set
+	 * by rbd_thread_set_cpumask() will be reverted once rbd_register_cluster() returns
+	 * and when we leave the spdk_call_unaffinitized context. */
 	rc = rados_create(&entry->cluster, user_id);
 	if (rc < 0) {
 		SPDK_ERRLOG("Failed to create rados_t struct\n");
@@ -1130,7 +1123,7 @@ _bdev_rbd_register_cluster(void *arg)
 
 	rc = rbd_register_cluster((const char *)info->name, (const char *)info->user_id,
 				  (const char *const *)info->config_param, (const char *)info->config_file,
-				  (const char *)info->key_file);
+				  (const char *)info->key_file, info->core_mask);
 	if (rc) {
 		ret = NULL;
 	}
@@ -1174,13 +1167,6 @@ bdev_rbd_create(struct spdk_bdev **bdev, const char *name, const char *user_id,
 		return -ENOMEM;
 	}
 
-	ret = pthread_mutex_init(&rbd->mutex, NULL);
-	if (ret) {
-		SPDK_ERRLOG("Cannot init mutex on rbd=%p\n", rbd->disk.name);
-		free(rbd);
-		return ret;
-	}
-
 	rbd->rbd_name = strdup(rbd_name);
 	if (!rbd->rbd_name) {
 		bdev_rbd_free(rbd);
@@ -1222,8 +1208,6 @@ bdev_rbd_create(struct spdk_bdev **bdev, const char *name, const char *user_id,
 
 	if (uuid) {
 		rbd->disk.uuid = *uuid;
-	} else {
-		spdk_uuid_generate(&rbd->disk.uuid);
 	}
 
 	if (name) {

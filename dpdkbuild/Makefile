@@ -40,7 +40,7 @@ DPDK_LIBS += kvargs telemetry
 DPDK_LIBS += power timer ethdev net
 
 # common crypto/compress drivers
-ifeq ($(findstring y,$(CONFIG_CRYPTO)$(CONFIG_VBDEV_COMPRESS)),y)
+ifeq ($(findstring y,$(CONFIG_DPDK_COMPRESSDEV)$(CONFIG_CRYPTO)$(CONFIG_VBDEV_COMPRESS)),y)
 DPDK_DRIVERS += crypto/qat compress/qat common/qat
 endif
 
@@ -59,11 +59,16 @@ endif
 ifeq ($(CONFIG_IPSEC_MB),y)
 DPDK_DRIVERS += crypto/ipsec_mb
 DPDK_CFLAGS += -I$(IPSEC_MB_DIR)
+# Workaround for DPDK 22.07 and DPDK 22.11.1,
+# will be able to remove starting with DPDK 23.03.
+ifeq ($(shell grep "define NO_COMPAT_IMB_API_053" $(SPDK_ROOT_DIR)/dpdk/drivers/crypto/qat/qat_sym_session.c), )
+DPDK_CFLAGS += -DNO_COMPAT_IMB_API_053
+endif
 DPDK_LDFLAGS += -L$(IPSEC_MB_DIR)
 endif
 endif
 
-ifeq ($(CONFIG_VBDEV_COMPRESS),y)
+ifeq ($(findstring y,$(CONFIG_DPDK_COMPRESSDEV)$(CONFIG_VBDEV_COMPRESS)),y)
 DPDK_DRIVERS += compress compress/isal
 ifeq ($(CONFIG_VBDEV_COMPRESS_MLX5),y)
 DPDK_DRIVERS += compress/mlx5
@@ -71,6 +76,8 @@ endif
 DPDK_CFLAGS += -I$(ISAL_DIR)
 DPDK_LDFLAGS += -L$(ISAL_DIR)/.libs -lisal
 endif
+
+DPDK_ENABLED_DRIVERS = $(shell echo $(DPDK_DRIVERS) | sed -E "s/ +/,/g")
 
 # crypto & compress deps
 DPDK_LIBS += reorder cryptodev
@@ -95,6 +102,10 @@ endif
 endif
 
 DPDK_CFLAGS += -fPIC
+
+ifneq ($(CONFIG_MAX_LCORES),)
+DPDK_OPTS += -Dmax_lcores=$(CONFIG_MAX_LCORES)
+endif
 
 ifeq ($(CONFIG_WERROR),y)
 DPDK_CFLAGS += -Werror
@@ -140,7 +151,13 @@ SUB_CC = $(patsubst %ccc-analyzer,$(DEFAULT_CC),$(CC))
 
 DPDK_ALL_LIB_DIRS = $(shell find $(SPDK_ROOT_DIR)/dpdk/lib -mindepth 1 -maxdepth 1 -type d)
 DPDK_ALL_LIBS = $(DPDK_ALL_LIB_DIRS:$(SPDK_ROOT_DIR)/dpdk/lib/%=%)
-DPDK_DISABLED_LIBS = $(filter-out $(DPDK_LIBS),$(DPDK_ALL_LIBS))
+DPDK_DISABLED_LIBS = $(shell echo $(filter-out $(DPDK_LIBS),$(DPDK_ALL_LIBS)) | sed -E "s/ +/,/g")
+
+ifeq ($(shell grep -q disable_apps $(SPDK_ROOT_DIR)/dpdk/meson_options.txt && echo 1), 1)
+DPDK_ALL_APP_DIRS = $(shell find $(SPDK_ROOT_DIR)/dpdk/app -mindepth 1 -maxdepth 1 -type d)
+DPDK_ALL_APPS = $(DPDK_ALL_APP_DIRS:$(SPDK_ROOT_DIR)/dpdk/app/%=%)
+DPDK_DISABLED_APPS = -Ddisable_apps="$(shell echo $(DPDK_ALL_APPS) | sed -E "s/ +/,/g")"
+endif
 
 ifneq ($(OS),FreeBSD)
 SED_INPLACE_FLAG = "-i"
@@ -182,7 +199,7 @@ all: $(SPDK_ROOT_DIR)/dpdk/build-tmp
 
 $(SPDK_ROOT_DIR)/dpdk/build-tmp: $(SPDK_ROOT_DIR)/mk/cc.mk $(SPDK_ROOT_DIR)/include/spdk/config.h
 	$(Q)rm -rf $(SPDK_ROOT_DIR)/dpdk/build $(SPDK_ROOT_DIR)/dpdk/build-tmp
-	$(Q)cd "$(SPDK_ROOT_DIR)/dpdk"; CC="$(SUB_CC)" meson setup --prefix="$(MESON_PREFIX)" --libdir lib -Dc_args="$(DPDK_CFLAGS)" -Dc_link_args="$(DPDK_LDFLAGS)" $(DPDK_OPTS) -Denable_drivers="$(shell echo $(DPDK_DRIVERS) | sed -E "s/ +/,/g")" -Ddisable_libs="$(shell echo $(DPDK_DISABLED_LIBS) | sed -E "s/ +/,/g")" $(DPDKBUILD_FLAGS) build-tmp
+	$(Q)cd "$(SPDK_ROOT_DIR)/dpdk"; CC="$(SUB_CC)" meson setup --prefix="$(MESON_PREFIX)" --libdir lib -Dc_args="$(DPDK_CFLAGS)" -Dc_link_args="$(DPDK_LDFLAGS)" $(DPDK_OPTS) -Denable_drivers="$(DPDK_ENABLED_DRIVERS)" -Ddisable_libs="$(DPDK_DISABLED_LIBS)" $(DPDK_DISABLED_APPS) $(DPDKBUILD_FLAGS) build-tmp
 	$(Q)sed $(SED_INPLACE_FLAG) 's/#define RTE_EAL_PMD_PATH .*/#define RTE_EAL_PMD_PATH ""/g' $(SPDK_ROOT_DIR)/dpdk/build-tmp/rte_build_config.h
 
 clean:

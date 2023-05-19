@@ -8,6 +8,7 @@
 
 #include "spdk/stdinc.h"
 
+#include "spdk/config.h"
 #include "spdk/env.h"
 #include "spdk/fd.h"
 #include "spdk/nvme.h"
@@ -206,9 +207,10 @@ static bool g_vmd;
 static const char *g_workload_type;
 static TAILQ_HEAD(, ctrlr_entry) g_controllers = TAILQ_HEAD_INITIALIZER(g_controllers);
 static TAILQ_HEAD(, ns_entry) g_namespaces = TAILQ_HEAD_INITIALIZER(g_namespaces);
-static int g_num_namespaces;
+static uint32_t g_num_namespaces;
 static TAILQ_HEAD(, worker_thread) g_workers = TAILQ_HEAD_INITIALIZER(g_workers);
-static int g_num_workers = 0;
+static uint32_t g_num_workers = 0;
+static bool g_use_every_core = false;
 static uint32_t g_main_core;
 static pthread_barrier_t g_worker_sync_barrier;
 
@@ -257,6 +259,7 @@ static char *g_sock_threshold_impl;
 static uint8_t g_transport_tos = 0;
 
 static uint32_t g_rdma_srq_size;
+uint8_t *g_psk = NULL;
 
 /* When user specifies -Q, some error messages are rate limited.  When rate
  * limited, we only print the error message every g_quiet_count times the
@@ -337,19 +340,9 @@ perf_set_sock_opts(const char *impl_name, const char *field, uint32_t val, const
 			fprintf(stderr, "No socket opts value specified\n");
 			return;
 		}
-		sock_opts.psk_key = strdup(valstr);
-		if (sock_opts.psk_key == NULL) {
-			fprintf(stderr, "Failed to allocate psk_key in sock_impl\n");
-			return;
-		}
-	} else if (strcmp(field, "psk_identity") == 0) {
-		if (!valstr) {
-			fprintf(stderr, "No socket opts value specified\n");
-			return;
-		}
-		sock_opts.psk_identity = strdup(valstr);
-		if (sock_opts.psk_identity == NULL) {
-			fprintf(stderr, "Failed to allocate psk_identity in sock_impl\n");
+		g_psk = strdup(valstr);
+		if (g_psk == NULL) {
+			fprintf(stderr, "Failed to allocate memory for psk\n");
 			return;
 		}
 	} else if (strcmp(field, "zerocopy_threshold") == 0) {
@@ -502,8 +495,9 @@ uring_check_io(struct ns_worker_ctx *ns_ctx)
 			assert(ns_ctx->u.uring.cqes[i] != NULL);
 			task = (struct perf_task *)ns_ctx->u.uring.cqes[i]->user_data;
 			if (ns_ctx->u.uring.cqes[i]->res != (int)task->iovs[0].iov_len) {
-				fprintf(stderr, "cqe[i]->status=%d\n", ns_ctx->u.uring.cqes[i]->res);
-				exit(0);
+				fprintf(stderr, "cqe->status=%d, iov_len=%d\n", ns_ctx->u.uring.cqes[i]->res,
+					(int)task->iovs[0].iov_len);
+				exit(1);
 			}
 			io_uring_cqe_seen(&ns_ctx->u.uring.ring, ns_ctx->u.uring.cqes[i]);
 			task_complete(task);
@@ -614,6 +608,7 @@ aio_check_io(struct ns_worker_ctx *ns_ctx)
 {
 	int count, i;
 	struct timespec timeout;
+	struct perf_task *task;
 
 	timeout.tv_sec = 0;
 	timeout.tv_nsec = 0;
@@ -625,6 +620,12 @@ aio_check_io(struct ns_worker_ctx *ns_ctx)
 	}
 
 	for (i = 0; i < count; i++) {
+		task = (struct perf_task *)ns_ctx->u.aio.events[i].data;
+		if (ns_ctx->u.aio.events[i].res != (uint64_t)task->iovs[0].iov_len) {
+			fprintf(stderr, "event->res=%lu, iov_len=%lu\n", ns_ctx->u.aio.events[i].res,
+				(uint64_t)task->iovs[0].iov_len);
+			exit(1);
+		}
 		task_complete(ns_ctx->u.aio.events[i].data);
 	}
 	return count;
@@ -725,7 +726,7 @@ register_file(const char *path)
 		g_io_align = blklen;
 	}
 
-	entry = malloc(sizeof(struct ns_entry));
+	entry = calloc(1, sizeof(struct ns_entry));
 	if (entry == NULL) {
 		close(fd);
 		perror("ns_entry malloc");
@@ -973,7 +974,8 @@ nvme_init_ns_worker_ctx(struct ns_worker_ctx *ns_ctx)
 	struct ns_entry *entry = ns_ctx->entry;
 	struct spdk_nvme_poll_group *group;
 	struct spdk_nvme_qpair *qpair;
-	int i;
+	uint64_t poll_timeout_tsc;
+	int i, rc;
 
 	ns_ctx->u.nvme.num_active_qpairs = g_nr_io_queues_per_ns;
 	ns_ctx->u.nvme.num_all_qpairs = g_nr_io_queues_per_ns + g_nr_unused_io_queues;
@@ -988,6 +990,7 @@ nvme_init_ns_worker_ctx(struct ns_worker_ctx *ns_ctx)
 	}
 	opts.delay_cmd_submit = true;
 	opts.create_only = true;
+	opts.async_mode = true;
 
 	ns_ctx->u.nvme.group = spdk_nvme_poll_group_create(NULL, NULL);
 	if (ns_ctx->u.nvme.group == NULL) {
@@ -1017,7 +1020,22 @@ nvme_init_ns_worker_ctx(struct ns_worker_ctx *ns_ctx)
 		}
 	}
 
-	return 0;
+	/* Busy poll here until all qpairs are connected - this ensures once we start
+	 * I/O we aren't still waiting for some qpairs to connect. Limit the poll to
+	 * 10 seconds though.
+	 */
+	poll_timeout_tsc = spdk_get_ticks() + 10 * spdk_get_ticks_hz();
+	rc = -EAGAIN;
+	while (spdk_get_ticks() < poll_timeout_tsc && rc == -EAGAIN) {
+		spdk_nvme_poll_group_process_completions(group, 0, perf_disconnect_cb);
+		rc = spdk_nvme_poll_group_all_connected(group);
+		if (rc == 0) {
+			return 0;
+		}
+	}
+
+	/* If we reach here, it means we either timed out, or some connection failed. */
+	assert(spdk_get_ticks() > poll_timeout_tsc || rc == -EIO);
 
 qpair_failed:
 	for (; i > 0; --i) {
@@ -1255,7 +1273,7 @@ register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 	entry->fn_table = &nvme_fn_table;
 	entry->u.nvme.ctrlr = ctrlr;
 	entry->u.nvme.ns = ns;
-	entry->num_io_requests = g_queue_depth * entries;
+	entry->num_io_requests = entries * spdk_divide_round_up(g_queue_depth, g_nr_io_queues_per_ns);
 
 	entry->size_in_ios = ns_size / g_io_size_bytes;
 	entry->io_size_blocks = g_io_size_bytes / sector_size;
@@ -1861,6 +1879,7 @@ usage(char *program_name)
 	printf("\t[--zerocopy-threshold-sock-impl <impl> specify the sock implementation to set zerocopy_threshold]\n");
 	printf("\t[--transport-tos <val> specify the type of service for RDMA transport. Default: 0 (disabled)]\n");
 	printf("\t[--rdma-srq-size <val> The size of a shared rdma receive queue. Default: 0 (disabled)]\n");
+	printf("\t[--use-every-core for each namespace, I/Os are submitted from all cores]\n");
 }
 
 static void
@@ -2373,6 +2392,8 @@ static const struct option g_perf_cmdline_opts[] = {
 	{"transport-tos", required_argument, NULL, PERF_TRANSPORT_TOS},
 #define PERF_RDMA_SRQ_SIZE	268
 	{"rdma-srq-size", required_argument, NULL, PERF_RDMA_SRQ_SIZE},
+#define PERF_USE_EVERY_CORE	269
+	{"use-every-core", no_argument, NULL, PERF_USE_EVERY_CORE},
 	/* Should be the last element */
 	{0, 0, 0, 0}
 };
@@ -2604,6 +2625,9 @@ parse_args(int argc, char **argv, struct spdk_env_opts *env_opts)
 		case PERF_ENABLE_ZCOPY:
 			perf_set_sock_opts(optarg, "enable_zerocopy_send_client", 1, NULL);
 			break;
+		case PERF_USE_EVERY_CORE:
+			g_use_every_core = true;
+			break;
 		case PERF_DEFAULT_SOCK_IMPL:
 			sock_impl = optarg;
 			rc = spdk_sock_set_default_impl(optarg);
@@ -2827,6 +2851,13 @@ probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	memcpy(opts->hostnqn, trid_entry->hostnqn, sizeof(opts->hostnqn));
 
 	opts->transport_tos = g_transport_tos;
+	if (opts->num_io_queues < g_num_workers * g_nr_io_queues_per_ns) {
+		opts->num_io_queues = g_num_workers * g_nr_io_queues_per_ns;
+	}
+
+	if (g_psk != NULL) {
+		memcpy(opts->psk, g_psk, strlen(g_psk));
+	}
 
 	return true;
 }
@@ -2952,10 +2983,23 @@ associate_workers_with_ns(void)
 	int			i, count;
 
 	/* Each core contains single worker, and namespaces are associated as follows:
-	 * 1) equal workers and namespaces - each worker associated with single namespace
-	 * 2) more workers than namespaces - each namespace is associated with one or more workers
-	 * 3) more namespaces than workers - each worker is associated with one or more namespaces
+	 * --use-every-core not specified (default):
+	 * 2) equal workers and namespaces - each worker associated with single namespace
+	 * 3) more workers than namespaces - each namespace is associated with one or more workers
+	 * 4) more namespaces than workers - each worker is associated with one or more namespaces
+	 * --use-every-core option enabled - every worker is associated with all namespaces
 	 */
+	if (g_use_every_core) {
+		TAILQ_FOREACH(worker, &g_workers, link) {
+			TAILQ_FOREACH(entry, &g_namespaces, link) {
+				if (allocate_ns_worker(entry, worker) != 0) {
+					return -1;
+				}
+			}
+		}
+		return 0;
+	}
+
 	count = g_num_namespaces > g_num_workers ? g_num_namespaces : g_num_workers;
 
 	for (i = 0; i < count; i++) {
@@ -3162,6 +3206,8 @@ cleanup:
 	unregister_workers();
 
 	spdk_env_fini();
+
+	free(g_psk);
 
 	pthread_mutex_destroy(&g_stats_mutex);
 

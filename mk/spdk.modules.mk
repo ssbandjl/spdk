@@ -79,11 +79,6 @@ BLOCKDEV_MODULES_LIST += bdev_rbd
 BLOCKDEV_MODULES_PRIVATE_LIBS += -lrados -lrbd
 endif
 
-ifeq ($(CONFIG_PMDK),y)
-BLOCKDEV_MODULES_LIST += bdev_pmem
-BLOCKDEV_MODULES_PRIVATE_LIBS += -lpmemblk -lpmem
-endif
-
 ifeq ($(CONFIG_DAOS),y)
 BLOCKDEV_MODULES_LIST += bdev_daos
 BLOCKDEV_MODULES_PRIVATE_LIBS += -ldaos -ldaos_common -ldfs -lgurt -luuid -ldl
@@ -103,6 +98,13 @@ ACCEL_MODULES_LIST += accel_dsa accel_iaa idxd
 endif
 ifeq ($(CONFIG_CRYPTO),y)
 ACCEL_MODULES_LIST += accel_dpdk_cryptodev
+endif
+ifeq ($(CONFIG_DPDK_COMPRESSDEV),y)
+ACCEL_MODULES_LIST += accel_dpdk_compressdev
+endif
+
+ifeq ($(CONFIG_RDMA_PROV)|$(CONFIG_CRYPTO),mlx5_dv|y)
+ACCEL_MODULES_LIST += accel_mlx5
 endif
 
 SCHEDULER_MODULES_LIST = scheduler_dynamic

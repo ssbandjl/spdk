@@ -17,7 +17,7 @@ function usage() {
 	echo "  -h --help"
 	echo "  -a --all"
 	echo "  -d --developer-tools        Install tools for developers (code styling, code coverage, etc.)"
-	echo "  -p --pmem                   Additional dependencies for reduce, pmdk and pmdkobj"
+	echo "  -p --pmem                   Additional dependencies for reduce"
 	echo "  -f --fuse                   Additional dependencies for FUSE and NVMe-CUSE"
 	echo "  -R --rbd                    Additional dependencies for RBD"
 	echo "  -r --rdma                   Additional dependencies for RDMA transport in NVMe over Fabrics"
@@ -25,6 +25,7 @@ function usage() {
 	echo "  -u --uring                  Additional dependencies for io_uring"
 	echo "  -D --daos                   Additional dependencies for DAOS"
 	echo "  -A --avahi                  Additional dependencies for Avahi mDNS Discovery"
+	echo "  -G --golang                 Additional dependencies for go API generation (excluded from --all)"
 	echo ""
 	exit 0
 }
@@ -51,8 +52,9 @@ INSTALL_DOCS=false
 INSTALL_LIBURING=false
 INSTALL_DAOS=false
 INSTALL_AVAHI=false
+INSTALL_GOLANG=false
 
-while getopts 'abdfhipruADR-:' optchar; do
+while getopts 'abdfhipruADGR-:' optchar; do
 	case "$optchar" in
 		-)
 			case "$OPTARG" in
@@ -67,6 +69,7 @@ while getopts 'abdfhipruADR-:' optchar; do
 				uring) INSTALL_LIBURING=true ;;
 				daos) INSTALL_DAOS=true ;;
 				avahi) INSTALL_AVAHI=true ;;
+				golang) INSTALL_GOLANG=true ;;
 				*)
 					echo "Invalid argument '$OPTARG'"
 					usage
@@ -84,6 +87,7 @@ while getopts 'abdfhipruADR-:' optchar; do
 		u) INSTALL_LIBURING=true ;;
 		D) INSTALL_DAOS=true ;;
 		A) INSTALL_AVAHI=true ;;
+		G) INSTALL_GOLANG=true ;;
 		*)
 			echo "Invalid argument '$OPTARG'"
 			usage

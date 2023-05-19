@@ -31,6 +31,14 @@
 #define SPDK_APP_DPDK_DEFAULT_BASE_VIRTADDR	0x200000000000
 #define SPDK_APP_DEFAULT_CORE_LIMIT		0x140000000 /* 5 GiB */
 
+/* For core counts <= 63, the message memory pool size is set to
+ * SPDK_DEFAULT_MSG_MEMPOOL_SIZE.
+ * For core counts > 63, the message memory pool size is dependend on
+ * number of cores. Per core, it is calculated as SPDK_MSG_MEMPOOL_CACHE_SIZE
+ * multiplied by factor of 4 to have space for multiple spdk threads running
+ * on single core (e.g  iscsi + nvmf + vhost ). */
+#define SPDK_APP_PER_CORE_MSG_MEMPOOL_SIZE	(4 * SPDK_MSG_MEMPOOL_CACHE_SIZE)
+
 #define MAX_CPU_CORES				128
 
 struct spdk_app {
@@ -47,7 +55,6 @@ struct spdk_app {
 static struct spdk_app g_spdk_app;
 static spdk_msg_fn g_start_fn = NULL;
 static void *g_start_arg = NULL;
-static struct spdk_thread *g_app_thread = NULL;
 static bool g_delay_subsystem_init = false;
 static bool g_shutdown_sig_received = false;
 static char *g_executable_name;
@@ -130,6 +137,8 @@ static const struct option g_cmdline_options[] = {
 	{"vfio-vf-token",		required_argument,	NULL, ENV_VF_TOKEN_OPT_IDX},
 #define MSG_MEMPOOL_SIZE_OPT_IDX 270
 	{"msg-mempool-size",		required_argument,	NULL, MSG_MEMPOOL_SIZE_OPT_IDX},
+#define LCORES_OPT_IDX	271
+	{"lcores",			required_argument,	NULL, LCORES_OPT_IDX},
 };
 
 static void
@@ -146,7 +155,7 @@ app_start_shutdown(void *ctx)
 void
 spdk_app_start_shutdown(void)
 {
-	spdk_thread_send_critical_msg(g_app_thread, app_start_shutdown);
+	spdk_thread_send_critical_msg(spdk_thread_get_app_thread(), app_start_shutdown);
 }
 
 static void
@@ -178,6 +187,23 @@ app_opts_validate(const char *app_opts)
 	return 0;
 }
 
+static void
+calculate_mempool_size(struct spdk_app_opts *opts,
+		       struct spdk_app_opts *opts_user)
+{
+	uint32_t core_count = spdk_env_get_core_count();
+
+	if (!opts_user->msg_mempool_size) {
+		/* The user didn't specify msg_mempool_size, so let's calculate it.
+		   Set the default (SPDK_DEFAULT_MSG_MEMPOOL_SIZE) if less than
+		   64 cores, and use 4k per core otherwise */
+		opts->msg_mempool_size = spdk_max(SPDK_DEFAULT_MSG_MEMPOOL_SIZE,
+						  core_count * SPDK_APP_PER_CORE_MSG_MEMPOOL_SIZE);
+	} else {
+		opts->msg_mempool_size = opts_user->msg_mempool_size;
+	}
+}
+
 void
 spdk_app_opts_init(struct spdk_app_opts *opts, size_t opts_size)
 {
@@ -204,14 +230,13 @@ spdk_app_opts_init(struct spdk_app_opts *opts, size_t opts_size)
 	SET_FIELD(mem_size, SPDK_APP_DPDK_DEFAULT_MEM_SIZE);
 	SET_FIELD(main_core, SPDK_APP_DPDK_DEFAULT_MAIN_CORE);
 	SET_FIELD(mem_channel, SPDK_APP_DPDK_DEFAULT_MEM_CHANNEL);
-	SET_FIELD(reactor_mask, SPDK_APP_DPDK_DEFAULT_CORE_MASK);
 	SET_FIELD(base_virtaddr, SPDK_APP_DPDK_DEFAULT_BASE_VIRTADDR);
 	SET_FIELD(print_level, SPDK_APP_DEFAULT_LOG_PRINT_LEVEL);
 	SET_FIELD(rpc_addr, SPDK_DEFAULT_RPC_ADDR);
 	SET_FIELD(num_entries, SPDK_APP_DEFAULT_NUM_TRACE_ENTRIES);
 	SET_FIELD(delay_subsystem_init, false);
 	SET_FIELD(disable_signal_handlers, false);
-	SET_FIELD(msg_mempool_size, SPDK_DEFAULT_MSG_MEMPOOL_SIZE);
+	/* Don't set msg_mempool_size here, it is set or calculated later */
 	SET_FIELD(rpc_allowlist, NULL);
 #undef SET_FIELD
 }
@@ -259,7 +284,7 @@ app_setup_signal_handlers(struct spdk_app_opts *opts)
 static void
 app_start_application(void)
 {
-	assert(spdk_get_thread() == g_app_thread);
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 
 	g_start_fn(g_start_arg);
 }
@@ -327,6 +352,7 @@ app_setup_env(struct spdk_app_opts *opts)
 
 	env_opts.name = opts->name;
 	env_opts.core_mask = opts->reactor_mask;
+	env_opts.lcore_map = opts->lcore_map;
 	env_opts.shm_id = opts->shm_id;
 	env_opts.mem_channel = opts->mem_channel;
 	env_opts.main_core = opts->main_core;
@@ -498,6 +524,7 @@ app_copy_opts(struct spdk_app_opts *opts, struct spdk_app_opts *opts_user, size_
 	SET_FIELD(json_config_ignore_errors);
 	SET_FIELD(rpc_addr);
 	SET_FIELD(reactor_mask);
+	SET_FIELD(lcore_map);
 	SET_FIELD(tpoint_group_mask);
 	SET_FIELD(shm_id);
 	SET_FIELD(shutdown_cb);
@@ -526,25 +553,44 @@ app_copy_opts(struct spdk_app_opts *opts, struct spdk_app_opts *opts_user, size_
 
 	/* You should not remove this statement, but need to update the assert statement
 	 * if you add a new field, and also add a corresponding SET_FIELD statement */
-	SPDK_STATIC_ASSERT(sizeof(struct spdk_app_opts) == 216, "Incorrect size");
+	SPDK_STATIC_ASSERT(sizeof(struct spdk_app_opts) == 224, "Incorrect size");
 
 #undef SET_FIELD
 }
 
-static void
-unclaim_cpu_cores(void)
+static int
+unclaim_cpu_cores(uint32_t *failed_core)
 {
 	char core_name[40];
 	uint32_t i;
+	int rc;
 
 	for (i = 0; i < MAX_CPU_CORES; i++) {
 		if (g_core_locks[i] != -1) {
 			snprintf(core_name, sizeof(core_name), "/var/tmp/spdk_cpu_lock_%03d", i);
-			close(g_core_locks[i]);
+			rc = close(g_core_locks[i]);
+			if (rc) {
+				SPDK_ERRLOG("Failed to close lock fd for core %d, errno: %d\n", i, errno);
+				goto error;
+			}
+
 			g_core_locks[i] = -1;
-			unlink(core_name);
+			rc = unlink(core_name);
+			if (rc) {
+				SPDK_ERRLOG("Failed to unlink lock fd for core %d, errno: %d\n", i, errno);
+				goto error;
+			}
 		}
 	}
+
+	return 0;
+
+error:
+	if (failed_core != NULL) {
+		/* Set number of core we failed to claim. */
+		*failed_core = i;
+	}
+	return -1;
 }
 
 static int
@@ -613,7 +659,7 @@ error:
 		/* Set number of core we failed to claim. */
 		*failed_core = core;
 	}
-	unclaim_cpu_cores();
+	unclaim_cpu_cores(NULL);
 	return -1;
 }
 
@@ -649,6 +695,11 @@ spdk_app_start(struct spdk_app_opts *opts_user, spdk_msg_fn start_fn,
 	if (!start_fn) {
 		SPDK_ERRLOG("start_fn should not be NULL\n");
 		return 1;
+	}
+
+	if (!(opts->lcore_map || opts->reactor_mask)) {
+		/* Set default CPU mask */
+		opts->reactor_mask = SPDK_APP_DPDK_DEFAULT_CORE_MASK;
 	}
 
 	tty = ttyname(STDERR_FILENO);
@@ -693,6 +744,10 @@ spdk_app_start(struct spdk_app_opts *opts_user, spdk_msg_fn start_fn,
 		return 1;
 	}
 
+	/* Calculate mempool size now that the env layer has configured the core count
+	 * for the application */
+	calculate_mempool_size(opts, opts_user);
+
 	spdk_log_open(opts->log);
 
 	/* Initialize each lock to -1 to indicate "empty" status */
@@ -718,10 +773,9 @@ spdk_app_start(struct spdk_app_opts *opts_user, spdk_msg_fn start_fn,
 
 	spdk_cpuset_set_cpu(&tmp_cpumask, spdk_env_get_current_core(), true);
 
-	/* Now that the reactors have been initialized, we can create an
-	 * initialization thread. */
-	g_app_thread = spdk_thread_create("app_thread", &tmp_cpumask);
-	if (!g_app_thread) {
+	/* Now that the reactors have been initialized, we can create the app thread. */
+	spdk_thread_create("app_thread", &tmp_cpumask);
+	if (!spdk_thread_get_app_thread()) {
 		SPDK_ERRLOG("Unable to create an spdk_thread for initialization\n");
 		return 1;
 	}
@@ -748,7 +802,7 @@ spdk_app_start(struct spdk_app_opts *opts_user, spdk_msg_fn start_fn,
 	g_start_fn = start_fn;
 	g_start_arg = arg1;
 
-	spdk_thread_send_msg(g_app_thread, bootstrap_fn, NULL);
+	spdk_thread_send_msg(spdk_thread_get_app_thread(), bootstrap_fn, NULL);
 
 	/* This blocks until spdk_app_stop is called */
 	spdk_reactors_start();
@@ -765,14 +819,14 @@ spdk_app_fini(void)
 	spdk_reactors_fini();
 	spdk_env_fini();
 	spdk_log_close();
-	unclaim_cpu_cores();
+	unclaim_cpu_cores(NULL);
 }
 
 static void
 _start_subsystem_fini(void *arg1)
 {
 	if (g_scheduling_in_progress) {
-		spdk_thread_send_msg(g_app_thread, _start_subsystem_fini, NULL);
+		spdk_thread_send_msg(spdk_thread_get_app_thread(), _start_subsystem_fini, NULL);
 		return;
 	}
 
@@ -823,13 +877,7 @@ spdk_app_stop(int rc)
 	 * We want to run spdk_subsystem_fini() from the same thread where spdk_subsystem_init()
 	 * was called.
 	 */
-	spdk_thread_send_msg(g_app_thread, app_stop, (void *)(intptr_t)rc);
-}
-
-struct spdk_thread *
-_spdk_get_app_thread(void)
-{
-	return g_app_thread;
+	spdk_thread_send_msg(spdk_thread_get_app_thread(), app_stop, (void *)(intptr_t)rc);
 }
 
 static void
@@ -849,6 +897,13 @@ usage(void (*app_usage)(void))
 	printf(" -h, --help                show this usage\n");
 	printf(" -i, --shm-id <id>         shared memory ID (optional)\n");
 	printf(" -m, --cpumask <mask or list>    core mask (like 0xF) or core list of '[]' embraced (like [0,1,10]) for DPDK\n");
+	printf("     --lcores <list>       lcore to CPU mapping list. The list is in the format:\n");
+	printf("                           <lcores[@CPUs]>[<,lcores[@CPUs]>...]\n");
+	printf("                           lcores and cpus list are grouped by '(' and ')', e.g '--lcores \"(5-7)@(10-12)\"'\n");
+	printf("                           Within the group, '-' is used for range separator,\n");
+	printf("                           ',' is used for single number separator.\n");
+	printf("                           '( )' can be omitted for single element group,\n");
+	printf("                           '@' can be omitted if cpus and lcores have the same value\n");
 	printf(" -n, --mem-channels <num>  channel number of memory channels used for DPDK\n");
 	printf(" -p, --main-core <id>      main (primary) core for DPDK\n");
 	printf(" -r, --rpc-socket <path>   RPC listen address (default %s)\n", SPDK_DEFAULT_RPC_ADDR);
@@ -879,6 +934,7 @@ usage(void (*app_usage)(void))
 	printf("     --base-virtaddr <addr>      the base virtual address for DPDK (default: 0x200000000000)\n");
 	printf("     --num-trace-entries <num>   number of trace entries for each core, must be power of 2, setting 0 to disable trace (default %d)\n",
 	       SPDK_APP_DEFAULT_NUM_TRACE_ENTRIES);
+	printf("                                 Tracepoints vary in size and can use more than one trace entry.\n");
 	printf("     --rpcs-allowed	   comma-separated list of permitted RPCS\n");
 	printf("     --env-context         Opaque context for use of the env implementation\n");
 	printf("     --vfio-vf-token       VF token (UUID) shared between SR-IOV PF and VFs for vfio_pci driver\n");
@@ -989,7 +1045,18 @@ spdk_app_parse_args(int argc, char **argv, struct spdk_app_opts *opts,
 			}
 			break;
 		case CPUMASK_OPT_IDX:
+			if (opts->lcore_map) {
+				SPDK_ERRLOG("lcore map and core mask can't be set simultaneously\n");
+				goto out;
+			}
 			opts->reactor_mask = optarg;
+			break;
+		case LCORES_OPT_IDX:
+			if (opts->reactor_mask) {
+				SPDK_ERRLOG("lcore map and core mask can't be set simultaneously\n");
+				goto out;
+			}
+			opts->lcore_map = optarg;
 			break;
 		case DISABLE_CPUMASK_LOCKS_OPT_IDX:
 			g_disable_cpumask_locks = true;
@@ -1209,7 +1276,7 @@ rpc_framework_start_init_cpl(int rc, void *arg1)
 {
 	struct spdk_jsonrpc_request *request = arg1;
 
-	assert(spdk_get_thread() == g_app_thread);
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 
 	if (rc) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
@@ -1282,6 +1349,10 @@ static void
 rpc_framework_disable_cpumask_locks(struct spdk_jsonrpc_request *request,
 				    const struct spdk_json_val *params)
 {
+	char msg[128];
+	int rc;
+	uint32_t failed_core;
+
 	if (params != NULL) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
 						 "framework_disable_cpumask_locks"
@@ -1289,7 +1360,13 @@ rpc_framework_disable_cpumask_locks(struct spdk_jsonrpc_request *request,
 		return;
 	}
 
-	unclaim_cpu_cores();
+	rc = unclaim_cpu_cores(&failed_core);
+	if (rc) {
+		snprintf(msg, sizeof(msg), "Failed to unclaim CPU core: %" PRIu32, failed_core);
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, msg);
+		return;
+	}
+
 	spdk_jsonrpc_send_bool_response(request, true);
 }
 SPDK_RPC_REGISTER("framework_disable_cpumask_locks", rpc_framework_disable_cpumask_locks,

@@ -437,7 +437,7 @@ bdev_daos_channel_poll(void *arg)
 	}
 
 	for (int i = 0; i < rc; ++i) {
-		struct bdev_daos_task *task = container_of(evp[i], struct bdev_daos_task, ev);
+		struct bdev_daos_task *task = SPDK_CONTAINEROF(evp[i], struct bdev_daos_task, ev);
 		enum spdk_bdev_io_status status = SPDK_BDEV_IO_STATUS_SUCCESS;
 
 		assert(task != NULL);
@@ -699,8 +699,6 @@ create_bdev_daos(struct spdk_bdev **bdev,
 
 	if (uuid) {
 		daos->disk.uuid = *uuid;
-	} else {
-		spdk_uuid_generate(&daos->disk.uuid);
 	}
 
 	daos->disk.ctxt = daos;
@@ -808,14 +806,14 @@ exit:
 }
 
 void
-delete_bdev_daos(struct spdk_bdev *bdev, spdk_delete_daos_complete cb_fn, void *cb_arg)
+delete_bdev_daos(const char *bdev_name, spdk_bdev_unregister_cb cb_fn, void *cb_arg)
 {
-	if (!bdev || bdev->module != &daos_if) {
-		cb_fn(cb_arg, -ENODEV);
-		return;
-	}
+	int rc;
 
-	spdk_bdev_unregister(bdev, cb_fn, cb_arg);
+	rc = spdk_bdev_unregister_by_name(bdev_name, &daos_if, cb_fn, cb_arg);
+	if (rc != 0) {
+		cb_fn(cb_arg, rc);
+	}
 }
 
 static int

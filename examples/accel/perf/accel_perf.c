@@ -12,9 +12,11 @@
 #include "spdk/accel.h"
 #include "spdk/crc32.h"
 #include "spdk/util.h"
+#include "spdk/xor.h"
 
 #define DATA_PATTERN 0x5a
 #define ALIGN_4K 0x1000
+#define COMP_BUF_PAD_PERCENTAGE 1.1L
 
 static uint64_t	g_tsc_rate;
 static uint64_t g_tsc_end;
@@ -31,6 +33,7 @@ static uint32_t g_crc32c_seed = 0;
 static uint32_t g_chained_count = 1;
 static int g_fail_percent_goal = 0;
 static uint8_t g_fill_pattern = 255;
+static uint32_t g_xor_src_count = 2;
 static bool g_verify = false;
 static const char *g_workload_type = NULL;
 static enum accel_opcode g_workload_selection;
@@ -48,6 +51,7 @@ struct ap_compress_seg {
 
 	void		*compressed_data;
 	uint32_t	compressed_len;
+	uint32_t	compressed_len_padded;
 	struct iovec	*compressed_iovs;
 	uint32_t	compressed_iovcnt;
 
@@ -68,6 +72,7 @@ struct ap_task {
 	void			*src;
 	struct iovec		*src_iovs;
 	uint32_t		src_iovcnt;
+	void			**sources;
 	struct iovec		*dst_iovs;
 	uint32_t		dst_iovcnt;
 	void			*dst;
@@ -82,7 +87,7 @@ struct ap_task {
 
 struct worker_thread {
 	struct spdk_io_channel		*ch;
-	uint64_t			xfer_completed;
+	struct spdk_accel_opcode_stats	stats;
 	uint64_t			xfer_failed;
 	uint64_t			injected_miscompares;
 	uint64_t			current_queue_depth;
@@ -119,6 +124,8 @@ dump_user_config(void)
 		printf("Fill pattern:   0x%x\n", g_fill_pattern);
 	} else if ((g_workload_selection == ACCEL_OPC_COMPARE) && g_fail_percent_goal > 0) {
 		printf("Failure inject: %u percent\n", g_fail_percent_goal);
+	} else if (g_workload_selection == ACCEL_OPC_XOR) {
+		printf("Source buffers: %u\n", g_xor_src_count);
 	}
 	if (g_workload_selection == ACCEL_OPC_COPY_CRC32C) {
 		printf("Vector size:    %u bytes\n", g_xfer_size_bytes);
@@ -149,11 +156,12 @@ usage(void)
 	printf("\t[-n number of channels]\n");
 	printf("\t[-o transfer size in bytes (default: 4KiB. For compress/decompress, 0 means the input file size)]\n");
 	printf("\t[-t time in seconds]\n");
-	printf("\t[-w workload type must be one of these: copy, fill, crc32c, copy_crc32c, compare, compress, decompress, dualcast\n");
+	printf("\t[-w workload type must be one of these: copy, fill, crc32c, copy_crc32c, compare, compress, decompress, dualcast, xor\n");
 	printf("\t[-l for compress/decompress workloads, name of uncompressed input file\n");
 	printf("\t[-s for crc32c workload, use this seed value (default 0)\n");
 	printf("\t[-P for compare workload, percentage of operations that should miscompare (percent, default 0)\n");
 	printf("\t[-f for fill workload, use this BYTE value (default 255)\n");
+	printf("\t[-x for xor workload, use this number of source buffers (default, minimum: 2)]\n");
 	printf("\t[-y verify result if this switch is on]\n");
 	printf("\t[-a tasks to allocate per core (default: same value as -q)]\n");
 	printf("\t\tCan be used to spread operations across a wider range of memory.\n");
@@ -174,6 +182,7 @@ parse_args(int argc, char *argv)
 	case 'q':
 	case 's':
 	case 't':
+	case 'x':
 		argval = spdk_strtol(optarg, 10);
 		if (argval < 0) {
 			fprintf(stderr, "-%c option must be non-negative.\n", argc);
@@ -216,6 +225,9 @@ parse_args(int argc, char *argv)
 	case 't':
 		g_time_in_sec = argval;
 		break;
+	case 'x':
+		g_xor_src_count = argval;
+		break;
 	case 'y':
 		g_verify = true;
 		break;
@@ -237,6 +249,8 @@ parse_args(int argc, char *argv)
 			g_workload_selection = ACCEL_OPC_COMPRESS;
 		} else if (!strcmp(g_workload_type, "decompress")) {
 			g_workload_selection = ACCEL_OPC_DECOMPRESS;
+		} else if (!strcmp(g_workload_type, "xor")) {
+			g_workload_selection = ACCEL_OPC_XOR;
 		} else {
 			usage();
 			return 1;
@@ -256,6 +270,8 @@ unregister_worker(void *arg1)
 {
 	struct worker_thread *worker = arg1;
 
+	spdk_accel_get_opcode_stats(worker->ch, worker->workload,
+				    &worker->stats, sizeof(worker->stats));
 	free(worker->task_base);
 	spdk_put_io_channel(worker->ch);
 	spdk_thread_exit(spdk_get_thread());
@@ -310,8 +326,30 @@ _get_task_data_bufs(struct ap_task *task)
 	if (g_workload_selection == ACCEL_OPC_COMPRESS ||
 	    g_workload_selection == ACCEL_OPC_DECOMPRESS) {
 		task->cur_seg = STAILQ_FIRST(&g_compress_segs);
-	} else if (g_workload_selection == ACCEL_OPC_CRC32C ||
-		   g_workload_selection == ACCEL_OPC_COPY_CRC32C) {
+
+		if (g_workload_selection == ACCEL_OPC_COMPRESS) {
+			dst_buff_len = task->cur_seg->compressed_len_padded;
+		}
+
+		task->dst = spdk_dma_zmalloc(dst_buff_len, align, NULL);
+		if (task->dst == NULL) {
+			fprintf(stderr, "Unable to alloc dst buffer\n");
+			return -ENOMEM;
+		}
+
+		task->dst_iovs = calloc(g_chained_count, sizeof(struct iovec));
+		if (!task->dst_iovs) {
+			fprintf(stderr, "cannot allocate task->dst_iovs for task=%p\n", task);
+			return -ENOMEM;
+		}
+		task->dst_iovcnt = g_chained_count;
+		accel_perf_construct_iovs(task->dst, dst_buff_len, task->dst_iovs, task->dst_iovcnt);
+
+		return 0;
+	}
+
+	if (g_workload_selection == ACCEL_OPC_CRC32C ||
+	    g_workload_selection == ACCEL_OPC_COPY_CRC32C) {
 		assert(g_chained_count > 0);
 		task->src_iovcnt = g_chained_count;
 		task->src_iovs = calloc(task->src_iovcnt, sizeof(struct iovec));
@@ -332,7 +370,20 @@ _get_task_data_bufs(struct ap_task *task)
 			memset(task->src_iovs[i].iov_base, DATA_PATTERN, g_xfer_size_bytes);
 			task->src_iovs[i].iov_len = g_xfer_size_bytes;
 		}
+	} else if (g_workload_selection == ACCEL_OPC_XOR) {
+		assert(g_xor_src_count > 1);
+		task->sources = calloc(g_xor_src_count, sizeof(*task->sources));
+		if (!task->sources) {
+			return -ENOMEM;
+		}
 
+		for (i = 0; i < g_xor_src_count; i++) {
+			task->sources[i] = spdk_dma_zmalloc(g_xfer_size_bytes, 0, NULL);
+			if (!task->sources[i]) {
+				return -ENOMEM;
+			}
+			memset(task->sources[i], DATA_PATTERN, g_xfer_size_bytes);
+		}
 	} else {
 		task->src = spdk_dma_zmalloc(g_xfer_size_bytes, 0, NULL);
 		if (task->src == NULL) {
@@ -361,20 +412,11 @@ _get_task_data_bufs(struct ap_task *task)
 		} else {
 			memset(task->dst, ~DATA_PATTERN, dst_buff_len);
 		}
-
-		if (g_workload_selection == ACCEL_OPC_DECOMPRESS) {
-			task->dst_iovs = calloc(g_chained_count, sizeof(struct iovec));
-			if (!task->dst_iovs) {
-				fprintf(stderr, "cannot allocate task->dst_iovs for task=%p\n", task);
-				return -ENOMEM;
-			}
-			task->dst_iovcnt = g_chained_count;
-			accel_perf_construct_iovs(task->dst, dst_buff_len, task->dst_iovs, task->dst_iovcnt);
-		}
 	}
 
 	/* For dualcast 2 buffers are needed for the operation.  */
-	if (g_workload_selection == ACCEL_OPC_DUALCAST) {
+	if (g_workload_selection == ACCEL_OPC_DUALCAST ||
+	    (g_workload_selection == ACCEL_OPC_XOR && g_verify)) {
 		task->dst2 = spdk_dma_zmalloc(g_xfer_size_bytes, align, NULL);
 		if (task->dst2 == NULL) {
 			fprintf(stderr, "Unable to alloc dst buffer\n");
@@ -450,14 +492,19 @@ _submit_single(struct worker_thread *worker, struct ap_task *task)
 	case ACCEL_OPC_COMPRESS:
 		task->src_iovs = task->cur_seg->uncompressed_iovs;
 		task->src_iovcnt = task->cur_seg->uncompressed_iovcnt;
-		rc = spdk_accel_submit_compress(worker->ch, task->dst, g_xfer_size_bytes, task->src_iovs,
+		rc = spdk_accel_submit_compress(worker->ch, task->dst, task->cur_seg->compressed_len_padded,
+						task->src_iovs,
 						task->src_iovcnt, &task->compressed_sz, flags, accel_done, task);
 		break;
 	case ACCEL_OPC_DECOMPRESS:
 		task->src_iovs = task->cur_seg->compressed_iovs;
 		task->src_iovcnt = task->cur_seg->compressed_iovcnt;
 		rc = spdk_accel_submit_decompress(worker->ch, task->dst_iovs, task->dst_iovcnt, task->src_iovs,
-						  task->src_iovcnt, flags, accel_done, task);
+						  task->src_iovcnt, NULL, flags, accel_done, task);
+		break;
+	case ACCEL_OPC_XOR:
+		rc = spdk_accel_submit_xor(worker->ch, task->dst, task->sources, g_xor_src_count,
+					   g_xfer_size_bytes, accel_done, task);
 		break;
 	default:
 		assert(false);
@@ -476,7 +523,7 @@ _free_task_buffers(struct ap_task *task)
 {
 	uint32_t i;
 
-	if (g_workload_selection == ACCEL_OPC_DECOMPRESS) {
+	if (g_workload_selection == ACCEL_OPC_DECOMPRESS || g_workload_selection == ACCEL_OPC_COMPRESS) {
 		free(task->dst_iovs);
 	} else if (g_workload_selection == ACCEL_OPC_CRC32C ||
 		   g_workload_selection == ACCEL_OPC_COPY_CRC32C) {
@@ -488,12 +535,19 @@ _free_task_buffers(struct ap_task *task)
 			}
 			free(task->src_iovs);
 		}
+	} else if (g_workload_selection == ACCEL_OPC_XOR) {
+		if (task->sources) {
+			for (i = 0; i < g_xor_src_count; i++) {
+				spdk_dma_free(task->sources[i]);
+			}
+			free(task->sources);
+		}
 	} else {
 		spdk_dma_free(task->src);
 	}
 
 	spdk_dma_free(task->dst);
-	if (g_workload_selection == ACCEL_OPC_DUALCAST) {
+	if (g_workload_selection == ACCEL_OPC_DUALCAST || g_workload_selection == ACCEL_OPC_XOR) {
 		spdk_dma_free(task->dst2);
 	}
 }
@@ -584,6 +638,15 @@ accel_done(void *arg1, int status)
 				worker->xfer_failed++;
 			}
 			break;
+		case ACCEL_OPC_XOR:
+			if (spdk_xor_gen(task->dst2, task->sources, g_xor_src_count,
+					 g_xfer_size_bytes) != 0) {
+				SPDK_ERRLOG("Failed to generate xor for verification\n");
+			} else if (memcmp(task->dst, task->dst2, g_xfer_size_bytes)) {
+				SPDK_NOTICELOG("Data miscompare\n");
+				worker->xfer_failed++;
+			}
+			break;
 		default:
 			assert(false);
 			break;
@@ -607,7 +670,6 @@ accel_done(void *arg1, int status)
 		worker->xfer_failed++;
 	}
 
-	worker->xfer_completed++;
 	worker->current_queue_depth--;
 
 	if (!worker->is_draining && status == 0) {
@@ -632,11 +694,11 @@ dump_result(void)
 	printf("------------------------------------------------------------------------\n");
 	while (worker != NULL) {
 
-		uint64_t xfer_per_sec = worker->xfer_completed / g_time_in_sec;
-		uint64_t bw_in_MiBps = (worker->xfer_completed * g_xfer_size_bytes) /
+		uint64_t xfer_per_sec = worker->stats.executed / g_time_in_sec;
+		uint64_t bw_in_MiBps = worker->stats.num_bytes /
 				       (g_time_in_sec * 1024 * 1024);
 
-		total_completed += worker->xfer_completed;
+		total_completed += worker->stats.executed;
 		total_failed += worker->xfer_failed;
 		total_miscompared += worker->injected_miscompares;
 
@@ -887,7 +949,7 @@ static void
 accel_perf_prep_process_seg(struct accel_perf_prep_ctx *ctx)
 {
 	struct ap_compress_seg *seg;
-	int sz, sz_read;
+	int sz, sz_read, sz_padded;
 	void *ubuf, *cbuf;
 	struct iovec iov[1];
 	int rc;
@@ -901,6 +963,14 @@ accel_perf_prep_process_seg(struct accel_perf_prep_ctx *ctx)
 	}
 
 	sz = spdk_min(ctx->remaining, g_xfer_size_bytes);
+	/* Add 10% pad to the compress buffer for incompressible data. Note that a real app
+	 * would likely either deal with the failure of not having a large enough buffer
+	 * by submitting another operation with a larger one.  Or, like the vbdev module
+	 * does, just accept the error and use the data uncompressed marking it as such in
+	 * its own metadata so that in the future it doesn't try to decompress uncompressed
+	 * data, etc.
+	 */
+	sz_padded = sz * COMP_BUF_PAD_PERCENTAGE;
 
 	ubuf = spdk_dma_zmalloc(sz, ALIGN_4K, NULL);
 	if (!ubuf) {
@@ -909,7 +979,7 @@ accel_perf_prep_process_seg(struct accel_perf_prep_ctx *ctx)
 		goto error;
 	}
 
-	cbuf = spdk_dma_malloc(sz, ALIGN_4K, NULL);
+	cbuf = spdk_dma_malloc(sz_padded, ALIGN_4K, NULL);
 	if (!cbuf) {
 		fprintf(stderr, "unable to allocate compress buffer\n");
 		rc = -ENOMEM;
@@ -954,19 +1024,17 @@ accel_perf_prep_process_seg(struct accel_perf_prep_ctx *ctx)
 	seg->uncompressed_len = sz;
 	seg->compressed_data = cbuf;
 	seg->compressed_len = sz;
+	seg->compressed_len_padded = sz_padded;
 
 	ctx->cur_seg = seg;
 	iov[0].iov_base = seg->uncompressed_data;
 	iov[0].iov_len = seg->uncompressed_len;
 	/* Note that anytime a call is made to spdk_accel_submit_compress() there's a chance
 	 * it will fail with -ENOMEM in the event that the destination buffer is not large enough
-	 * to hold the compressed data.  This example app simply uses the same size as the input
-	 * buffer which will work for example purposes but when using the API in your application
-	 * be sure to allocate enough room in the destination buffer for cases where the data is
-	 * no compressible, the addition of header information will cause it to be larger than the
-	 * original input.
+	 * to hold the compressed data.  This example app simply adds 10% buffer for compressed data
+	 * but real applications may want to consider a more sophisticated method.
 	 */
-	rc = spdk_accel_submit_compress(ctx->ch, seg->compressed_data, seg->compressed_len, iov, 1,
+	rc = spdk_accel_submit_compress(ctx->ch, seg->compressed_data, seg->compressed_len_padded, iov, 1,
 					&seg->compressed_len, 0, accel_perf_prep_process_seg_cpl, ctx);
 	if (rc < 0) {
 		fprintf(stderr, "error (%d) on initial compress submission\n", rc);
@@ -1047,6 +1115,26 @@ error_end:
 	spdk_app_stop(rc);
 }
 
+static void
+worker_shutdown(void *ctx)
+{
+	_worker_stop(ctx);
+}
+
+static void
+shutdown_cb(void)
+{
+	struct worker_thread *worker;
+
+	pthread_mutex_lock(&g_workers_lock);
+	worker = g_workers;
+	while (worker) {
+		spdk_thread_send_msg(worker->thread, worker_shutdown, worker);
+		worker = worker->next;
+	}
+	pthread_mutex_unlock(&g_workers_lock);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1056,7 +1144,8 @@ main(int argc, char **argv)
 	spdk_app_opts_init(&g_opts, sizeof(g_opts));
 	g_opts.name = "accel_perf";
 	g_opts.reactor_mask = "0x1";
-	if (spdk_app_parse_args(argc, argv, &g_opts, "a:C:o:q:t:yw:P:f:T:l:", NULL, parse_args,
+	g_opts.shutdown_cb = shutdown_cb;
+	if (spdk_app_parse_args(argc, argv, &g_opts, "a:C:o:q:t:yw:P:f:T:l:x:", NULL, parse_args,
 				usage) != SPDK_APP_PARSE_ARGS_SUCCESS) {
 		g_rc = -1;
 		goto cleanup;
@@ -1069,7 +1158,8 @@ main(int argc, char **argv)
 	    (g_workload_selection != ACCEL_OPC_COMPARE) &&
 	    (g_workload_selection != ACCEL_OPC_COMPRESS) &&
 	    (g_workload_selection != ACCEL_OPC_DECOMPRESS) &&
-	    (g_workload_selection != ACCEL_OPC_DUALCAST)) {
+	    (g_workload_selection != ACCEL_OPC_DUALCAST) &&
+	    (g_workload_selection != ACCEL_OPC_XOR)) {
 		usage();
 		g_rc = -1;
 		goto cleanup;
@@ -1088,6 +1178,12 @@ main(int argc, char **argv)
 
 	if ((g_workload_selection == ACCEL_OPC_CRC32C || g_workload_selection == ACCEL_OPC_COPY_CRC32C) &&
 	    g_chained_count == 0) {
+		usage();
+		g_rc = -1;
+		goto cleanup;
+	}
+
+	if (g_workload_selection == ACCEL_OPC_XOR && g_xor_src_count < 2) {
 		usage();
 		g_rc = -1;
 		goto cleanup;

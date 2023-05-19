@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2016 Intel Corporation. All rights reserved.
  *   Copyright (c) 2018-2021 Mellanox Technologies LTD. All rights reserved.
- *   Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2021, 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 /** \file
@@ -24,6 +24,8 @@ extern "C" {
 #endif
 
 #define NVMF_TGT_NAME_MAX_LENGTH	256
+
+#define SPDK_TLS_PSK_MAX_LEN		200
 
 struct spdk_nvmf_tgt;
 struct spdk_nvmf_subsystem;
@@ -107,8 +109,15 @@ struct spdk_nvmf_listen_opts {
 	size_t opts_size;
 
 	const struct spdk_json_val *transport_specific;
+
+	/**
+	 * Indicates that all newly established connections shall immediately
+	 * establish a secure channel, prior to any authentication.
+	 */
+	bool secure_channel;
+
 } __attribute__((packed));
-SPDK_STATIC_ASSERT(sizeof(struct spdk_nvmf_listen_opts) == 16, "Incorrect size");
+SPDK_STATIC_ASSERT(sizeof(struct spdk_nvmf_listen_opts) == 17, "Incorrect size");
 
 /**
  * Initialize listen options
@@ -291,17 +300,23 @@ typedef void (*nvmf_qpair_disconnect_cb)(void *ctx);
  * Disconnect an NVMe-oF qpair
  *
  * \param qpair The NVMe-oF qpair to disconnect.
- * \param cb_fn The function to call upon completion of the disconnect.
- * \param ctx The context to pass to the callback function.
+ * \param cb_fn Deprecated, will be removed in v23.09. The function to call upon completion of the disconnect.
+ * \param ctx Deprecated, will be removed in v23.09. The context to pass to the callback function.
  *
  * \return 0 upon success.
  * \return -ENOMEM if the function specific context could not be allocated.
+ * \return -EINPROGRESS if the qpair is already in the process of disconnect.
  */
 int spdk_nvmf_qpair_disconnect(struct spdk_nvmf_qpair *qpair, nvmf_qpair_disconnect_cb cb_fn,
 			       void *ctx);
 
 /**
  * Get the peer's transport ID for this queue pair.
+ *
+ * This function will first zero the trid structure, and then fill
+ * in the relevant trid fields to identify the listener. The relevant
+ * fields will depend on the transport, but the subnqn will never
+ * be a relevant field for purposes of this function.
  *
  * \param qpair The NVMe-oF qpair
  * \param trid Output parameter that will contain the transport id.
@@ -315,6 +330,11 @@ int spdk_nvmf_qpair_get_peer_trid(struct spdk_nvmf_qpair *qpair,
 /**
  * Get the local transport ID for this queue pair.
  *
+ * This function will first zero the trid structure, and then fill
+ * in the relevant trid fields to identify the listener. The relevant
+ * fields will depend on the transport, but the subnqn will never
+ * be a relevant field for purposes of this function.
+ *
  * \param qpair The NVMe-oF qpair
  * \param trid Output parameter that will contain the transport id.
  *
@@ -326,6 +346,11 @@ int spdk_nvmf_qpair_get_local_trid(struct spdk_nvmf_qpair *qpair,
 
 /**
  * Get the associated listener transport ID for this queue pair.
+ *
+ * This function will first zero the trid structure, and then fill
+ * in the relevant trid fields to identify the listener. The relevant
+ * fields will depend on the transport, but the subnqn will never
+ * be a relevant field for purposes of this function.
  *
  * \param qpair The NVMe-oF qpair
  * \param trid Output parameter that will contain the transport id.
@@ -488,11 +513,12 @@ struct spdk_nvmf_subsystem *spdk_nvmf_subsystem_get_next(struct spdk_nvmf_subsys
  *
  * \param subsystem Subsystem to add host to.
  * \param hostnqn The NQN for the host.
+ * \param params Transport specific parameters.
  *
  * \return 0 on success, or negated errno value on failure.
  */
 int spdk_nvmf_subsystem_add_host(struct spdk_nvmf_subsystem *subsystem,
-				 const char *hostnqn);
+				 const char *hostnqn, const struct spdk_json_val *params);
 
 /**
  * Remove the given host NQN from the list of allowed hosts.
@@ -968,7 +994,7 @@ spdk_nvmf_transport_opts_init(const char *transport_name,
 			      struct spdk_nvmf_transport_opts *opts, size_t opts_size);
 
 /**
- * Create a protocol transport
+ * Create a protocol transport - deprecated, please use \ref spdk_nvmf_transport_create_async.
  *
  * \param transport_name The transport type to create
  * \param opts The transport options (e.g. max_io_size). It should not be NULL, and opts_size
@@ -978,6 +1004,27 @@ spdk_nvmf_transport_opts_init(const char *transport_name,
  */
 struct spdk_nvmf_transport *spdk_nvmf_transport_create(const char *transport_name,
 		struct spdk_nvmf_transport_opts *opts);
+
+typedef void (*spdk_nvmf_transport_create_done_cb)(void *cb_arg,
+		struct spdk_nvmf_transport *transport);
+
+/**
+ * Create a protocol transport
+ *
+ * The callback will be executed asynchronously - i.e. spdk_nvmf_transport_create_async will always return
+ * prior to `cb_fn` being called.
+ *
+ * \param transport_name The transport type to create
+ * \param opts The transport options (e.g. max_io_size). It should not be NULL, and opts_size
+ *        pointed in this structure should not be zero value.
+ * \param cb_fn A callback that will be called once the transport is created
+ * \param cb_arg A context argument passed to cb_fn.
+ *
+ * \return 0 on success, or negative errno on failure (`cb_fn` will not be executed then).
+ */
+int spdk_nvmf_transport_create_async(const char *transport_name,
+				     struct spdk_nvmf_transport_opts *opts,
+				     spdk_nvmf_transport_create_done_cb cb_fn, void *cb_arg);
 
 typedef void (*spdk_nvmf_transport_destroy_done_cb)(void *cb_arg);
 
@@ -1072,6 +1119,46 @@ void spdk_nvmf_tgt_add_transport(struct spdk_nvmf_tgt *tgt,
 				 void *cb_arg);
 
 /**
+ * Function to be called once target pause is complete.
+ *
+ * \param cb_arg Callback argument passed to this function.
+ * \param status 0 if it completed successfully, or negative errno if it failed.
+ */
+typedef void (*spdk_nvmf_tgt_pause_polling_cb_fn)(void *cb_arg, int status);
+
+/**
+ * Pause polling on the given target.
+ *
+ * \param tgt The target to pause
+ * \param cb_fn A callback that will be called once the target is paused
+ * \param cb_arg A context argument passed to cb_fn.
+ *
+ * \return 0 if it completed successfully, or negative errno if it failed.
+ */
+int spdk_nvmf_tgt_pause_polling(struct spdk_nvmf_tgt *tgt, spdk_nvmf_tgt_pause_polling_cb_fn cb_fn,
+				void *cb_arg);
+
+/**
+ * Function to be called once target resume is complete.
+ *
+ * \param cb_arg Callback argument passed to this function.
+ * \param status 0 if it completed successfully, or negative errno if it failed.
+ */
+typedef void (*spdk_nvmf_tgt_resume_polling_cb_fn)(void *cb_arg, int status);
+
+/**
+ * Resume polling on the given target.
+ *
+ * \param tgt The target to resume
+ * \param cb_fn A callback that will be called once the target is resumed
+ * \param cb_arg A context argument passed to cb_fn.
+ *
+ * \return 0 if it completed successfully, or negative errno if it failed.
+ */
+int spdk_nvmf_tgt_resume_polling(struct spdk_nvmf_tgt *tgt,
+				 spdk_nvmf_tgt_resume_polling_cb_fn cb_fn, void *cb_arg);
+
+/**
  * Add listener to transport and begin accepting new connections.
  *
  * \param transport The transport to add listener to.
@@ -1104,8 +1191,12 @@ spdk_nvmf_transport_stop_listen(struct spdk_nvmf_transport *transport,
  * qpairs that are connected to the specified listener. Because
  * this function disconnects the qpairs, it has to be asynchronous.
  *
+ * The subsystem is matched using the subsystem parameter, not the
+ * subnqn field in the trid.
+ *
  * \param transport The transport associated with the listen address.
- * \param trid The address to stop listening at.
+ * \param trid The address to stop listening at. subnqn must be an empty
+ *             string.
  * \param subsystem The subsystem to match for qpairs with the specified
  *                  trid. If NULL, it will disconnect all qpairs with the
  *                  specified trid.

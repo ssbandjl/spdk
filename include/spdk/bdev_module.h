@@ -28,6 +28,8 @@
 extern "C" {
 #endif
 
+#define SPDK_BDEV_CLAIM_NAME_LEN	32
+
 /* This parameter is best defined for bdevs that share an underlying bdev,
  * such as multiple lvol bdevs sharing an nvme device, to avoid unnecessarily
  * resetting the underlying bdev and affecting other bdevs that are sharing it. */
@@ -145,7 +147,8 @@ struct spdk_bdev_module {
 	 */
 	struct __bdev_module_internal_fields {
 		/**
-		 * Protects action_in_progress. Take no locks while holding this one.
+		 * Protects action_in_progress and quiesced_ranges.
+		 * Take no locks while holding this one.
 		 */
 		struct spdk_spinlock spinlock;
 
@@ -157,6 +160,11 @@ struct spdk_bdev_module {
 		 */
 		uint32_t action_in_progress;
 
+		/**
+		 * List of quiesced lba ranges in all bdevs of this module.
+		 */
+		TAILQ_HEAD(, lba_range) quiesced_ranges;
+
 		TAILQ_ENTRY(spdk_bdev_module) tailq;
 	} internal;
 };
@@ -167,10 +175,93 @@ enum spdk_bdev_claim_type {
 	SPDK_BDEV_CLAIM_NONE = 0,
 
 	/**
-	 * Exclusive writer.
+	 * Exclusive writer, with allowances for legacy behavior.  This matches the behavior of
+	 * `spdk_bdev_module_claim_bdev()` as of SPDK 22.09.  New consumer should use
+	 * SPDK_BDEV_CLAIM_READ_MANY_WRITE_ONE instead.
 	 */
-	SPDK_BDEV_CLAIM_EXCL_WRITE
+	SPDK_BDEV_CLAIM_EXCL_WRITE,
+
+	/**
+	 * The descriptor passed with this claim request is the only writer. Other claimless readers
+	 * are allowed.
+	 */
+	SPDK_BDEV_CLAIM_READ_MANY_WRITE_ONE,
+
+	/**
+	 * Any number of readers, no writers. Readers without a claim are allowed.
+	 */
+	SPDK_BDEV_CLAIM_READ_MANY_WRITE_NONE,
+
+	/**
+	 * Any number of writers with matching shared_claim_key. After the first writer establishes
+	 * a claim, future aspiring writers should open read-only and pass the read-only descriptor.
+	 * If the shared claim is granted to the aspiring writer, the descriptor will be upgraded to
+	 * read-write.
+	 */
+	SPDK_BDEV_CLAIM_READ_MANY_WRITE_SHARED
 };
+
+/** Options used when requesting a claim. */
+struct spdk_bdev_claim_opts {
+	/* Size of this structure in bytes */
+	size_t opts_size;
+	/**
+	 * An arbitrary name for the claim. If set, it should be a string suitable for printing in
+	 * error messages. Must be '\0' terminated.
+	 */
+	char name[SPDK_BDEV_CLAIM_NAME_LEN];
+	/**
+	 * Used with SPDK_BDEV_CLAIM_READ_MANY_WRITE_SHARED claims. Any non-zero value is considered
+	 * a key.
+	 */
+	uint64_t shared_claim_key;
+};
+SPDK_STATIC_ASSERT(sizeof(struct spdk_bdev_claim_opts) == 48, "Incorrect size");
+
+/**
+ * Retrieve the name of the bdev module claim type. The mapping between claim types and their names
+ * is:
+ *
+ *   SPDK_BDEV_CLAIM_NONE			"not_claimed"
+ *   SPDK_BDEV_CLAIM_EXCL_WRITE			"exclusive_write"
+ *   SPDK_BDEV_CLAIM_READ_MANY_WRITE_ONE	"read_many_write_one"
+ *   SPDK_BDEV_CLAIM_READ_MANY_WRITE_NONE	"read_many_write_none"
+ *   SPDK_BDEV_CLAIM_READ_MANY_WRITE_SHARED	"read_many_write_shared"
+ *
+ * Any other value will return "invalid_claim".
+ *
+ * \param claim_type The claim type.
+ * \return A string that describes the claim type.
+ */
+const char *spdk_bdev_claim_get_name(enum spdk_bdev_claim_type claim_type);
+
+/**
+ * Initialize bdev module claim options structure.
+ *
+ * \param opts The structure to initialize.
+ * \param size The size of *opts.
+ */
+void spdk_bdev_claim_opts_init(struct spdk_bdev_claim_opts *opts, size_t size);
+
+/**
+ * Claim the bdev referenced by the open descriptor. The claim is released as the descriptor is
+ * closed.
+ *
+ * \param desc An open bdev descriptor. Some claim types may upgrade this from read-only to
+ * read-write.
+ * \param type The type of claim to establish.
+ * \param opts NULL or options required by the particular claim type.
+ * \param module The bdev module making this claim.
+ * \return 0 on success
+ * \return -ENOMEM if insufficient memory to track the claim
+ * \return -EBUSY if the claim cannot be granted due to a conflict
+ * \return -EINVAL if the claim type required options that were not passed or required parameters
+ * were NULL.
+ */
+int spdk_bdev_module_claim_bdev_desc(struct spdk_bdev_desc *desc,
+				     enum spdk_bdev_claim_type type,
+				     struct spdk_bdev_claim_opts *opts,
+				     struct spdk_bdev_module *module);
 
 /**
  * Called by a bdev module to lay exclusive claim to a bdev.
@@ -273,6 +364,9 @@ struct spdk_bdev_fn_table {
 	 * Dump I/O statistics specific for this bdev context.
 	 */
 	void (*dump_device_stat_json)(void *ctx, struct spdk_json_write_ctx *w);
+
+	/** Check if bdev can handle spdk_accel_sequence to handle I/O of specific type. */
+	bool (*accel_sequence_supported)(void *ctx, enum spdk_bdev_io_type type);
 };
 
 /** bdev I/O completion status */
@@ -309,6 +403,13 @@ struct spdk_bdev_name {
 struct spdk_bdev_alias {
 	struct spdk_bdev_name alias;
 	TAILQ_ENTRY(spdk_bdev_alias) tailq;
+};
+
+struct spdk_bdev_module_claim {
+	struct spdk_bdev_module *module;
+	struct spdk_bdev_desc *desc;
+	char name[SPDK_BDEV_CLAIM_NAME_LEN];
+	TAILQ_ENTRY(spdk_bdev_module_claim) link;
 };
 
 typedef TAILQ_HEAD(, spdk_bdev_io) bdev_io_tailq_t;
@@ -405,13 +506,16 @@ struct spdk_bdev {
 	/* Maximum write zeroes in unit of logical block */
 	uint32_t max_write_zeroes;
 
-	/* Maximum copy size in unit of logical block */
+	/**
+	 * Maximum copy size in unit of logical block
+	 * Should be set explicitly when backing device support copy command
+	 */
 	uint32_t max_copy;
 
 	/**
 	 * UUID for this bdev.
 	 *
-	 * Fill with zeroes if no uuid is available.
+	 * If not provided, it will be generated by bdev layer.
 	 */
 	struct spdk_uuid uuid;
 
@@ -534,6 +638,13 @@ struct spdk_bdev {
 		enum spdk_bdev_status status;
 
 		/**
+		 * How many bdev_examine() calls are iterating claim.v2.claims. When non-zero claims
+		 * that are released will be cleared but remain on the claims list until
+		 * bdev_examine() finishes. Must hold spinlock on all updates.
+		 */
+		uint32_t examine_in_progress;
+
+		/**
 		 * The claim type: used in conjunction with claim. Must hold spinlock on all
 		 * updates.
 		 */
@@ -541,14 +652,23 @@ struct spdk_bdev {
 
 		/** Which module has claimed this bdev. Must hold spinlock on all updates. */
 		union __bdev_internal_claim {
+			/** Claims acquired with spdk_bdev_module_claim_bdev() */
 			struct __bdev_internal_claim_v1 {
 				/**
 				 * Pointer to the module that has claimed this bdev for purposes of
-				 * creating virtual bdevs on top of it. Set to NULL if the bdev has
-				 * not been claimed.
+				 * creating virtual bdevs on top of it. Set to NULL and set
+				 * claim_type to SPDK_BDEV_CLAIM_NONE if the bdev has not been
+				 * claimed.
 				 */
 				struct spdk_bdev_module		*module;
 			} v1;
+			/** Claims acquired with spdk_bdev_module_claim_bdev_desc() */
+			struct __bdev_internal_claim_v2 {
+				/** The claims on this bdev */
+				TAILQ_HEAD(v2_claims, spdk_bdev_module_claim) claims;
+				/** See spdk_bdev_claim_opts.shared_claim_key */
+				uint64_t key;
+			} v2;
 		} claim;
 
 		/** Callback function that will be called after bdev destruct is completed. */
@@ -556,6 +676,9 @@ struct spdk_bdev {
 
 		/** Unregister call context */
 		void *unregister_ctx;
+
+		/** Thread that issued the unregister.  The cb must be called on this thread. */
+		struct spdk_thread *unregister_td;
 
 		/** List of open descriptors for this block device. */
 		TAILQ_HEAD(, spdk_bdev_desc) open_descs;
@@ -679,8 +802,12 @@ struct spdk_bdev_io {
 			/** Starting offset (in blocks) of the bdev for this I/O. */
 			uint64_t offset_blocks;
 
-			/** Pointer to user's ext opts to be used by bdev modules */
-			struct spdk_bdev_ext_io_opts *ext_opts;
+			/** Memory domain and its context to be used by bdev modules */
+			struct spdk_memory_domain *memory_domain;
+			void *memory_domain_ctx;
+
+			/* Sequence of accel operations */
+			struct spdk_accel_sequence *accel_sequence;
 
 			/** stored user callback in case we split the I/O and use a temporary callback */
 			spdk_bdev_io_completion_cb stored_user_cb;
@@ -829,6 +956,12 @@ struct spdk_bdev_io {
 		/** Status for the IO */
 		int8_t status;
 
+		/** Indicates whether the IO is split */
+		bool split;
+
+		/** Retry state (resubmit, re-pull, re-push, etc.) */
+		uint8_t retry_state;
+
 		/** bdev allocated memory associated with this request */
 		void *buf;
 
@@ -848,7 +981,14 @@ struct spdk_bdev_io {
 		/** Callback for when buf is allocated */
 		spdk_bdev_io_get_buf_cb get_buf_cb;
 
-		/** Member used for linking child I/Os together. */
+		/**
+		 * Queue entry used in several cases:
+		 *  1. IOs awaiting retry due to NOMEM status,
+		 *  2. IOs awaiting submission due to QoS,
+		 *  3. IOs with an accel sequence being executed,
+		 *  4. IOs awaiting memory domain pull/push,
+		 *  5. queued reset requests.
+		 */
 		TAILQ_ENTRY(spdk_bdev_io) link;
 
 		/** Entry to the list need_buf of struct spdk_bdev. */
@@ -863,11 +1003,12 @@ struct spdk_bdev_io {
 		/** Enables queuing parent I/O when no bdev_ios available for split children. */
 		struct spdk_bdev_io_wait_entry waitq_entry;
 
-		/** Pointer to a structure passed by the user in ext API */
-		struct spdk_bdev_ext_io_opts *ext_opts;
+		/** Memory domain and its context passed by the user in ext API */
+		struct spdk_memory_domain *memory_domain;
+		void *memory_domain_ctx;
 
-		/** Copy of user's opts, used when I/O is split */
-		struct spdk_bdev_ext_io_opts ext_opts_copy;
+		/* Sequence of accel operations passed by the user */
+		struct spdk_accel_sequence *accel_sequence;
 
 		/** Data transfer completion callback */
 		void (*data_transfer_cpl)(void *ctx, int rc);
@@ -900,6 +1041,9 @@ int spdk_bdev_register(struct spdk_bdev *bdev);
  * and manually close all the descriptors with spdk_bdev_close().
  * The actual bdev unregistration may be deferred until all descriptors are closed.
  *
+ * The cb_fn will be called from the context of the same spdk_thread that called
+ * spdk_bdev_unregister.
+ *
  * Note: spdk_bdev_unregister() can be unsafe unless the bdev is not opened before and
  * closed after unregistration. It is recommended to use spdk_bdev_unregister_by_name().
  *
@@ -914,6 +1058,9 @@ void spdk_bdev_unregister(struct spdk_bdev *bdev, spdk_bdev_unregister_cb cb_fn,
  * on this bdev of the hotremoval to request the upper layer to stop using this bdev
  * and manually close all the descriptors with spdk_bdev_close().
  * The actual bdev unregistration may be deferred until all descriptors are closed.
+ *
+ * The cb_fn will be called from the context of the same spdk_thread that called
+ * spdk_bdev_unregister.
  *
  * \param bdev_name Block device name to unregister.
  * \param module Module by which the block device was registered.
@@ -1322,6 +1469,24 @@ int spdk_bdev_part_base_construct_ext(const char *bdev_name,
 				      spdk_io_channel_destroy_cb ch_destroy_cb,
 				      struct spdk_bdev_part_base **base);
 
+/** Options used when constructing a part bdev. */
+struct spdk_bdev_part_construct_opts {
+	/* Size of this structure in bytes */
+	uint64_t opts_size;
+	/** UUID of the bdev */
+	struct spdk_uuid uuid;
+};
+
+SPDK_STATIC_ASSERT(sizeof(struct spdk_bdev_part_construct_opts) == 24, "Incorrect size");
+
+/**
+ * Initialize options that will be passed to spdk_bdev_part_construct_ext().
+ *
+ * \param opts Options structure to initialize
+ * \param size Size of opts structure.
+ */
+void spdk_bdev_part_construct_opts_init(struct spdk_bdev_part_construct_opts *opts, uint64_t size);
+
 /**
  * Create a logical spdk_bdev_part on top of a base.
  *
@@ -1338,6 +1503,25 @@ int spdk_bdev_part_base_construct_ext(const char *bdev_name,
 int spdk_bdev_part_construct(struct spdk_bdev_part *part, struct spdk_bdev_part_base *base,
 			     char *name, uint64_t offset_blocks, uint64_t num_blocks,
 			     char *product_name);
+
+/**
+ * Create a logical spdk_bdev_part on top of a base with a non-NULL bdev UUID
+ *
+ * \param part The part object allocated by the user.
+ * \param base The base from which to create the part.
+ * \param name The name of the new spdk_bdev_part.
+ * \param offset_blocks The offset into the base bdev at which this part begins.
+ * \param num_blocks The number of blocks that this part will span.
+ * \param product_name Unique name for this type of block device.
+ * \param opts Additional options.
+ *
+ * \return 0 on success.
+ * \return -1 if the bases underlying bdev cannot be claimed by the current module.
+ */
+int spdk_bdev_part_construct_ext(struct spdk_bdev_part *part, struct spdk_bdev_part_base *base,
+				 char *name, uint64_t offset_blocks, uint64_t num_blocks,
+				 char *product_name,
+				 const struct spdk_bdev_part_construct_opts *opts);
 
 /**
  * Forwards I/O from an spdk_bdev_part to the underlying base bdev.
@@ -1474,6 +1658,107 @@ typedef void (*spdk_bdev_get_current_qd_cb)(struct spdk_bdev *bdev, uint64_t cur
  */
 void spdk_bdev_get_current_qd(struct spdk_bdev *bdev,
 			      spdk_bdev_get_current_qd_cb cb_fn, void *cb_arg);
+
+/**
+ * Add I/O statictics.
+ *
+ * \param total The aggregated I/O statictics.
+ * \param add The I/O statictics to be added.
+ */
+void spdk_bdev_add_io_stat(struct spdk_bdev_io_stat *total, struct spdk_bdev_io_stat *add);
+
+/**
+ * Output bdev I/O statictics information to a JSON stream.
+ *
+ * \param stat The bdev I/O statictics to output.
+ * \param w JSON write context.
+ */
+void spdk_bdev_dump_io_stat_json(struct spdk_bdev_io_stat *stat, struct spdk_json_write_ctx *w);
+
+enum spdk_bdev_reset_stat_mode {
+	SPDK_BDEV_RESET_STAT_ALL,
+	SPDK_BDEV_RESET_STAT_MAXMIN,
+};
+
+/**
+ * Reset I/O statictics structure.
+ *
+ * \param stat The I/O statictics to reset.
+ * \param mode The mode to reset I/O statictics.
+ */
+void spdk_bdev_reset_io_stat(struct spdk_bdev_io_stat *stat, enum spdk_bdev_reset_stat_mode mode);
+
+typedef void (*spdk_bdev_quiesce_cb)(void *ctx, int status);
+
+/**
+ * Quiesce a bdev. All I/O submitted after this function is called will be queued until
+ * the bdev is unquiesced. A callback will be called when all outstanding I/O on this bdev
+ * submitted before calling this function have completed.
+ *
+ * Only the module that registered the bdev may call this function.
+ *
+ * \param bdev Block device.
+ * \param module The module that registered the bdev.
+ * \param cb_fn Callback function to be called when the bdev is quiesced. Optional.
+ * \param cb_arg Argument to be supplied to cb_fn.
+ *
+ * \return 0 on success, or suitable errno value otherwise.
+ */
+int spdk_bdev_quiesce(struct spdk_bdev *bdev, struct spdk_bdev_module *module,
+		      spdk_bdev_quiesce_cb cb_fn, void *cb_arg);
+
+/**
+ * Unquiesce a previously quiesced bdev. All I/O queued after the bdev was quiesced
+ * will be submitted.
+ *
+ * Only the module that registered the bdev may call this function.
+ *
+ * \param bdev Block device.
+ * \param module The module that registered the bdev.
+ * \param cb_fn Callback function to be called when the bdev is unquiesced. Optional.
+ * \param cb_arg Argument to be supplied to cb_fn.
+ *
+ * \return 0 on success, or suitable errno value otherwise.
+ */
+int spdk_bdev_unquiesce(struct spdk_bdev *bdev, struct spdk_bdev_module *module,
+			spdk_bdev_quiesce_cb cb_fn, void *cb_arg);
+
+/**
+ * Quiesce a bdev LBA range.
+ * Same as spdk_bdev_quiesce() but limited to the specified LBA range.
+ *
+ * \param bdev Block device.
+ * \param module The module that registered the bdev.
+ * \param offset The offset of the start of the range, in blocks,
+ *               from the start of the block device.
+ * \param length The length of the range, in blocks.
+ * \param cb_fn Callback function to be called when the range is quiesced. Optional.
+ * \param cb_arg Argument to be supplied to cb_fn.
+ *
+ * \return 0 on success, or suitable errno value otherwise.
+ */
+int spdk_bdev_quiesce_range(struct spdk_bdev *bdev, struct spdk_bdev_module *module,
+			    uint64_t offset, uint64_t length,
+			    spdk_bdev_quiesce_cb cb_fn, void *cb_arg);
+
+/**
+ * Unquiesce a previously quiesced bdev LBA range.
+ * Same as spdk_bdev_unquiesce() but limited to the specified LBA range.
+ * The specified range must match exactly a previously quiesced LBA range.
+ *
+ * \param bdev Block device.
+ * \param module The module that registered the bdev.
+ * \param offset The offset of the start of the range, in blocks,
+ *               from the start of the block device.
+ * \param length The length of the range, in blocks.
+ * \param cb_fn Callback function to be called when the range is unquiesced. Optional.
+ * \param cb_arg Argument to be supplied to cb_fn.
+ *
+ * \return 0 on success, or suitable errno value otherwise.
+ */
+int spdk_bdev_unquiesce_range(struct spdk_bdev *bdev, struct spdk_bdev_module *module,
+			      uint64_t offset, uint64_t length,
+			      spdk_bdev_quiesce_cb cb_fn, void *cb_arg);
 
 /*
  *  Macro used to register module for later initialization.

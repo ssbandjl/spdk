@@ -8,14 +8,14 @@ rootdir=$(readlink -f $testdir/../..)
 source $rootdir/test/common/autotest_common.sh
 source $rootdir/test/spdkcli/common.sh
 
-trap 'killprocess $virtio_pid; on_error_exit' ERR
+trap 'killprocess $virtio_pid; cleanup' EXIT
 
 timing_enter run_spdk_tgt
 run_spdk_tgt
 timing_exit run_spdk_tgt
 
 timing_enter run_spdk_virtio
-$SPDK_BIN_DIR/spdk_tgt -m 0x4 -p 0 -g -u -r /var/tmp/virtio.sock &
+$SPDK_BIN_DIR/spdk_tgt -m 0x4 -p 0 -g -u -s 1024 -r /var/tmp/virtio.sock &
 virtio_pid=$!
 waitforlisten $virtio_pid /var/tmp/virtio.sock
 timing_exit run_spdk_virtio

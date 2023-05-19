@@ -150,15 +150,17 @@ static struct spdk_nvmf_transport g_transport = {
 	.ops = &g_transport_ops
 };
 
-struct spdk_nvmf_transport *
-spdk_nvmf_transport_create(const char *transport_name,
-			   struct spdk_nvmf_transport_opts *tprt_opts)
+int
+spdk_nvmf_transport_create_async(const char *transport_name,
+				 struct spdk_nvmf_transport_opts *tprt_opts,
+				 spdk_nvmf_transport_create_done_cb cb_fn, void *cb_arg)
 {
 	if (strcasecmp(transport_name, spdk_nvme_transport_id_trtype_str(SPDK_NVME_TRANSPORT_RDMA))) {
-		return &g_transport;
+		cb_fn(cb_arg, &g_transport);
+		return 0;
 	}
 
-	return NULL;
+	return -1;
 }
 
 struct spdk_nvmf_subsystem *
@@ -282,15 +284,15 @@ test_discovery_log(void)
 	iov.iov_len = 8192;
 
 	tgt.max_subsystems = 1024;
-	tgt.subsystems = calloc(tgt.max_subsystems, sizeof(struct spdk_nvmf_subsystem *));
-	SPDK_CU_ASSERT_FATAL(tgt.subsystems != NULL);
+	tgt.subsystem_ids = spdk_bit_array_create(tgt.max_subsystems);
+	RB_INIT(&tgt.subsystems);
 
 	/* Add one subsystem and verify that the discovery log contains it */
 	subsystem = spdk_nvmf_subsystem_create(&tgt, "nqn.2016-06.io.spdk:subsystem1",
 					       SPDK_NVMF_SUBTYPE_NVME, 0);
 	SPDK_CU_ASSERT_FATAL(subsystem != NULL);
 
-	rc = spdk_nvmf_subsystem_add_host(subsystem, hostnqn);
+	rc = spdk_nvmf_subsystem_add_host(subsystem, hostnqn, NULL);
 	CU_ASSERT(rc == 0);
 
 	/* Get only genctr (first field in the header) */
@@ -371,7 +373,7 @@ test_discovery_log(void)
 	CU_ASSERT(disc_log->genctr != 0);
 	CU_ASSERT(disc_log->numrec == 0);
 
-	free(tgt.subsystems);
+	spdk_bit_array_free(&tgt.subsystem_ids);
 }
 
 static void
@@ -415,8 +417,8 @@ test_discovery_log_with_filters(void)
 	iov.iov_len = 8192;
 
 	tgt.max_subsystems = 4;
-	tgt.subsystems = calloc(tgt.max_subsystems, sizeof(struct spdk_nvmf_subsystem *));
-	SPDK_CU_ASSERT_FATAL(tgt.subsystems != NULL);
+	tgt.subsystem_ids = spdk_bit_array_create(tgt.max_subsystems);
+	RB_INIT(&tgt.subsystems);
 
 	subsystem = spdk_nvmf_subsystem_create(&tgt, "nqn.2016-06.io.spdk:subsystem1",
 					       SPDK_NVMF_SUBTYPE_NVME, 0);
@@ -636,7 +638,7 @@ test_discovery_log_with_filters(void)
 
 	subsystem->state = SPDK_NVMF_SUBSYSTEM_INACTIVE;
 	spdk_nvmf_subsystem_destroy(subsystem, NULL, NULL);
-	free(tgt.subsystems);
+	spdk_bit_array_free(&tgt.subsystem_ids);
 }
 
 int

@@ -611,7 +611,7 @@ spdk_nvme_ctrlr_free_io_qpair(struct spdk_nvme_qpair *qpair)
 	 * with that qpair, since the callbacks will also be foreign to this process.
 	 */
 	if (qpair->active_proc == nvme_ctrlr_get_current_process(ctrlr)) {
-		nvme_qpair_abort_all_queued_reqs(qpair, 0);
+		nvme_qpair_abort_all_queued_reqs(qpair);
 	}
 
 	nvme_robust_mutex_lock(&ctrlr->ctrlr_lock);
@@ -876,6 +876,13 @@ nvme_ctrlr_set_supported_log_pages(struct spdk_nvme_ctrlr *ctrlr)
 							      ctrlr);
 			}
 		}
+	}
+
+	if (ctrlr->cdata.ctratt.fdps) {
+		ctrlr->log_page_supported[SPDK_NVME_LOG_FDP_CONFIGURATIONS] = true;
+		ctrlr->log_page_supported[SPDK_NVME_LOG_RECLAIM_UNIT_HANDLE_USAGE] = true;
+		ctrlr->log_page_supported[SPDK_NVME_LOG_FDP_STATISTICS] = true;
+		ctrlr->log_page_supported[SPDK_NVME_LOG_FDP_EVENTS] = true;
 	}
 
 	if (ctrlr->cdata.vid == SPDK_PCI_VID_INTEL &&
@@ -1831,19 +1838,6 @@ spdk_nvme_ctrlr_reset(struct spdk_nvme_ctrlr *ctrlr)
 	return rc;
 }
 
-SPDK_LOG_DEPRECATION_REGISTER(nvme_ctrlr_prepare_for_reset,
-			      "spdk_nvme_ctrlr_prepare_for_reset() is deprecated",
-			      "SPDK 22.01", 0);
-
-void
-spdk_nvme_ctrlr_prepare_for_reset(struct spdk_nvme_ctrlr *ctrlr)
-{
-	SPDK_LOG_DEPRECATED(nvme_ctrlr_prepare_for_reset);
-	nvme_robust_mutex_lock(&ctrlr->ctrlr_lock);
-	ctrlr->prepare_for_reset = true;
-	nvme_robust_mutex_unlock(&ctrlr->ctrlr_lock);
-}
-
 int
 spdk_nvme_ctrlr_reset_subsystem(struct spdk_nvme_ctrlr *ctrlr)
 {
@@ -1961,6 +1955,10 @@ nvme_ctrlr_identify_done(void *arg, const struct spdk_nvme_cpl *cpl)
 
 		ctrlr->max_sges = nvme_transport_ctrlr_get_max_sges(ctrlr);
 		NVME_CTRLR_DEBUGLOG(ctrlr, "transport max_sges %u\n", ctrlr->max_sges);
+	}
+
+	if (ctrlr->cdata.sgls.metadata_address && !(ctrlr->quirks & NVME_QUIRK_NOT_USE_SGL)) {
+		ctrlr->flags |= SPDK_NVME_CTRLR_MPTR_SGL_SUPPORTED;
 	}
 
 	if (ctrlr->cdata.oacs.security && !(ctrlr->quirks & NVME_QUIRK_OACS_SECURITY)) {
@@ -3812,7 +3810,7 @@ nvme_ctrlr_process_init(struct spdk_nvme_ctrlr *ctrlr)
 			 * resubmitted while the controller is resetting and subsequent commands
 			 * would get queued too.
 			 */
-			nvme_qpair_abort_queued_reqs(ctrlr->adminq, 0);
+			nvme_qpair_abort_queued_reqs(ctrlr->adminq);
 			break;
 		case NVME_QPAIR_DISCONNECTING:
 			assert(ctrlr->adminq->async == true);

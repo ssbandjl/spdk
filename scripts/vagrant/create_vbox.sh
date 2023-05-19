@@ -22,9 +22,7 @@ display_help() {
 	echo
 	echo " Usage: ${0##*/} [-b nvme-backing-file] [-n <num-cpus>] [-s <ram-size>] [-x <http-proxy>] [-hvrldcufaoH] <distro>"
 	echo
-	echo "  distro = <centos7 | centos8 | ubuntu1604 | ubuntu1804 | ubuntu2004 | ubuntu2204 | fedora33 |"
-	echo "            fedora34 | fedora35 | fedora36 | fedora37 | freebsd11 | freebsd12 | freebsd13 | arch | "
-	echo "            clearlinux | rocky8>"
+	echo "  distro = <centos7 | ubuntu2004 | ubuntu2204 | fedora37 | fedora38 | freebsd12 | freebsd13 | arch | clearlinux | rocky8 | rocky9>"
 	echo
 	echo "  -s <ram-size> in MB             Default: ${SPDK_VAGRANT_VMRAM}"
 	echo "  -n <num-cpus> 1 to 4            Default: ${SPDK_VAGRANT_VMCPU}"
@@ -34,13 +32,16 @@ display_help() {
 	echo "                                  If no -b option is specified then this option defaults to emulating single"
 	echo "                                  NVMe with 1 namespace and assumes path: /var/lib/libvirt/images/nvme_disk.img"
 	echo "                                  -b option can be used multiple times for attaching multiple files to the VM"
-	echo "                                  Parameters for -b option: <path>,<type>,<ns_path1[:ns_path1:...]>,<cmb>,<pmr_file[:pmr_size]>,<zns>,<ms>"
+	echo "                                  Parameters for -b option: <path>,<type>,<ns_path1[:ns_path1:...]>,<cmb>,<pmr_file[:pmr_size]>,<zns>,<ms>,<fdp>"
 	echo "                                  Available types: nvme"
 	echo "                                  Default pmr size: 16M"
 	echo "                                  Default cmb: false"
 	echo "                                  Default zns: false"
-	echo "                                  Default ms: none"
-	echo "                                  type, ns_path, cmb, pmr, zns and ms can be empty"
+	echo "                                  Default ms: none (set to 'true' to enable 64M)"
+	echo "                                  Default fdp: 96M:2:8[:1;2;3:1...] (fdp.runs:fdp.nrg:fdp.nruh:fdp.ruhs)"
+	echo "                                  type, ns_path, cmb, pmr, zns, ms  and fdp can be empty"
+	echo "                                  fdp.ruhs defines fdp.ruhs per ns, e.g.: 4;5;6:1 would set 4;5;6 for ns=1,"
+	echo "                                  and 1 for ns=2."
 	echo "  -c                              Create all above disk, default 0"
 	echo "  -H                              Use hugepages for allocating VM memory. Only for libvirt provider. Default: false."
 	echo "  -u                              Use password authentication to the VM instead of SSH keys."
@@ -48,6 +49,7 @@ display_help() {
 	echo "  -a                              Copy spdk/autorun.sh artifacts from VM to host system."
 	echo "  -d                              Deploy a test vm by provisioning all prerequisites for spdk autotest"
 	echo "  -o                              Add network interface for openstack tests"
+	echo "  -N                              Use NFSv4 backend"
 	echo "  --qemu-emulator=<path>          Path to custom QEMU binary. Only works with libvirt provider"
 	echo "  --vagrantfiles-dir=<path>       Destination directory to put Vagrantfile into."
 	echo "  --package-box                   Install all dependencies for SPDK and create a local vagrant box version."
@@ -61,12 +63,12 @@ display_help() {
 	echo
 	echo " Examples:"
 	echo
-	echo "  $0 -x http://user:password@host:port fedora33"
-	echo "  $0 -s 2048 -n 2 ubuntu16"
+	echo "  $0 -x http://user:password@host:port fedora37"
+	echo "  $0 -s 2048 -n 2 ubuntu2204"
 	echo "  $0 -rv freebsd"
-	echo "  $0 fedora33"
-	echo "  $0 -b /var/lib/libvirt/images/nvme1.img,nvme,/var/lib/libvirt/images/nvme1n1.img fedora33"
-	echo "  $0 -b none fedora33"
+	echo "  $0 fedora37"
+	echo "  $0 -b /var/lib/libvirt/images/nvme1.img,nvme,/var/lib/libvirt/images/nvme1n1.img fedora37"
+	echo "  $0 -b none fedora37"
 	echo
 }
 
@@ -97,10 +99,11 @@ VAGRANT_PACKAGE_BOX=0
 VAGRANT_HUGE_MEM=0
 VAGRANTFILE=$DIR/Vagrantfile
 FORCE_DISTRO=false
+NFS4_BACKEND=0
 VAGRANT_BOX_VERSION=""
 EXTRA_VAGRANTFILES=""
 
-while getopts ":b:n:s:x:p:uvcraldoHhf-:" opt; do
+while getopts ":b:n:s:x:p:uvcraldoHNhf-:" opt; do
 	case "${opt}" in
 		-)
 			case "${OPTARG}" in
@@ -164,6 +167,9 @@ while getopts ":b:n:s:x:p:uvcraldoHhf-:" opt; do
 		f)
 			FORCE_DISTRO=true
 			;;
+		N)
+			NFS4_BACKEND=1
+			;;
 		*)
 			echo "  Invalid argument: -$OPTARG" >&2
 			echo "  Try: \"$0 -h\"" >&2
@@ -177,11 +183,11 @@ shift "$((OPTIND - 1))" # Discard the options and sentinel --
 SPDK_VAGRANT_DISTRO="$*"
 
 case "${SPDK_VAGRANT_DISTRO}" in
-	centos[78]) ;&
-	ubuntu1[68]04 | ubuntu2[02]04) ;&
-	fedora3[3-7]) ;&
-	freebsd1[1-3]) ;&
-	rocky8) ;&
+	centos7) ;&
+	ubuntu2[02]04) ;&
+	fedora3[7-8]) ;&
+	freebsd1[2-3]) ;&
+	rocky[89]) ;&
 	arch | clearlinux) ;;
 	*)
 		if [[ $FORCE_DISTRO == false ]]; then
@@ -199,7 +205,7 @@ if [ -z "$NVME_FILE" ]; then
 else
 	TMP=""
 	for args in $NVME_FILE; do
-		while IFS=, read -r path type namespace cmb pmr zns ms; do
+		while IFS=, read -r path type namespace cmb pmr zns ms fdp; do
 			TMP+="$path,"
 			if [ -z "$type" ]; then
 				type="nvme"
@@ -210,6 +216,7 @@ else
 			NVME_DISKS_TYPE+="$type,"
 			NVME_DISKS_NAMESPACES+="$namespace,"
 			NVME_MS+="$ms,"
+			NVME_FDP+="$fdp,"
 			if [ ${NVME_AUTO_CREATE} = 1 ]; then
 				$SPDK_DIR/scripts/vagrant/create_nvme_img.sh -n $path
 			fi
@@ -233,6 +240,7 @@ if [ ${VERBOSE} = 1 ]; then
 	echo NVME_PMR=$NVME_PMR
 	echo NVME_ZNS=$NVME_ZNS
 	echo NVME_MS=$NVME_MS
+	echo NVME_FDP=$NVME_FDP
 	echo SPDK_VAGRANT_DISTRO=$SPDK_VAGRANT_DISTRO
 	echo SPDK_VAGRANT_VMCPU=$SPDK_VAGRANT_VMCPU
 	echo SPDK_VAGRANT_VMRAM=$SPDK_VAGRANT_VMRAM
@@ -260,6 +268,7 @@ export NVME_CMB
 export NVME_PMR
 export NVME_ZNS
 export NVME_MS
+export NVME_FDP
 export NVME_DISKS_TYPE
 export NVME_DISKS_NAMESPACES
 export NVME_FILE

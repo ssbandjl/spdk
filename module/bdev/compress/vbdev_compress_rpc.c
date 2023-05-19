@@ -1,5 +1,6 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2018 Intel Corporation.
+ *   Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *   All rights reserved.
  */
 
@@ -69,47 +70,6 @@ rpc_bdev_compress_get_orphans(struct spdk_jsonrpc_request *request,
 	free_rpc_bdev_compress_get_orphans(&req);
 }
 SPDK_RPC_REGISTER("bdev_compress_get_orphans", rpc_bdev_compress_get_orphans, SPDK_RPC_RUNTIME)
-
-struct rpc_compress_set_pmd {
-	enum compress_pmd pmd;
-};
-
-static const struct spdk_json_object_decoder rpc_compress_pmd_decoder[] = {
-	{"pmd", offsetof(struct rpc_compress_set_pmd, pmd), spdk_json_decode_int32},
-};
-
-static void
-rpc_bdev_compress_set_pmd(struct spdk_jsonrpc_request *request,
-			  const struct spdk_json_val *params)
-{
-	struct rpc_compress_set_pmd req;
-	int rc = 0;
-
-	if (spdk_json_decode_object(params, rpc_compress_pmd_decoder,
-				    SPDK_COUNTOF(rpc_compress_pmd_decoder),
-				    &req)) {
-		SPDK_ERRLOG("spdk_json_decode_object failed\n");
-		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
-						 "spdk_json_decode_object failed");
-		return;
-	}
-
-	if (req.pmd >= COMPRESS_PMD_MAX) {
-		spdk_jsonrpc_send_error_response_fmt(request, -EINVAL,
-						     "PMD value %d should be less than %d", req.pmd, COMPRESS_PMD_MAX);
-		return;
-	}
-
-	rc = compress_set_pmd(&req.pmd);
-	if (rc) {
-		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
-		return;
-	}
-
-	spdk_jsonrpc_send_bool_response(request, true);
-}
-SPDK_RPC_REGISTER("bdev_compress_set_pmd", rpc_bdev_compress_set_pmd,
-		  SPDK_RPC_STARTUP | SPDK_RPC_RUNTIME)
 
 /* Structure to hold the parameters for this RPC method. */
 struct rpc_construct_compress {
@@ -194,7 +154,11 @@ _rpc_bdev_compress_delete_cb(void *cb_arg, int bdeverrno)
 {
 	struct spdk_jsonrpc_request *request = cb_arg;
 
-	spdk_jsonrpc_send_bool_response(request, bdeverrno == 0);
+	if (bdeverrno == 0) {
+		spdk_jsonrpc_send_bool_response(request, true);
+	} else {
+		spdk_jsonrpc_send_error_response(request, bdeverrno, spdk_strerror(-bdeverrno));
+	}
 }
 
 static void

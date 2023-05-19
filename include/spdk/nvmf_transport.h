@@ -11,6 +11,7 @@
 #define SPDK_NVMF_TRANSPORT_H_
 
 #include "spdk/bdev.h"
+#include "spdk/thread.h"
 #include "spdk/nvme_spec.h"
 #include "spdk/nvmf.h"
 #include "spdk/nvmf_cmd.h"
@@ -27,8 +28,8 @@
 
 #define SPDK_NVMF_MAX_ASYNC_EVENTS 4
 
-/* AIO backend requires block size aligned data buffers,
- * extra 4KiB aligned data buffer should work for most devices.
+/* Some backends require 4K aligned buffers. The iobuf library gives us that
+ * naturally, but there are buffers allocated other ways that need to use this.
  */
 #define NVMF_DATA_BUFFER_ALIGNMENT	VALUE_4KB
 #define NVMF_DATA_BUFFER_MASK		(NVMF_DATA_BUFFER_ALIGNMENT - 1LL)
@@ -60,7 +61,6 @@ struct spdk_nvmf_dif_info {
 struct spdk_nvmf_stripped_data {
 	uint32_t			iovcnt;
 	struct iovec			iov[NVMF_REQ_MAX_BUFFERS];
-	void				*buffers[NVMF_REQ_MAX_BUFFERS];
 };
 
 enum spdk_nvmf_zcopy_phase {
@@ -86,7 +86,6 @@ struct spdk_nvmf_request {
 
 	uint32_t			iovcnt;
 	struct iovec			iov[NVMF_REQ_MAX_BUFFERS];
-	void				*buffers[NVMF_REQ_MAX_BUFFERS];
 	struct spdk_nvmf_stripped_data  *stripped_data;
 
 	struct spdk_nvmf_dif_info	dif;
@@ -126,23 +125,20 @@ struct spdk_nvmf_qpair {
 	bool					connect_received;
 	bool					disconnect_started;
 
-	struct spdk_nvmf_request		*first_fused_req;
+	union {
+		struct spdk_nvmf_request	*first_fused_req;
+		struct spdk_nvmf_request	*connect_req;
+	};
 
 	TAILQ_HEAD(, spdk_nvmf_request)		outstanding;
 	TAILQ_ENTRY(spdk_nvmf_qpair)		link;
-};
-
-struct spdk_nvmf_transport_pg_cache_buf {
-	STAILQ_ENTRY(spdk_nvmf_transport_pg_cache_buf) link;
 };
 
 struct spdk_nvmf_transport_poll_group {
 	struct spdk_nvmf_transport					*transport;
 	/* Requests that are waiting to obtain a data buffer */
 	STAILQ_HEAD(, spdk_nvmf_request)				pending_buf_queue;
-	STAILQ_HEAD(, spdk_nvmf_transport_pg_cache_buf)			buf_cache;
-	uint32_t							buf_cache_count;
-	uint32_t							buf_cache_size;
+	struct spdk_iobuf_channel					buf_cache;
 	struct spdk_nvmf_poll_group					*group;
 	TAILQ_ENTRY(spdk_nvmf_transport_poll_group)			link;
 };
@@ -171,6 +167,8 @@ struct spdk_nvmf_poll_group {
 
 	spdk_nvmf_poll_group_destroy_done_fn		destroy_cb_fn;
 	void						*destroy_cb_arg;
+
+	struct spdk_nvmf_tgt				*tgt;
 
 	TAILQ_ENTRY(spdk_nvmf_poll_group)		link;
 
@@ -203,13 +201,14 @@ struct spdk_nvmf_ctrlr_data {
 	struct spdk_nvme_cdata_nvmf_specific nvmf_specific;
 };
 
+#define MAX_MEMPOOL_NAME_LENGTH 40
+
 struct spdk_nvmf_transport {
 	struct spdk_nvmf_tgt			*tgt;
 	const struct spdk_nvmf_transport_ops	*ops;
 	struct spdk_nvmf_transport_opts		opts;
 
-	/* A mempool for transport related data transfers */
-	struct spdk_mempool			*data_buf_pool;
+	char					iobuf_name[MAX_MEMPOOL_NAME_LENGTH];
 
 	TAILQ_HEAD(, spdk_nvmf_listener)	listeners;
 	TAILQ_ENTRY(spdk_nvmf_transport)	link;
@@ -236,9 +235,12 @@ struct spdk_nvmf_transport_ops {
 	void (*opts_init)(struct spdk_nvmf_transport_opts *opts);
 
 	/**
-	 * Create a transport for the given transport opts
+	 * Create a transport for the given transport opts. Either synchronous
+	 * or asynchronous version shall be implemented.
 	 */
 	struct spdk_nvmf_transport *(*create)(struct spdk_nvmf_transport_opts *opts);
+	int (*create_async)(struct spdk_nvmf_transport_opts *opts, spdk_nvmf_transport_create_done_cb cb_fn,
+			    void *cb_arg);
 
 	/**
 	 * Dump transport-specific opts into JSON
@@ -395,6 +397,25 @@ struct spdk_nvmf_transport_ops {
 	 */
 	void (*poll_group_dump_stat)(struct spdk_nvmf_transport_poll_group *group,
 				     struct spdk_json_write_ctx *w);
+
+	/*
+	 * A notification that a subsystem has been configured to allow access
+	 * from the given host.
+	 * This callback is optional and not all transports need to implement it.
+	 */
+	int (*subsystem_add_host)(struct spdk_nvmf_transport *transport,
+				  const struct spdk_nvmf_subsystem *subsystem,
+				  const char *hostnqn,
+				  const struct spdk_json_val *transport_specific);
+
+	/*
+	 * A notification that a subsystem is no longer configured to allow access
+	 * from the given host.
+	 * This callback is optional and not all transports need to implement it.
+	 */
+	void (*subsystem_remove_host)(struct spdk_nvmf_transport *transport,
+				      const struct spdk_nvmf_subsystem *subsystem,
+				      const char *hostnqn);
 };
 
 /**
@@ -623,6 +644,26 @@ spdk_nvmf_req_get_xfer(struct spdk_nvmf_request *req) {
 
 	return xfer;
 }
+
+/**
+ * Complete Asynchronous Event as Error.
+ *
+ * \param ctrlr Controller whose AER is going to be completed.
+ * \param info Asynchronous Event Error Information to be reported.
+ *
+ * \return int. 0 if it completed successfully, or negative errno if it failed.
+ */
+int spdk_nvmf_ctrlr_async_event_error_event(struct spdk_nvmf_ctrlr *ctrlr,
+		enum spdk_nvme_async_event_info_error info);
+
+/**
+ * Abort outstanding Asynchronous Event Requests (AERs).
+ *
+ * Completes AERs with ABORTED_BY_REQUEST status code.
+ *
+ * \param ctrlr Controller whose AERs are going to be aborted.
+ */
+void spdk_nvmf_ctrlr_abort_aer(struct spdk_nvmf_ctrlr *ctrlr);
 
 /*
  * Macro used to register new transports.

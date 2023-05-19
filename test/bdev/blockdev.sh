@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #  SPDX-License-Identifier: BSD-3-Clause
 #  Copyright (C) 2016 Intel Corporation
+#  Copyright (c) 2022, 2023 NVIDIA CORPORATION & AFFILIATES.
 #  All rights reserved.
 #
 testdir=$(readlink -f $(dirname $0))
@@ -24,7 +25,6 @@ nonarray_conf_file="$testdir/nonarray.json"
 
 function cleanup() {
 	rm -f "$SPDK_TEST_STORAGE/aiofile"
-	rm -f "$SPDK_TEST_STORAGE/spdk-pmem-pool"
 	rm -f "$conf_file"
 
 	if [[ $test_type == rbd ]]; then
@@ -47,7 +47,7 @@ function cleanup() {
 }
 
 function start_spdk_tgt() {
-	"$SPDK_BIN_DIR/spdk_tgt" "$env_ctx" &
+	"$SPDK_BIN_DIR/spdk_tgt" "$env_ctx" "$wait_for_rpc" &
 	spdk_tgt_pid=$!
 	trap 'killprocess "$spdk_tgt_pid"; exit 1' SIGINT SIGTERM EXIT
 	waitforlisten "$spdk_tgt_pid"
@@ -117,12 +117,20 @@ function setup_gpt_conf() {
 		fi
 	done
 	if [[ -n $gpt_nvme ]]; then
+		# These Unique Partition GUIDs were randomly generated for testing and are distinct
+		# from the Partition Type GUIDs (SPDK_GPT_OLD_GUID and SPDK_GPT_GUID) which have
+		# special meaning to SPDK. See section 5.3.3 of UEFI Spec 2.3 for the distinction
+		# between Unique Partition GUID and Partition Type GUID.
+		typeset -g g_unique_partguid=6f89f330-603b-4116-ac73-2ca8eae53030
+		typeset -g g_unique_partguid_old=abf1734f-66e5-4c0f-aa29-4021d4d307df
+
 		# Create gpt partition table
 		parted -s "$gpt_nvme" mklabel gpt mkpart SPDK_TEST_first '0%' '50%' mkpart SPDK_TEST_second '50%' '100%'
-		# change the GUID to SPDK GUID value
+		# Change the partition type GUIDs to SPDK partition type values
+		SPDK_GPT_OLD_GUID=$(get_spdk_gpt_old)
 		SPDK_GPT_GUID=$(get_spdk_gpt)
-		sgdisk -t "1:$SPDK_GPT_GUID" "$gpt_nvme"
-		sgdisk -t "2:$SPDK_GPT_GUID" "$gpt_nvme"
+		sgdisk -t "1:$SPDK_GPT_GUID" -u "1:$g_unique_partguid" "$gpt_nvme"
+		sgdisk -t "2:$SPDK_GPT_OLD_GUID" -u "2:$g_unique_partguid_old" "$gpt_nvme"
 		"$rootdir/scripts/setup.sh"
 		"$rpc_py" bdev_get_bdevs
 		setup_nvme_conf
@@ -136,10 +144,23 @@ function setup_gpt_conf() {
 function setup_crypto_aesni_conf() {
 	# Malloc0 and Malloc1 use AESNI
 	"$rpc_py" <<- RPC
-		bdev_malloc_create -b Malloc0 16 512
-		bdev_malloc_create -b Malloc1 16 512
-		bdev_crypto_create Malloc0 crypto_ram crypto_aesni_mb 01234567891234560123456789123456
-		bdev_crypto_create Malloc1 crypto_ram2 crypto_aesni_mb 90123456789123459012345678912345
+		dpdk_cryptodev_scan_accel_module
+		dpdk_cryptodev_set_driver -d crypto_aesni_mb
+		accel_assign_opc -o encrypt -m dpdk_cryptodev
+		accel_assign_opc -o decrypt -m dpdk_cryptodev
+		framework_start_init
+		accel_crypto_key_create -c AES_CBC -k 01234567891234560123456789123456 -n test_dek_aesni_cbc_1
+		accel_crypto_key_create -c AES_CBC -k 12345678912345601234567891234560 -n test_dek_aesni_cbc_2
+		accel_crypto_key_create -c AES_CBC -k 23456789123456012345678912345601 -n test_dek_aesni_cbc_3
+		accel_crypto_key_create -c AES_CBC -k 34567891234560123456789123456012 -n test_dek_aesni_cbc_4
+		bdev_malloc_create -b Malloc0 32 512
+		bdev_malloc_create -b Malloc1 32 512
+		bdev_malloc_create -b Malloc2 32 4096
+		bdev_malloc_create -b Malloc3 32 4096
+		bdev_crypto_create Malloc0 crypto_ram -n test_dek_aesni_cbc_1
+		bdev_crypto_create Malloc1 crypto_ram2 -n test_dek_aesni_cbc_2
+		bdev_crypto_create Malloc2 crypto_ram3 -n test_dek_aesni_cbc_3
+		bdev_crypto_create Malloc3 crypto_ram4 -n test_dek_aesni_cbc_4
 	RPC
 }
 
@@ -147,10 +168,60 @@ function setup_crypto_qat_conf() {
 	# Malloc0 will use QAT AES_CBC
 	# Malloc1 will use QAT AES_XTS
 	"$rpc_py" <<- RPC
+		dpdk_cryptodev_scan_accel_module
+		dpdk_cryptodev_set_driver -d crypto_qat
+		accel_assign_opc -o encrypt -m dpdk_cryptodev
+		accel_assign_opc -o decrypt -m dpdk_cryptodev
+		framework_start_init
+		accel_crypto_key_create -c AES_CBC -k 01234567891234560123456789123456 -n test_dek_qat_cbc
+		accel_crypto_key_create -c AES_XTS -k 00112233445566778899001122334455 -e 12345678912345601234567891234560 -n test_dek_qat_xts
+		accel_crypto_key_create -c AES_CBC -k 23456789123456012345678912345601 -n test_dek_qat_cbc2
+		accel_crypto_key_create -c AES_XTS -k 22334455667788990011223344550011 -e 34567891234560123456789123456012 -n test_dek_qat_xts2
+		bdev_malloc_create -b Malloc0 32 512
+		bdev_malloc_create -b Malloc1 32 512
+		bdev_malloc_create -b Malloc2 32 4096
+		bdev_malloc_create -b Malloc3 32 4096
+		bdev_crypto_create Malloc0 crypto_ram -n test_dek_qat_cbc
+		bdev_crypto_create Malloc1 crypto_ram1 -n test_dek_qat_xts
+		bdev_crypto_create Malloc2 crypto_ram2 -n test_dek_qat_cbc2
+		bdev_crypto_create Malloc3 crypto_ram3 -n test_dek_qat_xts2
+		bdev_get_bdevs -b Malloc1
+	RPC
+}
+
+function setup_crypto_sw_conf() {
+	"$rpc_py" <<- RPC
+		framework_start_init
 		bdev_malloc_create -b Malloc0 16 512
-		bdev_malloc_create -b Malloc1 16 512
-		bdev_crypto_create Malloc0 crypto_ram crypto_qat 01234567891234560123456789123456
-		bdev_crypto_create -c AES_XTS -k2 01234567891234560123456789123456 Malloc1 crypto_ram3 crypto_qat 01234567891234560123456789123456
+		bdev_malloc_create -b Malloc1 16 4096
+		accel_crypto_key_create -c AES_XTS -k 00112233445566778899001122334455 -e 11223344556677889900112233445500 -n test_dek_sw
+		accel_crypto_key_create -c AES_XTS -k 22334455667788990011223344550011 -e 33445566778899001122334455001122 -n test_dek_sw2
+		accel_crypto_key_create -c AES_XTS -k 33445566778899001122334455001122 -e 44556677889900112233445500112233 -n test_dek_sw3
+		bdev_crypto_create Malloc0 crypto_ram -n test_dek_sw
+		bdev_crypto_create Malloc1 crypto_ram2 -n test_dek_sw2
+		bdev_crypto_create crypto_ram2 crypto_ram3 -n test_dek_sw3
+		bdev_get_bdevs -b Malloc1
+	RPC
+}
+
+function setup_crypto_accel_mlx5_conf() {
+	"$rpc_py" <<- RPC
+		mlx5_scan_accel_module
+		accel_assign_opc -o encrypt -m mlx5
+		accel_assign_opc -o decrypt -m mlx5
+		framework_start_init
+		bdev_malloc_create -b Malloc0 32 512
+		bdev_malloc_create -b Malloc1 32 512
+		bdev_malloc_create -b Malloc2 32 4096
+		bdev_malloc_create -b Malloc3 32 4096
+		accel_crypto_key_create -c AES_XTS -k 00112233445566778899001122334455 -e 11223344556677889900112233445500 -n test_dek_accel_mlx5_1
+		accel_crypto_key_create -c AES_XTS -k 11223344556677889900112233445500 -e 22334455667788990011223344550011 -n test_dek_accel_mlx5_2
+		accel_crypto_key_create -c AES_XTS -k 22334455667788990011223344550011 -e 33445566778899001122334455002233 -n test_dek_accel_mlx5_3
+		accel_crypto_key_create -c AES_XTS -k 33445566778899001122334455001122 -e 44556677889900112233445500112233 -n test_dek_accel_mlx5_4
+		bdev_crypto_create Malloc0 crypto_ram_1 -n test_dek_accel_mlx5_1
+		bdev_crypto_create Malloc1 crypto_ram_2 -n test_dek_accel_mlx5_2
+		bdev_crypto_create Malloc2 crypto_ram_3 -n test_dek_accel_mlx5_3
+		bdev_crypto_create Malloc3 crypto_ram_4 -n test_dek_accel_mlx5_4
 		bdev_get_bdevs -b Malloc1
 	RPC
 }
@@ -159,42 +230,31 @@ function setup_crypto_mlx5_conf() {
 	local key=$1
 	local block_key
 	local tweak_key
-	if [ ${#key} == 96 ]; then
-		# 96 bytes is 64 + 32 - AES_XTS_256 in hexlified format
-		# Copy first 64 chars into the 'key'. This gives 32 in the
-		# binary or 256 bit.
+	if [ ${#key} == 64 ]; then
+		# 64 bytes is 32 + 32 - AES_XTS_128 in hexlified format
+		block_key=${key:0:32}
+		tweak_key=${key:32:32}
+	elif [ ${#key} == 128 ]; then
+		# 128 bytes is 64 + 64 - AES_XTS_256 in hexlified format
 		block_key=${key:0:64}
-		# Copy the the rest of the key and pass it as the 'key2'.
-		tweak_key=${key:64:32}
-	elif [ ${#key} == 160 ]; then
-		# 160 bytes is 128 + 32 - AES_XTS_512 in hexlified format
-		# Copy first 128 chars into the 'key'. This gives 64 in the
-		# binary or 512 bit.
-		block_key=${key:0:128}
-		# Copy the the rest of the key and pass it as the 'key2'.
-		tweak_key=${key:128:32}
+		tweak_key=${key:64:64}
 	else
 		echo "ERROR: Invalid DEK size for MLX5 crypto setup: ${#key}"
-		echo "ERROR: Supported key sizes for MLX5: 96 bytes (AES_XTS_256) and 160 bytes (AES_XTS_512)."
+		echo "ERROR: Supported key sizes for MLX5: 64 bytes (AES_XTS_128) and 128 bytes (AES_XTS_256)."
 		return 1
 	fi
 
 	# Malloc0 will use MLX5 AES_XTS
-	"$rpc_py" <<- RPC
+	"$rootdir/scripts/rpc.py" <<- RPC
+		dpdk_cryptodev_scan_accel_module
+		dpdk_cryptodev_set_driver -d mlx5_pci
+		accel_assign_opc -o encrypt -m dpdk_cryptodev
+		accel_assign_opc -o decrypt -m dpdk_cryptodev
+		framework_start_init
 		bdev_malloc_create -b Malloc0 16 512
-		bdev_crypto_create -c AES_XTS -k2 $tweak_key Malloc0 crypto_ram4 mlx5_pci $block_key
+		bdev_crypto_create Malloc0 crypto_ram4 -k $block_key -c AES_XTS -k2 $tweak_key
 		bdev_get_bdevs -b Malloc0
 	RPC
-}
-
-function setup_pmem_conf() {
-	if hash pmempool; then
-		rm -f "$SPDK_TEST_STORAGE/spdk-pmem-pool"
-		pmempool create blk --size=32M 512 "$SPDK_TEST_STORAGE/spdk-pmem-pool"
-		"$rpc_py" bdev_pmem_create -n Pmem0 "$SPDK_TEST_STORAGE/spdk-pmem-pool"
-	else
-		return 1
-	fi
 }
 
 function setup_rbd_conf() {
@@ -550,6 +610,27 @@ function stat_test_suite() {
 	trap - SIGINT SIGTERM EXIT
 }
 
+function bdev_gpt_uuid() {
+	local bdev
+
+	start_spdk_tgt
+
+	"$rpc_py" load_config -j "$conf_file"
+	"$rpc_py" bdev_wait_for_examine
+
+	bdev=$("$rpc_py" bdev_get_bdevs -b "$g_unique_partguid")
+	[[ "$(jq -r 'length' <<< "$bdev")" == "1" ]]
+	[[ "$(jq -r '.[0].aliases[0]' <<< "$bdev")" == "$g_unique_partguid" ]]
+	[[ "$(jq -r '.[0].driver_specific.gpt.unique_partition_guid' <<< "$bdev")" == "$g_unique_partguid" ]]
+
+	bdev=$("$rpc_py" bdev_get_bdevs -b "$g_unique_partguid_old")
+	[[ "$(jq -r 'length' <<< "$bdev")" == "1" ]]
+	[[ "$(jq -r '.[0].aliases[0]' <<< "$bdev")" == "$g_unique_partguid_old" ]]
+	[[ "$(jq -r '.[0].driver_specific.gpt.unique_partition_guid' <<< "$bdev")" == "$g_unique_partguid_old" ]]
+
+	killprocess "$spdk_tgt_pid"
+}
+
 # Initial bdev creation and configuration
 #-----------------------------------------------------
 QOS_DEV_1="Malloc_0"
@@ -566,19 +647,14 @@ fi
 
 test_type=${1:-bdev}
 crypto_device=$2
-wcs_file=$3
-dek=$4
+dek=$3
 env_ctx=""
-if [ -n "$crypto_device" ] && [ -n "$wcs_file" ]; then
-	# We need full path here since fio perf test does 'pushd' to the test dir
-	# and crypto login of fio plugin test can fail.
-	wcs_file=$(readlink -f $wcs_file)
-	if [ -f $wcs_file ]; then
-		env_ctx="--env-context=--allow=$crypto_device,class=crypto,wcs_file=$wcs_file"
-	else
-		echo "ERROR: Credentials file $3 is not found!"
-		exit 1
-	fi
+wait_for_rpc=""
+if [ -n "$crypto_device" ]; then
+	env_ctx="--env-context=--allow=$crypto_device,class=crypto"
+fi
+if [[ $test_type == crypto_* ]]; then
+	wait_for_rpc="--wait-for-rpc"
 fi
 start_spdk_tgt
 case "$test_type" in
@@ -597,11 +673,14 @@ case "$test_type" in
 	crypto_qat)
 		setup_crypto_qat_conf
 		;;
+	crypto_sw)
+		setup_crypto_sw_conf
+		;;
 	crypto_mlx5)
 		setup_crypto_mlx5_conf $dek
 		;;
-	pmem)
-		setup_pmem_conf
+	crypto_accel_mlx5)
+		setup_crypto_accel_mlx5_conf
 		;;
 	rbd)
 		setup_rbd_conf
@@ -626,6 +705,7 @@ esac
 # Generate json config and use it throughout all the tests
 cat <<- CONF > "$conf_file"
 	        {"subsystems":[
+	        $("$rpc_py" save_subsystem_config -n accel),
 	        $("$rpc_py" save_subsystem_config -n bdev)
 	        ]}
 CONF
@@ -660,6 +740,7 @@ fi
 trap "cleanup" SIGINT SIGTERM EXIT
 
 run_test "bdev_verify" $rootdir/build/examples/bdevperf --json "$conf_file" -q 128 -o 4096 -w verify -t 5 -C -m 0x3 "$env_ctx"
+run_test "bdev_verify_big_io" $rootdir/build/examples/bdevperf --json "$conf_file" -q 128 -o 65536 -w verify -t 5 -C -m 0x3 "$env_ctx"
 run_test "bdev_write_zeroes" $rootdir/build/examples/bdevperf --json "$conf_file" -q 128 -o 4096 -w write_zeroes -t 1 "$env_ctx"
 
 # test json config not enclosed with {}
@@ -673,6 +754,10 @@ if [[ $test_type == bdev ]]; then
 	run_test "bdev_qd_sampling" qd_sampling_test_suite "$env_ctx"
 	run_test "bdev_error" error_test_suite "$env_ctx"
 	run_test "bdev_stat" stat_test_suite "$env_ctx"
+fi
+
+if [[ $test_type == gpt ]]; then
+	run_test "bdev_gpt_uuid" bdev_gpt_uuid
 fi
 
 # Temporarily disabled - infinite loop

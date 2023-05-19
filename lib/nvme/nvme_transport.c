@@ -43,7 +43,7 @@ nvme_get_next_transport(const struct spdk_nvme_transport *transport)
 
 /*
  * Unfortunately, due to NVMe PCIe multiprocess support, we cannot store the
- * transport object in either the controller struct or the admin qpair. THis means
+ * transport object in either the controller struct or the admin qpair. This means
  * that a lot of admin related transport calls will have to call nvme_get_transport
  * in order to know which functions to call.
  * In the I/O path, we have the ability to store the transport struct in the I/O
@@ -537,8 +537,9 @@ nvme_transport_ctrlr_disconnect_qpair(struct spdk_nvme_ctrlr *ctrlr, struct spdk
 void
 nvme_transport_ctrlr_disconnect_qpair_done(struct spdk_nvme_qpair *qpair)
 {
-	if (qpair->active_proc == nvme_ctrlr_get_current_process(qpair->ctrlr)) {
-		nvme_qpair_abort_all_queued_reqs(qpair, 0);
+	if (qpair->active_proc == nvme_ctrlr_get_current_process(qpair->ctrlr) ||
+	    nvme_qpair_is_admin_queue(qpair)) {
+		nvme_qpair_abort_all_queued_reqs(qpair);
 	}
 	nvme_qpair_set_state(qpair, NVME_QPAIR_DISCONNECTED);
 }
@@ -558,17 +559,16 @@ nvme_transport_ctrlr_get_memory_domains(const struct spdk_nvme_ctrlr *ctrlr,
 }
 
 void
-nvme_transport_qpair_abort_reqs(struct spdk_nvme_qpair *qpair, uint32_t dnr)
+nvme_transport_qpair_abort_reqs(struct spdk_nvme_qpair *qpair)
 {
 	const struct spdk_nvme_transport *transport;
 
-	assert(dnr <= 1);
 	if (spdk_likely(!nvme_qpair_is_admin_queue(qpair))) {
-		qpair->transport->ops.qpair_abort_reqs(qpair, dnr);
+		qpair->transport->ops.qpair_abort_reqs(qpair, qpair->abort_dnr);
 	} else {
 		transport = nvme_get_transport(qpair->ctrlr->trid.trstring);
 		assert(transport != NULL);
-		transport->ops.qpair_abort_reqs(qpair, dnr);
+		transport->ops.qpair_abort_reqs(qpair, qpair->abort_dnr);
 	}
 }
 
@@ -851,4 +851,21 @@ spdk_nvme_transport_set_opts(const struct spdk_nvme_transport_opts *opts, size_t
 #undef SET_FIELD
 
 	return 0;
+}
+
+volatile struct spdk_nvme_registers *
+spdk_nvme_ctrlr_get_registers(struct spdk_nvme_ctrlr *ctrlr)
+{
+	const struct spdk_nvme_transport *transport = nvme_get_transport(ctrlr->trid.trstring);
+
+	if (transport == NULL) {
+		/* Transport does not exist. */
+		return NULL;
+	}
+
+	if (transport->ops.ctrlr_get_registers) {
+		return transport->ops.ctrlr_get_registers(ctrlr);
+	}
+
+	return NULL;
 }

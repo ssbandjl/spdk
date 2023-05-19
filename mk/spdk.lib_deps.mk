@@ -1,7 +1,7 @@
 #  SPDX-License-Identifier: BSD-3-Clause
 #  Copyright (C) 2015 Intel Corporation.
-#  Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES
 #  All rights reserved.
+#  Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 
 # A quick note on organization:
@@ -52,23 +52,29 @@ DEPDIRS-accel := log util thread json rpc jsonrpc dma
 DEPDIRS-jsonrpc := log util json
 DEPDIRS-virtio := log util json thread vfio_user
 
-DEPDIRS-lvol := log util blob
+DEPDIRS-lvol := log util blob thread
 DEPDIRS-rpc := log util json jsonrpc
 
 DEPDIRS-net := log util $(JSON_LIBS)
 DEPDIRS-notify := log util $(JSON_LIBS)
 DEPDIRS-trace := log util $(JSON_LIBS)
 
-DEPDIRS-bdev := log util thread $(JSON_LIBS) notify trace dma
+DEPDIRS-bdev := accel log util thread $(JSON_LIBS) notify trace dma
 DEPDIRS-blobfs := log thread blob trace util
 DEPDIRS-event := log util thread $(JSON_LIBS) trace init
 DEPDIRS-init := jsonrpc json log rpc thread util
 
 DEPDIRS-ftl := log util thread bdev trace
 DEPDIRS-nbd := log util thread $(JSON_LIBS) bdev
+ifeq ($(CONFIG_UBLK),y)
+DEPDIRS-ublk := log util thread $(JSON_LIBS) bdev
+endif
 DEPDIRS-nvmf := accel log sock util nvme thread $(JSON_LIBS) trace bdev
 ifeq ($(CONFIG_RDMA),y)
 DEPDIRS-nvmf += rdma
+endif
+ifeq ($(CONFIG_RDMA_PROV),mlx5_dv)
+DEPDIRS-mlx5 = log rdma util
 endif
 DEPDIRS-scsi := log util thread $(JSON_LIBS) trace bdev
 
@@ -98,6 +104,11 @@ DEPDIRS-accel_ioat := log ioat thread jsonrpc rpc accel
 DEPDIRS-accel_dsa := log idxd thread $(JSON_LIBS) accel trace
 DEPDIRS-accel_iaa := log idxd thread $(JSON_LIBS) accel trace
 DEPDIRS-accel_dpdk_cryptodev := log thread $(JSON_LIBS) accel
+DEPDIRS-accel_dpdk_compressdev := log thread $(JSON_LIBS) accel util
+
+ifeq ($(CONFIG_RDMA_PROV),mlx5_dv)
+DEPDIRS-accel_mlx5 := accel thread log mlx5 rdma util
+endif
 
 # module/env_dpdk
 DEPDIRS-env_dpdk_rpc := log $(JSON_LIBS)
@@ -125,17 +136,16 @@ DEPDIRS-bdev_rpc := $(BDEV_DEPS)
 DEPDIRS-bdev_split := $(BDEV_DEPS)
 
 DEPDIRS-bdev_aio := $(BDEV_DEPS_THREAD)
-DEPDIRS-bdev_compress := $(BDEV_DEPS_THREAD) reduce
-DEPDIRS-bdev_crypto := $(BDEV_DEPS_THREAD)
+DEPDIRS-bdev_compress := $(BDEV_DEPS_THREAD) reduce accel
+DEPDIRS-bdev_crypto := $(BDEV_DEPS_THREAD) accel
 DEPDIRS-bdev_delay := $(BDEV_DEPS_THREAD)
 DEPDIRS-bdev_iscsi := $(BDEV_DEPS_THREAD)
-DEPDIRS-bdev_malloc := $(BDEV_DEPS_THREAD) accel
+DEPDIRS-bdev_malloc := $(BDEV_DEPS_THREAD) accel dma
 DEPDIRS-bdev_null := $(BDEV_DEPS_THREAD)
 DEPDIRS-bdev_nvme = $(BDEV_DEPS_THREAD) accel nvme trace
 DEPDIRS-bdev_ocf := $(BDEV_DEPS_THREAD)
 DEPDIRS-bdev_passthru := $(BDEV_DEPS_THREAD)
-DEPDIRS-bdev_pmem := $(BDEV_DEPS_THREAD)
-DEPDIRS-bdev_raid := $(BDEV_DEPS_THREAD)
+DEPDIRS-bdev_raid := $(BDEV_DEPS_THREAD) accel
 DEPDIRS-bdev_rbd := $(BDEV_DEPS_THREAD)
 DEPDIRS-bdev_uring := $(BDEV_DEPS_THREAD)
 DEPDIRS-bdev_virtio := $(BDEV_DEPS_THREAD) virtio
@@ -156,6 +166,9 @@ DEPDIRS-event_bdev := init bdev event_accel event_vmd event_sock event_iobuf
 DEPDIRS-event_scheduler := event init json log
 
 DEPDIRS-event_nbd := init nbd event_bdev
+ifeq ($(CONFIG_UBLK),y)
+DEPDIRS-event_ublk := init ublk event_bdev
+endif
 DEPDIRS-event_nvmf := init nvmf event_bdev event_scheduler event_sock thread log bdev util $(JSON_LIBS)
 DEPDIRS-event_scsi := init scsi event_bdev
 

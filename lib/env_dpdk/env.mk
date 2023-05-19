@@ -33,7 +33,7 @@ endif
 DPDK_INC := -I$(DPDK_INC_DIR)
 
 DPDK_LIB_LIST = rte_eal rte_mempool rte_ring rte_mbuf rte_bus_pci rte_pci rte_mempool_ring
-DPDK_LIB_LIST += rte_telemetry rte_kvargs
+DPDK_LIB_LIST += rte_telemetry rte_kvargs rte_rcu
 
 DPDK_POWER=n
 
@@ -80,7 +80,7 @@ endif
 endif
 endif
 
-ifeq ($(CONFIG_VBDEV_COMPRESS),y)
+ifeq ($(findstring y,$(CONFIG_DPDK_COMPRESSDEV)$(CONFIG_VBDEV_COMPRESS)),y)
 DPDK_FRAMEWORK=y
 ifneq (, $(wildcard $(DPDK_LIB_DIR)/librte_compress_isal.*))
 DPDK_LIB_LIST += rte_compress_isal
@@ -116,9 +116,6 @@ endif
 
 ifeq ($(LINK_HASH),y)
 DPDK_LIB_LIST += rte_hash
-ifneq (, $(wildcard $(DPDK_LIB_DIR)/librte_rcu.*))
-DPDK_LIB_LIST += rte_rcu
-endif
 endif
 
 
@@ -126,7 +123,7 @@ DPDK_LIB_LIST_SORTED = $(sort $(DPDK_LIB_LIST))
 
 DPDK_SHARED_LIB = $(DPDK_LIB_LIST_SORTED:%=$(DPDK_LIB_DIR)/lib%.so)
 DPDK_STATIC_LIB = $(DPDK_LIB_LIST_SORTED:%=$(DPDK_LIB_DIR)/lib%.a)
-DPDK_SHARED_LIB_LINKER_ARGS = $(call add_no_as_needed,$(DPDK_SHARED_LIB))
+DPDK_SHARED_LIB_LINKER_ARGS = $(call add_no_as_needed,$(DPDK_SHARED_LIB)) -Wl,-rpath=$(DPDK_LIB_DIR)
 DPDK_STATIC_LIB_LINKER_ARGS = $(call add_whole_archive,$(DPDK_STATIC_LIB))
 
 ENV_CFLAGS = $(DPDK_INC) -DALLOW_EXPERIMENTAL_API

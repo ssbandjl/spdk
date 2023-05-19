@@ -35,8 +35,10 @@ class Server:
         self.username = general_config["username"]
         self.password = general_config["password"]
         self.transport = general_config["transport"].lower()
+        self.skip_spdk_install = general_config.get('skip_spdk_install', False)
         self.nic_ips = server_config["nic_ips"]
         self.mode = server_config["mode"]
+        self.irdma_roce_enable = False
 
         self.log = logging.getLogger(self.name)
 
@@ -54,6 +56,7 @@ class Server:
 
         self.enable_adq = False
         self.adq_priority = None
+        self.enable_arfs = server_config.get("enable_arfs", False)
         self.irq_settings = {"mode": "default"}
 
         if "adq_enable" in server_config and server_config["adq_enable"]:
@@ -63,6 +66,8 @@ class Server:
             self.irq_settings.update(server_config["irq_settings"])
         if "tuned_profile" in server_config:
             self.tuned_profile = server_config["tuned_profile"]
+        if "irdma_roce_enable" in general_config:
+            self.irdma_roce_enable = general_config["irdma_roce_enable"]
 
         if not re.match(r'^[A-Za-z0-9\-]+$', name):
             self.log.info("Please use a name which contains only letters, numbers or dashes")
@@ -122,15 +127,60 @@ class Server:
         self.load_drivers()
         self.configure_services()
         self.configure_sysctl()
+        self.configure_arfs()
         self.configure_tuned()
         self.configure_cpu_governor()
         self.configure_irq_affinity(**self.irq_settings)
+
+    RDMA_PROTOCOL_IWARP = 0
+    RDMA_PROTOCOL_ROCE = 1
+    RDMA_PROTOCOL_UNKNOWN = -1
+
+    def check_rdma_protocol(self):
+        try:
+            roce_ena = self.exec_cmd(["cat", "/sys/module/irdma/parameters/roce_ena"])
+            roce_ena = roce_ena.strip()
+            if roce_ena == "0":
+                return self.RDMA_PROTOCOL_IWARP
+            else:
+                return self.RDMA_PROTOCOL_ROCE
+        except CalledProcessError as e:
+            self.log.error("ERROR: failed to check RDMA protocol!")
+            self.log.error("%s resulted in error: %s" % (e.cmd, e.output))
+            return self.RDMA_PROTOCOL_UNKNOWN
 
     def load_drivers(self):
         self.log.info("Loading drivers")
         self.exec_cmd(["sudo", "modprobe", "-a",
                        "nvme-%s" % self.transport,
                        "nvmet-%s" % self.transport])
+        current_mode = self.check_rdma_protocol()
+        if current_mode == self.RDMA_PROTOCOL_UNKNOWN:
+            self.log.error("ERROR: failed to check RDMA protocol mode")
+            return
+        if self.irdma_roce_enable and current_mode == self.RDMA_PROTOCOL_IWARP:
+            self.reload_driver("irdma", "roce_ena=1")
+            self.log.info("Loaded irdma driver with RoCE enabled")
+        elif self.irdma_roce_enable and current_mode == self.RDMA_PROTOCOL_ROCE:
+            self.log.info("Leaving irdma driver with RoCE enabled")
+        else:
+            self.reload_driver("irdma", "roce_ena=0")
+            self.log.info("Loaded irdma driver with iWARP enabled")
+
+    def configure_arfs(self):
+        rps_flow_cnt = 512
+        if not self.enable_arfs:
+            rps_flow_cnt = 0
+
+        nic_names = [self.get_nic_name_by_ip(n) for n in self.nic_ips]
+        for nic_name in nic_names:
+            self.exec_cmd(["sudo", "ethtool", "-K", nic_name, "ntuple", "on"])
+            self.log.info(f"Setting rps_flow_cnt for {nic_name}")
+            queue_files = self.exec_cmd(["ls", f"/sys/class/net/{nic_name}/queues/"]).strip().split("\n")
+            queue_files = filter(lambda x: x.startswith("rx-"), queue_files)
+
+            for qf in queue_files:
+                self.exec_cmd(["sudo", "bash", "-c", f"echo {rps_flow_cnt} > /sys/class/net/{nic_name}/queues/{qf}/rps_flow_cnt"])
 
     def configure_adq(self):
         self.adq_load_modules()
@@ -153,11 +203,12 @@ class Server:
         num_queues_tc0 = 2  # 2 is minimum number of queues for TC0
         num_queues_tc1 = self.num_cores
         port_param = "dst_port" if isinstance(self, Target) else "src_port"
-        port = "4420"
         xps_script_path = os.path.join(self.spdk_dir, "scripts", "perf", "nvmf", "set_xps_rxqs")
 
         for nic_ip in self.nic_ips:
             nic_name = self.get_nic_name_by_ip(nic_ip)
+            nic_ports = [x[0] for x in self.subsystem_info_list if nic_ip in x[2]]
+
             tc_qdisc_map_cmd = ["sudo", "tc", "qdisc", "add", "dev", nic_name,
                                 "root", "mqprio", "num_tc", "2", "map", "0", "1",
                                 "queues", "%s@0" % num_queues_tc0,
@@ -171,12 +222,17 @@ class Server:
             self.log.info(" ".join(tc_qdisc_ingress_cmd))
             self.exec_cmd(tc_qdisc_ingress_cmd)
 
-            tc_filter_cmd = ["sudo", "tc", "filter", "add", "dev", nic_name,
-                             "protocol", "ip", "ingress", "prio", "1", "flower",
-                             "dst_ip", "%s/32" % nic_ip, "ip_proto", "tcp", port_param, port,
-                             "skip_sw", "hw_tc", "1"]
-            self.log.info(" ".join(tc_filter_cmd))
-            self.exec_cmd(tc_filter_cmd)
+            nic_bdf = os.path.basename(self.exec_cmd(["readlink", "-f", "/sys/class/net/%s/device" % nic_name]).strip())
+            self.exec_cmd(["sudo", "devlink", "dev", "param", "set", "pci/%s" % nic_bdf,
+                           "name", "tc1_inline_fd", "value", "true", "cmode", "runtime"])
+
+            for port in nic_ports:
+                tc_filter_cmd = ["sudo", "tc", "filter", "add", "dev", nic_name,
+                                 "protocol", "ip", "ingress", "prio", "1", "flower",
+                                 "dst_ip", "%s/32" % nic_ip, "ip_proto", "tcp", port_param, port,
+                                 "skip_sw", "hw_tc", "1"]
+                self.log.info(" ".join(tc_filter_cmd))
+                self.exec_cmd(tc_filter_cmd)
 
             # show tc configuration
             self.log.info("Show tc configuration for %s NIC..." % nic_name)
@@ -194,10 +250,11 @@ class Server:
             self.log.info(xps_cmd)
             self.exec_cmd(xps_cmd)
 
-    def reload_driver(self, driver):
+    def reload_driver(self, driver, *modprobe_args):
+
         try:
             self.exec_cmd(["sudo", "rmmod", driver])
-            self.exec_cmd(["sudo", "modprobe", driver])
+            self.exec_cmd(["sudo", "modprobe", driver, *modprobe_args])
         except CalledProcessError as e:
             self.log.error("ERROR: failed to reload %s module!" % driver)
             self.log.error("%s resulted in error: %s" % (e.cmd, e.output))
@@ -214,14 +271,14 @@ class Server:
             try:
                 self.exec_cmd(["sudo", "ethtool", "-K", nic,
                                "hw-tc-offload", "on"])  # Enable hardware TC offload
-                self.exec_cmd(["sudo", "ethtool", "--set-priv-flags", nic,
-                               "channel-inline-flow-director", "on"])  # Enable Intel Flow Director
+                nic_bdf = self.exec_cmd(["bash", "-c", "source /sys/class/net/%s/device/uevent; echo $PCI_SLOT_NAME" % nic])
                 self.exec_cmd(["sudo", "ethtool", "--set-priv-flags", nic, "fw-lldp-agent", "off"])  # Disable LLDP
-                # As temporary workaround for ADQ, channel packet inspection optimization is turned on during connection establishment.
-                # Then turned off before fio ramp_up expires in ethtool_after_fio_ramp().
-                self.exec_cmd(["sudo", "ethtool", "--set-priv-flags", nic,
-                               "channel-pkt-inspect-optimize", "on"])
-            except CalledProcessError as e:
+                self.exec_cmd(["sudo", "ethtool", "--set-priv-flags", nic, "channel-pkt-inspect-optimize", "off"])
+                # Following are suggested in ADQ Configuration Guide to be enabled for large block sizes,
+                # but can be used with 4k block sizes as well
+                self.exec_cmd(["sudo", "ethtool", "--set-priv-flags", nic, "channel-pkt-clean-bp-stop", "on"])
+                self.exec_cmd(["sudo", "ethtool", "--set-priv-flags", nic, "channel-pkt-clean-bp-stop-cfg", "on"])
+            except subprocess.CalledProcessError as e:
                 self.log.error("ERROR: failed to configure NIC port using ethtool!")
                 self.log.error("%s resulted in error: %s" % (e.cmd, e.output))
                 self.log.info("Please update your NIC driver and firmware versions and try again.")
@@ -259,9 +316,15 @@ class Server:
     def configure_sysctl(self):
         self.log.info("Tuning sysctl settings...")
 
+        busy_read = 0
+        busy_poll = 0
+        if self.enable_adq and self.mode == "spdk":
+            busy_read = 1
+            busy_poll = 1
+
         sysctl_opts = {
-            "net.core.busy_poll": 0,
-            "net.core.busy_read": 0,
+            "net.core.busy_poll": busy_poll,
+            "net.core.busy_read": busy_read,
             "net.core.somaxconn": 4096,
             "net.core.netdev_max_backlog": 8192,
             "net.ipv4.tcp_max_syn_backlog": 16384,
@@ -272,10 +335,14 @@ class Server:
             "net.ipv4.tcp_wmem": "8192 1048576 33554432",
             "net.ipv4.route.flush": 1,
             "vm.overcommit_memory": 1,
+            "net.core.rps_sock_flow_entries": 0
         }
 
         if self.enable_adq:
             sysctl_opts.update(self.adq_set_busy_read(1))
+
+        if self.enable_arfs:
+            sysctl_opts.update({"net.core.rps_sock_flow_entries": 32768})
 
         for opt, value in sysctl_opts.items():
             self.sysctl_restore_dict.update({opt: self.exec_cmd(["sysctl", "-n", opt]).strip()})
@@ -484,12 +551,13 @@ class Target(Server):
         self.spdk_dir = os.path.abspath(os.path.join(self.script_dir, "../../../"))
         self.set_local_nic_info(self.set_local_nic_info_helper())
 
-        if "skip_spdk_install" not in general_config or general_config["skip_spdk_install"] is False:
+        if self.skip_spdk_install is False:
             self.zip_spdk_sources(self.spdk_dir, "/tmp/spdk.zip")
 
         self.configure_system()
         if self.enable_adq:
             self.configure_adq()
+            self.configure_irq_affinity()
         self.sys_config()
 
     def set_local_nic_info_helper(self):
@@ -577,14 +645,6 @@ class Target(Server):
         self.exec_cmd(["%s/../pm/collect-bmc-pm" % script_full_dir,
                       "-d", "%s" % results_dir, "-l", "-p", "%s" % prefix,
                        "-x", "-c", "%s" % run_time, "-t", "%s" % 1, "-r"])
-
-    def ethtool_after_fio_ramp(self, fio_ramp_time):
-        time.sleep(fio_ramp_time//2)
-        nic_names = [self.get_nic_name_by_ip(n) for n in self.nic_ips]
-        for nic in nic_names:
-            self.log.info(nic)
-            self.exec_cmd(["sudo", "ethtool", "--set-priv-flags", nic,
-                           "channel-pkt-inspect-optimize", "off"])  # Disable channel packet inspection optimization
 
     def measure_pcm_memory(self, results_dir, pcm_file_name, ramp_time, run_time):
         time.sleep(ramp_time)
@@ -690,8 +750,9 @@ class Initiator(Server):
         self.exec_cmd(["mkdir", "-p", "%s" % self.spdk_dir])
         self._nics_json_obj = json.loads(self.exec_cmd(["ip", "-j", "address", "show"]))
 
-        if "skip_spdk_install" not in general_config or general_config["skip_spdk_install"] is False:
+        if self.skip_spdk_install is False:
             self.copy_spdk("/tmp/spdk.zip")
+
         self.set_local_nic_info(self.set_local_nic_info_helper())
         self.set_cpu_frequency()
         self.configure_system()
@@ -981,7 +1042,7 @@ class KernelTarget(Target):
                 continue
             if self.get_nvme_device_bdf(dev) in self.nvme_allowlist:
                 nvme_list.append(dev)
-        return dev_list
+        return nvme_list
 
     def nvmet_command(self, nvmet_bin, command):
         return self.exec_cmd([nvmet_bin, *(command.split(" "))])
@@ -1077,6 +1138,9 @@ class SPDKTarget(Target):
         self.bpf_scripts = []
         self.enable_dsa = False
         self.scheduler_core_limit = None
+        self.iobuf_small_pool_count = 16383
+        self.iobuf_large_pool_count = 4095
+        self.num_cqe = 4096
 
         if "num_shared_buffers" in target_config:
             self.num_shared_buffers = target_config["num_shared_buffers"]
@@ -1092,6 +1156,12 @@ class SPDKTarget(Target):
             self.enable_dsa = target_config["dsa_settings"]
         if "scheduler_core_limit" in target_config:
             self.scheduler_core_limit = target_config["scheduler_core_limit"]
+        if "iobuf_small_pool_count" in target_config:
+            self.iobuf_small_pool_count = target_config["iobuf_small_pool_count"]
+        if "iobuf_large_pool_count" in target_config:
+            self.iobuf_large_pool_count = target_config["iobuf_large_pool_count"]
+        if "num_cqe" in target_config:
+            self.num_cqe = target_config["num_cqe"]
 
         self.log.info("====DSA settings:====")
         self.log.info("DSA enabled: %s" % (self.enable_dsa))
@@ -1139,15 +1209,21 @@ class SPDKTarget(Target):
     def spdk_tgt_configure(self):
         self.log.info("Configuring SPDK NVMeOF target via RPC")
 
-        if self.enable_adq:
-            self.adq_configure_tc()
-
         # Create transport layer
-        rpc.nvmf.nvmf_create_transport(self.client, trtype=self.transport,
-                                       num_shared_buffers=self.num_shared_buffers,
-                                       max_queue_depth=self.max_queue_depth,
-                                       dif_insert_or_strip=self.dif_insert_strip,
-                                       sock_priority=self.adq_priority)
+        nvmf_transport_params = {
+            "client": self.client,
+            "trtype": self.transport,
+            "num_shared_buffers": self.num_shared_buffers,
+            "max_queue_depth": self.max_queue_depth,
+            "dif_insert_or_strip": self.dif_insert_strip,
+            "sock_priority": self.adq_priority,
+            "num_cqe": self.num_cqe
+        }
+
+        if self.enable_adq:
+            nvmf_transport_params["acceptor_poll_rate"] = 10000
+
+        rpc.nvmf.nvmf_create_transport(**nvmf_transport_params)
         self.log.info("SPDK NVMeOF transport layer:")
         rpc_client.print_dict(rpc.nvmf.nvmf_get_transports(self.client))
 
@@ -1157,6 +1233,9 @@ class SPDKTarget(Target):
         else:
             self.spdk_tgt_add_nvme_conf()
             self.spdk_tgt_add_subsystem_conf(self.nic_ips)
+
+        if self.enable_adq:
+            self.adq_configure_tc()
 
         self.log.info("Done configuring SPDK NVMeOF Target")
 
@@ -1255,6 +1334,11 @@ class SPDKTarget(Target):
         self.client = rpc_client.JSONRPCClient("/var/tmp/spdk.sock")
 
         rpc.sock.sock_set_default_impl(self.client, impl_name="posix")
+        rpc.iobuf.iobuf_set_options(self.client,
+                                    small_pool_count=self.iobuf_small_pool_count,
+                                    large_pool_count=self.iobuf_large_pool_count,
+                                    small_bufsize=None,
+                                    large_bufsize=None)
 
         if self.enable_zcopy:
             rpc.sock.sock_impl_set_options(self.client, impl_name="posix",
@@ -1322,7 +1406,7 @@ class KernelInitiator(Initiator):
         if "kernel_engine" in initiator_config:
             self.ioengine = initiator_config["kernel_engine"]
             if "io_uring" in self.ioengine:
-                self.extra_params = "--nr-poll-queues=8"
+                self.extra_params += ' --nr-poll-queues=8'
 
     def configure_adq(self):
         self.log.warning("WARNING: ADQ setup not yet supported for Kernel mode. Skipping configuration.")
@@ -1430,7 +1514,7 @@ class SPDKInitiator(Initiator):
     def __init__(self, name, general_config, initiator_config):
         super().__init__(name, general_config, initiator_config)
 
-        if "skip_spdk_install" not in general_config or general_config["skip_spdk_install"] is False:
+        if self.skip_spdk_install is False:
             self.install_spdk()
 
         # Optional fields
@@ -1713,10 +1797,6 @@ if __name__ == "__main__":
                                                           fio_ramp_time, fio_run_time))
                     threads.append(power_daemon)
 
-                if target_obj.enable_adq:
-                    ethtool_thread = threading.Thread(target=target_obj.ethtool_after_fio_ramp, args=(fio_ramp_time,))
-                    threads.append(ethtool_thread)
-
                 for t in threads:
                     t.start()
                 for t in threads:
@@ -1727,8 +1807,9 @@ if __name__ == "__main__":
                 i.copy_result_files(args.results)
         try:
             parse_results(args.results, args.csv_filename)
-        except Exception:
+        except Exception as err:
             logging.error("There was an error with parsing the results")
+            logging.error(err)
     finally:
         for i in initiators:
             try:

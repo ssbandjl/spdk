@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2020 Intel Corporation.
  *   Copyright (c) 2019-2022, Nutanix Inc. All rights reserved.
- *   Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2022, 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 /*
@@ -318,6 +318,8 @@ struct nvmf_vfio_user_sq {
 	 */
 	struct spdk_nvme_cmd			create_io_sq_cmd;
 
+	struct vfio_user_delete_sq_ctx		*delete_ctx;
+
 	/* Currently unallocated reqs. */
 	TAILQ_HEAD(, nvmf_vfio_user_req)	free_reqs;
 	/* Poll group entry */
@@ -603,38 +605,6 @@ cq_tail_advance(struct nvmf_vfio_user_cq *cq)
 		*cq_tailp(cq) = 0;
 		cq->phase = !cq->phase;
 	}
-}
-
-/*
- * As per NVMe Base spec 3.3.1.2.1, we are supposed to implement CQ flow
- * control: if there is no space in the CQ, we should wait until there is.
- *
- * In practice, we just fail the controller instead: as it happens, all host
- * implementations we care about right-size the CQ: this is required anyway for
- * NVMEoF support (see 3.3.2.8).
- *
- * Since reading the head doorbell is relatively expensive, we use the cached
- * value, so we only have to read it for real if it appears that we are full.
- */
-static inline bool
-cq_is_full(struct nvmf_vfio_user_cq *cq)
-{
-	uint32_t qindex;
-
-	assert(cq != NULL);
-
-	qindex = *cq_tailp(cq) + 1;
-	if (spdk_unlikely(qindex == cq->size)) {
-		qindex = 0;
-	}
-
-	if (qindex != cq->last_head) {
-		return false;
-	}
-
-	cq->last_head = *cq_dbl_headp(cq);
-
-	return qindex == cq->last_head;
 }
 
 static bool
@@ -1709,6 +1679,46 @@ vfio_user_map_cmd(struct nvmf_vfio_user_ctrlr *ctrlr, struct spdk_nvmf_request *
 static int handle_cmd_req(struct nvmf_vfio_user_ctrlr *ctrlr, struct spdk_nvme_cmd *cmd,
 			  struct nvmf_vfio_user_sq *sq);
 
+static uint32_t
+cq_free_slots(struct nvmf_vfio_user_cq *cq)
+{
+	uint32_t free_slots;
+
+	assert(cq != NULL);
+
+	if (cq->tail == cq->last_head) {
+		free_slots = cq->size;
+	} else if (cq->tail > cq->last_head) {
+		free_slots = cq->size - (cq->tail - cq->last_head);
+	} else {
+		free_slots = cq->last_head - cq->tail;
+	}
+	assert(free_slots > 0);
+
+	return free_slots - 1;
+}
+
+/*
+ * Since reading the head doorbell is relatively expensive, we use the cached
+ * value, so we only have to read it for real if it appears that we are full.
+ */
+static inline bool
+cq_is_full(struct nvmf_vfio_user_cq *cq)
+{
+	uint32_t free_cq_slots;
+
+	assert(cq != NULL);
+
+	free_cq_slots = cq_free_slots(cq);
+
+	if (spdk_unlikely(free_cq_slots == 0)) {
+		cq->last_head = *cq_dbl_headp(cq);
+		free_cq_slots = cq_free_slots(cq);
+	}
+
+	return free_cq_slots == 0;
+}
+
 /*
  * Posts a CQE in the completion queue.
  *
@@ -1738,6 +1748,14 @@ post_completion(struct nvmf_vfio_user_ctrlr *ctrlr, struct nvmf_vfio_user_cq *cq
 		assert(spdk_get_thread() == cq->group->group->thread);
 	}
 
+	/*
+	 * As per NVMe Base spec 3.3.1.2.1, we are supposed to implement CQ flow
+	 * control: if there is no space in the CQ, we should wait until there is.
+	 *
+	 * In practice, we just fail the controller instead: as it happens, all host
+	 * implementations we care about right-size the CQ: this is required anyway for
+	 * NVMEoF support (see 3.3.2.8).
+	 */
 	if (cq_is_full(cq)) {
 		SPDK_ERRLOG("%s: cqid:%d full (tail=%d, head=%d)\n",
 			    ctrlr_id(ctrlr), cq->qid, *cq_tailp(cq),
@@ -2224,11 +2242,11 @@ out:
 }
 
 /* For ADMIN I/O DELETE SUBMISSION QUEUE the NVMf library will disconnect and free
- * queue pair, so save the command in a context.
+ * queue pair, so save the command id and controller in a context.
  */
 struct vfio_user_delete_sq_ctx {
 	struct nvmf_vfio_user_ctrlr *vu_ctrlr;
-	struct spdk_nvme_cmd delete_io_sq_cmd;
+	uint16_t cid;
 };
 
 static void
@@ -2247,7 +2265,7 @@ vfio_user_qpair_delete_cb(void *cb_arg)
 				     cb_arg);
 	} else {
 		post_completion(vu_ctrlr, admin_cq, 0, 0,
-				ctx->delete_io_sq_cmd.cid,
+				ctx->cid,
 				SPDK_NVME_SC_SUCCESS, SPDK_NVME_SCT_GENERIC);
 		free(ctx);
 	}
@@ -2264,7 +2282,6 @@ handle_del_io_q(struct nvmf_vfio_user_ctrlr *ctrlr,
 	uint16_t sc = SPDK_NVME_SC_SUCCESS;
 	struct nvmf_vfio_user_sq *sq;
 	struct nvmf_vfio_user_cq *cq;
-	struct vfio_user_delete_sq_ctx *ctx;
 
 	SPDK_DEBUGLOG(nvmf_vfio, "%s: delete I/O %cqid:%d\n",
 		      ctrlr_id(ctrlr), is_cq ? 'c' : 's',
@@ -2293,21 +2310,20 @@ handle_del_io_q(struct nvmf_vfio_user_ctrlr *ctrlr,
 		 * VM reboot or CC.EN change, so we have to delete it in all
 		 * other cases.
 		 */
-		ctx = calloc(1, sizeof(*ctx));
-		if (!ctx) {
+		sq = ctrlr->sqs[cmd->cdw10_bits.delete_io_q.qid];
+		sq->delete_ctx = calloc(1, sizeof(*sq->delete_ctx));
+		if (!sq->delete_ctx) {
 			sct = SPDK_NVME_SCT_GENERIC;
 			sc = SPDK_NVME_SC_INTERNAL_DEVICE_ERROR;
 			goto out;
 		}
-		ctx->vu_ctrlr = ctrlr;
-		ctx->delete_io_sq_cmd = *cmd;
-
-		sq = ctrlr->sqs[cmd->cdw10_bits.delete_io_q.qid];
+		sq->delete_ctx->vu_ctrlr = ctrlr;
+		sq->delete_ctx->cid = cmd->cid;
 		sq->sq_state = VFIO_USER_SQ_DELETED;
 		assert(ctrlr->cqs[sq->cqid]->cq_ref);
 		ctrlr->cqs[sq->cqid]->cq_ref--;
 
-		spdk_nvmf_qpair_disconnect(&sq->qpair, vfio_user_qpair_delete_cb, ctx);
+		spdk_nvmf_qpair_disconnect(&sq->qpair, NULL, NULL);
 		return 0;
 	}
 
@@ -2513,7 +2529,9 @@ handle_sq_tdbl_write(struct nvmf_vfio_user_ctrlr *ctrlr, const uint32_t new_tail
 		     struct nvmf_vfio_user_sq *sq)
 {
 	struct spdk_nvme_cmd *queue;
+	struct nvmf_vfio_user_cq *cq = ctrlr->cqs[sq->cqid];
 	int count = 0;
+	uint32_t free_cq_slots;
 
 	assert(ctrlr != NULL);
 	assert(sq != NULL);
@@ -2526,11 +2544,38 @@ handle_sq_tdbl_write(struct nvmf_vfio_user_ctrlr *ctrlr, const uint32_t new_tail
 		sq->need_rearm = true;
 	}
 
+	free_cq_slots = cq_free_slots(cq);
 	queue = q_addr(&sq->mapping);
 	while (*sq_headp(sq) != new_tail) {
 		int err;
-		struct spdk_nvme_cmd *cmd = &queue[*sq_headp(sq)];
+		struct spdk_nvme_cmd *cmd;
 
+		/*
+		 * Linux host nvme driver can submit cmd's more than free cq slots
+		 * available. So process only those who have cq slots available.
+		 */
+		if (free_cq_slots-- == 0) {
+			cq->last_head = *cq_dbl_headp(cq);
+
+			free_cq_slots = cq_free_slots(cq);
+			if (free_cq_slots > 0) {
+				continue;
+			}
+
+			/*
+			 * If there are no free cq slots then kick interrupt FD to loop
+			 * again to process remaining sq cmds.
+			 * In case of polling mode we will process remaining sq cmds during
+			 * next polling interation.
+			 * sq head is advanced only for consumed commands.
+			 */
+			if (in_interrupt_mode(ctrlr->transport)) {
+				eventfd_write(ctrlr->intr_fd, 1);
+			}
+			break;
+		}
+
+		cmd = &queue[*sq_headp(sq)];
 		count++;
 
 		/*
@@ -2752,7 +2797,7 @@ disable_ctrlr(struct nvmf_vfio_user_ctrlr *vu_ctrlr)
 	 * For PCIe controller reset or shutdown, we will drop all AER
 	 * responses.
 	 */
-	nvmf_ctrlr_abort_aer(vu_ctrlr->ctrlr);
+	spdk_nvmf_ctrlr_abort_aer(vu_ctrlr->ctrlr);
 
 	/* Free the shadow doorbell buffer. */
 	vfio_user_ctrlr_switch_doorbells(vu_ctrlr, false);
@@ -2841,7 +2886,7 @@ nvmf_vfio_user_prop_req_rsp(struct nvmf_vfio_user_req *req, void *cb_arg)
 		assert(sq->ctrlr != NULL);
 		assert(req != NULL);
 
-		memcpy(req->req.data,
+		memcpy(req->req.iov[0].iov_base,
 		       &req->req.rsp->prop_get_rsp.value.u64,
 		       req->req.length);
 		return 0;
@@ -2960,6 +3005,7 @@ vfio_user_property_access(struct nvmf_vfio_user_ctrlr *vu_ctrlr,
 		req->req.cmd->prop_get_cmd.fctype = SPDK_NVMF_FABRIC_COMMAND_PROPERTY_GET;
 	}
 	req->req.length = count;
+	spdk_iov_one(req->req.iov, &req->req.iovcnt, buf, req->req.length);
 	req->req.data = buf;
 
 	spdk_nvmf_request_exec_fabrics(&req->req);
@@ -5126,7 +5172,9 @@ handle_queue_connect_rsp(struct nvmf_vfio_user_req *req, void *cb_arg)
 	TAILQ_INSERT_TAIL(&vu_ctrlr->connected_sqs, sq, tailq);
 	pthread_mutex_unlock(&endpoint->lock);
 
-	free(req->req.data);
+	free(req->req.iov[0].iov_base);
+	req->req.iov[0].iov_base = NULL;
+	req->req.iovcnt = 0;
 	req->req.data = NULL;
 
 	return 0;
@@ -5173,13 +5221,16 @@ nvmf_vfio_user_poll_group_add(struct spdk_nvmf_transport_poll_group *group,
 	req->cmd->connect_cmd.qid = admin ? 0 : qpair->qid;
 
 	req->length = sizeof(struct spdk_nvmf_fabric_connect_data);
-	req->data = calloc(1, req->length);
-	if (req->data == NULL) {
+
+	data = calloc(1, req->length);
+	if (data == NULL) {
 		nvmf_vfio_user_req_free(req);
 		return -ENOMEM;
 	}
 
-	data = (struct spdk_nvmf_fabric_connect_data *)req->data;
+	spdk_iov_one(req->iov, &req->iovcnt, data, req->length);
+	req->data = data;
+
 	data->cntlid = ctrlr->cntlid;
 	snprintf(data->subnqn, sizeof(data->subnqn), "%s",
 		 spdk_nvmf_subsystem_get_nqn(ctrlr->endpoint->subsystem));
@@ -5221,6 +5272,9 @@ _nvmf_vfio_user_req_free(struct nvmf_vfio_user_sq *sq, struct nvmf_vfio_user_req
 	memset(&vu_req->cmd, 0, sizeof(vu_req->cmd));
 	memset(&vu_req->rsp, 0, sizeof(vu_req->rsp));
 	vu_req->iovcnt = 0;
+	vu_req->req.iovcnt = 0;
+	vu_req->req.data = NULL;
+	vu_req->req.length = 0;
 	vu_req->state = VFIO_USER_REQUEST_STATE_FREE;
 
 	TAILQ_INSERT_TAIL(&sq->free_reqs, vu_req, link);
@@ -5271,11 +5325,14 @@ nvmf_vfio_user_close_qpair(struct spdk_nvmf_qpair *qpair,
 	struct nvmf_vfio_user_sq *sq;
 	struct nvmf_vfio_user_ctrlr *vu_ctrlr;
 	struct nvmf_vfio_user_endpoint *endpoint;
+	struct vfio_user_delete_sq_ctx *del_ctx;
 
 	assert(qpair != NULL);
 	sq = SPDK_CONTAINEROF(qpair, struct nvmf_vfio_user_sq, qpair);
 	vu_ctrlr = sq->ctrlr;
 	endpoint = vu_ctrlr->endpoint;
+	del_ctx = sq->delete_ctx;
+	sq->delete_ctx = NULL;
 
 	pthread_mutex_lock(&endpoint->lock);
 	TAILQ_REMOVE(&vu_ctrlr->connected_sqs, sq, tailq);
@@ -5293,6 +5350,10 @@ nvmf_vfio_user_close_qpair(struct spdk_nvmf_qpair *qpair,
 		free_ctrlr(vu_ctrlr);
 	}
 	pthread_mutex_unlock(&endpoint->lock);
+
+	if (del_ctx) {
+		vfio_user_qpair_delete_cb(del_ctx);
+	}
 
 	if (cb_fn) {
 		cb_fn(cb_arg);
@@ -5342,6 +5403,11 @@ get_nvmf_io_req_length(struct spdk_nvmf_request *req)
 		return nr * sizeof(struct spdk_nvme_dsm_range);
 	}
 
+	if (cmd->opc == SPDK_NVME_OPC_COPY) {
+		nr = (cmd->cdw12 & 0x000000ffu) + 1;
+		return nr * sizeof(struct spdk_nvme_scc_source_range);
+	}
+
 	nlb = (cmd->cdw12 & 0x0000ffffu) + 1;
 	return nlb * spdk_bdev_get_block_size(ns->bdev);
 }
@@ -5355,8 +5421,6 @@ map_admin_cmd_req(struct nvmf_vfio_user_ctrlr *ctrlr, struct spdk_nvmf_request *
 	int iovcnt;
 
 	req->xfer = spdk_nvme_opc_get_data_transfer(cmd->opc);
-	req->length = 0;
-	req->data = NULL;
 
 	if (req->xfer == SPDK_NVME_DATA_NONE) {
 		return 0;
@@ -5439,8 +5503,6 @@ map_io_cmd_req(struct nvmf_vfio_user_ctrlr *ctrlr, struct spdk_nvmf_request *req
 
 	cmd = &req->cmd->nvme_cmd;
 	req->xfer = spdk_nvme_opc_get_data_transfer(cmd->opc);
-	req->length = 0;
-	req->data = NULL;
 
 	if (spdk_unlikely(req->xfer == SPDK_NVME_DATA_NONE)) {
 		return 0;
@@ -5604,13 +5666,9 @@ nvmf_vfio_user_sq_poll(struct nvmf_vfio_user_sq *sq)
 
 	new_tail = new_tail & 0xffffu;
 	if (spdk_unlikely(new_tail >= sq->size)) {
-		union spdk_nvme_async_event_completion event = {};
-
 		SPDK_DEBUGLOG(nvmf_vfio, "%s: invalid sqid:%u doorbell value %u\n", ctrlr_id(ctrlr), sq->qid,
 			      new_tail);
-		event.bits.async_event_type = SPDK_NVME_ASYNC_EVENT_TYPE_ERROR;
-		event.bits.async_event_info = SPDK_NVME_ASYNC_EVENT_INVALID_DB_WRITE;
-		nvmf_ctrlr_async_event_error_event(ctrlr->ctrlr, event);
+		spdk_nvmf_ctrlr_async_event_error_event(ctrlr->ctrlr, SPDK_NVME_ASYNC_EVENT_INVALID_DB_WRITE);
 
 		return -1;
 	}

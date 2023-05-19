@@ -307,11 +307,17 @@ bdev_uring_read_sysfs_attr(const char *devname, const char *attr, char *str, int
 {
 	char *path = NULL;
 	char *device = NULL;
+	char *name;
 	FILE *file;
 	int ret = 0;
 
-	device = basename(devname);
+	name = strdup(devname);
+	if (name == NULL) {
+		return -EINVAL;
+	}
+	device = basename(name);
 	path = spdk_sprintf_alloc("/sys/block/%s/%s", device, attr);
+	free(name);
 	if (!path) {
 		return -EINVAL;
 	}
@@ -764,7 +770,7 @@ create_uring_bdev(const char *name, const char *filename, uint32_t block_size)
 	uring->bdev.product_name = "URING bdev";
 	uring->bdev.module = &uring_if;
 
-	uring->bdev.write_cache = 1;
+	uring->bdev.write_cache = 0;
 
 	detected_block_size = spdk_fd_get_blocklen(uring->fd);
 	if (block_size == 0) {

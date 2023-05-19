@@ -21,13 +21,11 @@ extern "C" {
 /** Data Encryption Key identifier */
 struct spdk_accel_crypto_key;
 
-/* Flags for accel operations */
-#define ACCEL_FLAG_PERSISTENT (1 << 0)
-
 struct spdk_accel_crypto_key_create_param {
 	char *cipher;	/**< Cipher to be used for crypto operations */
 	char *hex_key;	/**< Hexlified key */
 	char *hex_key2;	/**< Hexlified key2 */
+	char *tweak_mode;	/**< Tweak mode */
 	char *key_name;	/**< Key name */
 };
 
@@ -42,7 +40,8 @@ enum accel_opcode {
 	ACCEL_OPC_DECOMPRESS		= 7,
 	ACCEL_OPC_ENCRYPT		= 8,
 	ACCEL_OPC_DECRYPT		= 9,
-	ACCEL_OPC_LAST			= 10,
+	ACCEL_OPC_XOR			= 10,
+	ACCEL_OPC_LAST			= 11,
 };
 
 /**
@@ -262,7 +261,7 @@ int spdk_accel_submit_copy_crc32cv(struct spdk_io_channel *ch, void *dst, struct
  * \param nbytes Length in bytes.
  * \param src_iovs The io vector array which stores the src data and len.
  * \param src_iovcnt The size of the src io vectors.
- * \param output_size The size of the compressed data
+ * \param output_size The size of the compressed data (may be NULL if not desired)
  * \param flags Flags, optional flags that can vary per operation.
  * \param cb_fn Callback function which will be called when the request is complete.
  * \param cb_arg Opaque value which will be passed back as the arg parameter in
@@ -285,6 +284,7 @@ int spdk_accel_submit_compress(struct spdk_io_channel *ch, void *dst,
  * \param dst_iovcnt The size of the dst io vectors.
  * \param src_iovs The io vector array which stores the src data and len.
  * \param src_iovcnt The size of the src io vectors.
+ * \param output_size The size of the compressed data (may be NULL if not desired)
  * \param flags Flags, optional flags that can vary per operation.
  * \param cb_fn Callback function which will be called when the request is complete.
  * \param cb_arg Opaque value which will be passed back as the arg parameter in
@@ -294,8 +294,24 @@ int spdk_accel_submit_compress(struct spdk_io_channel *ch, void *dst,
  */
 int spdk_accel_submit_decompress(struct spdk_io_channel *ch, struct iovec *dst_iovs,
 				 size_t dst_iovcnt, struct iovec *src_iovs,
-				 size_t src_iovcnt, int flags,
+				 size_t src_iovcnt, uint32_t *output_size, int flags,
 				 spdk_accel_completion_cb cb_fn, void *cb_arg);
+
+/**
+ * Submit an xor request.
+ *
+ * \param ch I/O channel associated with this call.
+ * \param dst Destination to write the data to.
+ * \param sources Array of source buffers.
+ * \param nsrcs Number of source buffers in the array.
+ * \param nbytes Length in bytes.
+ * \param cb_fn Called when this copy operation completes.
+ * \param cb_arg Callback argument.
+ *
+ * \return 0 on success, negative errno on failure.
+ */
+int spdk_accel_submit_xor(struct spdk_io_channel *ch, void *dst, void **sources, uint32_t nsrcs,
+			  uint64_t nbytes, spdk_accel_completion_cb cb_fn, void *cb_arg);
 
 /** Object grouping multiple accel operations to be executed at the same point in time */
 struct spdk_accel_sequence;
@@ -457,17 +473,36 @@ int spdk_accel_append_decrypt(struct spdk_accel_sequence **seq, struct spdk_io_c
 			      spdk_accel_step_cb cb_fn, void *cb_arg);
 
 /**
+ * Append a crc32c operation to a sequence.
+ *
+ * \param seq Sequence object.  If NULL, a new sequence object will be created.
+ * \param ch I/O channel.
+ * \param dst Destination to write the calculated value.
+ * \param iovs Source I/O vector array.
+ * \param iovcnt Size of the `iovs` array.
+ * \param domain Memory domain to which the source buffers belong.
+ * \param domain_ctx Source buffer domain context.
+ * \param seed Initial value.
+ * \param cb_fn Callback to be executed once this operation is completed.
+ * \param cb_arg Argument to be passed to `cb_fn`.
+ *
+ * \return 0 if operation was successfully added to the sequence, negative errno otherwise.
+ */
+int spdk_accel_append_crc32c(struct spdk_accel_sequence **seq, struct spdk_io_channel *ch,
+			     uint32_t *dst, struct iovec *iovs, uint32_t iovcnt,
+			     struct spdk_memory_domain *domain, void *domain_ctx,
+			     uint32_t seed, spdk_accel_step_cb cb_fn, void *cb_arg);
+
+/**
  * Finish a sequence and execute all its operations. After the completion callback is executed, the
  * sequence object is automatically freed.
  *
  * \param seq Sequence to finish.
  * \param cb_fn Completion callback to be executed once all operations are executed.
  * \param cb_arg Argument to be passed to `cb_fn`.
- *
- * \return 0 on success, negative errno otherwise.
  */
-int spdk_accel_sequence_finish(struct spdk_accel_sequence *seq,
-			       spdk_accel_completion_cb cb_fn, void *cb_arg);
+void spdk_accel_sequence_finish(struct spdk_accel_sequence *seq,
+				spdk_accel_completion_cb cb_fn, void *cb_arg);
 
 /**
  * Reverse a sequence, so that the last operation becomes the first and vice versa.
@@ -609,6 +644,73 @@ struct spdk_json_write_ctx;
  * \param w JSON write context
  */
 void spdk_accel_write_config_json(struct spdk_json_write_ctx *w);
+
+/**
+ * Select platform driver to execute operation chains.
+ *
+ * \param name Name of the driver.
+ *
+ * \return 0 on success, negetive errno otherwise.
+ */
+int spdk_accel_set_driver(const char *name);
+
+/**
+ * Retrieves accel memory domain.
+ *
+ * \return Accel memory domain.
+ */
+struct spdk_memory_domain *spdk_accel_get_memory_domain(void);
+
+struct spdk_accel_opts {
+	/** Size of this structure */
+	size_t		size;
+	/** Size of the small iobuf cache */
+	uint32_t	small_cache_size;
+	/** Size of the large iobuf cache */
+	uint32_t	large_cache_size;
+	/** Maximum number of tasks per IO channel */
+	uint32_t	task_count;
+	/** Maximum number of sequences per IO channel */
+	uint32_t	sequence_count;
+	/** Maximum number of accel buffers per IO channel */
+	uint32_t	buf_count;
+} __attribute__((packed));
+
+/**
+ * Set the options for the accel framework.
+ *
+ * \param opts Accel options.
+ *
+ * \return 0 on success, negative errno otherwise.
+ */
+int spdk_accel_set_opts(const struct spdk_accel_opts *opts);
+
+/**
+ * Get the options for the accel framework.
+ *
+ * \param opts Accel options.
+ */
+void spdk_accel_get_opts(struct spdk_accel_opts *opts);
+
+struct spdk_accel_opcode_stats {
+	/** Number of executed operations */
+	uint64_t	executed;
+	/** Number of failed operations */
+	uint64_t	failed;
+	/** Number of processed bytes */
+	uint64_t	num_bytes;
+} __attribute__((packed));
+
+/**
+ * Retrieve opcode statistics for a given IO channel.
+ *
+ * \param ch I/O channel.
+ * \param opcode Operation to retrieve statistics.
+ * \param stats Per-channel statistics.
+ * \param size Size of the `stats` structure.
+ */
+void spdk_accel_get_opcode_stats(struct spdk_io_channel *ch, enum accel_opcode opcode,
+				 struct spdk_accel_opcode_stats *stats, size_t size);
 
 #ifdef __cplusplus
 }

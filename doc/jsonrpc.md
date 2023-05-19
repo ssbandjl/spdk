@@ -441,14 +441,20 @@ Example response:
     "framework_get_subsystems",
     "framework_monitor_context_switch",
     "spdk_kill_instance",
-    "accel_get_opc_assignments",
+    "accel_set_options",
+    "accel_set_driver",
     "accel_crypto_key_create",
+    "accel_crypto_key_destroy",
     "accel_crypto_keys_get",
+    "accel_assign_opc",
+    "accel_get_module_info",
+    "accel_get_opc_assignments",
     "ioat_scan_accel_module",
     "dsa_scan_accel_module",
     "dpdk_cryptodev_scan_accel_module",
     "dpdk_cryptodev_set_driver",
     "dpdk_cryptodev_get_driver",
+    "mlx5_scan_accel_module",
     "bdev_virtio_attach_controller",
     "bdev_virtio_scsi_get_devices",
     "bdev_virtio_detach_controller",
@@ -1783,7 +1789,7 @@ Example response:
 
 ### accel_crypto_key_create {#rpc_accel_crypto_key_create}
 
-Create a crypt key which will be used in accel framework
+Create a crypto key which will be used in accel framework
 
 #### Parameters
 
@@ -1807,6 +1813,41 @@ Example request:
     "cipher": "AES_XTS",
     "key": "00112233445566778899001122334455",
     "key2": "00112233445566778899001122334455",
+    "name": "super_key"
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### accel_crypto_key_destroy {#rpc_accel_crypto_key_destroy}
+
+Destroy a crypto key. The user is responsible for ensuring that the deleted key is not used by acceleration modules.
+
+#### Parameters
+
+Name       | Optional | Type        | Description
+-----------|----------| ----------- | -----------------
+name       | Required | string      | The key name
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "accel_crypto_key_destroy",
+  "id": 1,
+  "params": {
     "name": "super_key"
   }
 }
@@ -1864,6 +1905,170 @@ Example response:
       "key2": "22334455667788990011223344550011"
     }
   ]
+}
+~~~
+
+### accel_set_driver {#rpc_accel_set_driver}
+
+Select platform driver to execute operation chains.  Until a driver is selected, all operations are
+executed through accel modules.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- |----------| ----------- | -----------------
+name                    | Required | string      | Name of the platform driver
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "accel_set_driver",
+  "id": 1
+  "params": {
+    "name": "xeon"
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### accel_set_options {#rpc_accel_set_options}
+
+Set accel framework's options.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- |----------| ----------- | -----------------
+small_cache_size        | Optional | number      | Size of the small iobuf cache
+large_cache_size        | Optional | number      | Size of the large iobuf cache
+task_count              | Optional | number      | Maximum number of tasks per IO channel
+sequence_count          | Optional | number      | Maximum number of sequences per IO channel
+buf_count               | Optional | number      | Maximum number of accel buffers per IO channel
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "accel_set_options",
+  "id": 1,
+  "params": {
+    "small_cache_size": 128,
+    "large_cache_size": 32
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### accel_get_stats {#rpc_accel_get_stats}
+
+Retrieve accel framework's statistics.  Statistics for opcodes that have never been executed (i.e.
+all their stats are at 0) aren't included in the `operations` array.
+
+#### Parameters
+
+None.
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "accel_get_stats",
+  "id": 1
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "sequence_executed": 256,
+    "sequence_failed": 0,
+    "operations": [
+      {
+        "opcode": "copy",
+        "executed": 256,
+        "failed": 0
+      },
+      {
+        "opcode": "encrypt",
+        "executed": 128,
+        "failed": 0
+      },
+      {
+        "opcode": "decrypt",
+        "executed": 128,
+        "failed": 0
+      }
+    ]
+  }
+}
+~~~
+
+### compressdev_scan_accel_module {#rpc_compressdev_scan_accel_module}
+
+Set config and enable compressdev accel module offload.
+Select the DPDK polled mode driver (pmd) for the accel compress module,
+0 = auto-select, 1= QAT only, 2 = mlx5_pci only.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+pmd                     | Required | int         | pmd selection
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "params": {
+    "pmd": 1
+  },
+  "jsonrpc": "2.0",
+  "method": "compressdev_scan_accel_module",
+  "id": 1
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
 }
 ~~~
 
@@ -2002,7 +2207,7 @@ Set the DPDK cryptodev driver
 
 Name                    | Optional | Type   | Description
 ----------------------- |----------|--------| -----------
-driver_name             | Required | string | The driver, can be one of crypto_aesni_mb, crypto_qat or mlx5_pci
+crypto_pmd              | Required | string | The driver, can be one of crypto_aesni_mb, crypto_qat or mlx5_pci
 
 #### Example
 
@@ -2014,7 +2219,7 @@ Example request:
   "method": "dpdk_cryptodev_set_driver",
   "id": 1,
   "params": {
-    "driver_name": "crypto_aesni_mb"
+    "crypto_pmd": "crypto_aesni_mb"
   }
 }
 ~~~
@@ -2056,6 +2261,43 @@ Example response:
   "jsonrpc": "2.0",
   "id": 1,
   "result": "crypto_aesni_mb"
+}
+~~~
+
+### mlx5_scan_accel_module {#rpc_mlx5_scan_accel_module}
+
+Enable mlx5 accel offload
+
+#### Parameters
+
+Name                    | Optional | Type   | Description
+----------------------- | -------- |--------| -----------
+qp_size                 | Optional | number | qpair size
+num_requests            | Optional | number | Size of the shared requests pool
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "mlx5_scan_accel_module",
+  "id": 1,
+  "params": {
+    "qp_size": 256,
+    "num_requests": 2047
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
 }
 ~~~
 
@@ -2613,42 +2855,6 @@ Example response:
 }
 ~~~
 
-### bdev_compress_set_pmd {#rpc_bdev_compress_set_pmd}
-
-Select the DPDK polled mode driver (pmd) for a compressed bdev,
-0 = auto-select, 1= QAT only, 2 = ISAL only, 3 = mlx5_pci only.
-
-#### Parameters
-
-Name                    | Optional | Type        | Description
------------------------ | -------- | ----------- | -----------
-pmd                     | Required | int         | pmd selection
-
-#### Example
-
-Example request:
-
-~~~json
-{
-  "params": {
-    "pmd": 1
-  },
-  "jsonrpc": "2.0",
-  "method": "bdev_compress_set_pmd",
-  "id": 1
-}
-~~~
-
-Example response:
-
-~~~json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": true
-}
-~~~
-
 ### bdev_crypto_create {#rpc_bdev_crypto_create}
 
 Create a new crypto bdev on a given base bdev.
@@ -2656,13 +2862,15 @@ Create a new crypto bdev on a given base bdev.
 #### Parameters
 
 Name                    | Optional | Type        | Description
------------------------ | -------- | ----------- | -----------
+----------------------- |----------| ----------- | -----------
 base_bdev_name          | Required | string      | Name of the base bdev
 name                    | Required | string      | Name of the crypto vbdev to create
-crypto_pmd              | Required | string      | Name of the crypto device driver
-key                     | Required | string      | Key in hex form
-cipher                  | Required | string      | Cipher to use, AES_CBC or AES_XTS (QAT and MLX5)
-key2                    | Required | string      | 2nd key in hex form only required for cipher AES_XTS
+crypto_pmd              | Optional | string      | Name of the crypto device driver. Obsolete, see accel_crypto_key_create
+key                     | Optional | string      | Key in hex form. Obsolete, see accel_crypto_key_create
+cipher                  | Optional | string      | Cipher to use, AES_CBC or AES_XTS (QAT and MLX5). Obsolete, see accel_crypto_key_create
+key2                    | Optional | string      | 2nd key in hex form only required for cipher AET_XTS. Obsolete, see accel_crypto_key_create
+key_name                | Optional | string      | Name of the key created with accel_crypto_key_create
+module                  | Optional | string      | Name of the accel module which is used to create a key (if no key_name specified)
 
 Both key and key2 must be passed in the hexlified form. For example, 256bit AES key may look like this:
 afd9477abf50254219ccb75965fbe39f23ebead5676e292582a0a67f66b88215
@@ -2840,6 +3048,9 @@ Example request:
 
 ~~~json
 {
+  "params": {
+    "name": "ocf0"
+  },
   "jsonrpc": "2.0",
   "method": "bdev_ocf_get_stats",
   "id": 1
@@ -3021,6 +3232,45 @@ Example response:
       "percentage": "99.9"
     }
   ]
+}
+~~~
+
+### bdev_ocf_reset_stats {#rpc_bdev_ocf_reset_stats}
+
+Reset statistics of chosen OCF block device.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+name                    | Required | string      | Block device name
+
+#### Response
+
+Completion status of reset statistics operation returned as a boolean.
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "params": {
+    "name": "ocf0"
+  },
+  "jsonrpc": "2.0",
+  "method": "bdev_ocf_reset_stats",
+  "id": 1
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
 }
 ~~~
 
@@ -3441,7 +3691,7 @@ Resize @ref bdev_config_null.
 Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 name                    | Required | string      | Bdev name
-new_size                | Required | number      | Bdev new capacity in MB
+new_size                | Required | number      | Bdev new capacity in MiB
 
 #### Example
 
@@ -3618,6 +3868,7 @@ generate_uuids             | Optional | boolean     | Enable generation of UUIDs
 transport_tos              | Optional | number      | IPv4 Type of Service value. Only applicable for RDMA transport. Default: 0 (no TOS is applied).
 nvme_error_stat            | Optional | boolean     | Enable collecting NVMe error counts.
 rdma_srq_size              | Optional | number      | Set the size of a shared rdma receive queue. Default: 0 (disabled).
+io_path_stat               | Optional | boolean     | Enable collecting I/O stat of each nvme bdev io path. Default: `false`.
 
 #### Example
 
@@ -3730,11 +3981,12 @@ hdgst                      | Optional | bool        | Enable TCP header digest
 ddgst                      | Optional | bool        | Enable TCP data digest
 fabrics_connect_timeout_us | Optional | bool        | Timeout for fabrics connect (in microseconds)
 multipath                  | Optional | string      | Multipathing behavior: disable, failover, multipath. Default is failover.
-num_io_queues              | Optional | uint32_t    | The number of IO queues to request during initialization. Range: (0, UINT16_MAX + 1], Default is 1024.
+num_io_queues              | Optional | number      | The number of IO queues to request during initialization. Range: (0, UINT16_MAX + 1], Default is 1024.
 ctrlr_loss_timeout_sec     | Optional | number      | Time to wait until ctrlr is reconnected before deleting ctrlr.  -1 means infinite reconnects. 0 means no reconnect.
 reconnect_delay_sec        | Optional | number      | Time to delay a reconnect trial. 0 means no reconnect.
 fast_io_fail_timeout_sec   | Optional | number      | Time to wait until ctrlr is reconnected before failing I/O to ctrlr. 0 means no such timeout.
 psk                        | Optional | string      | PSK in hexadecimal digits, e.g. 1234567890ABCDEF (Enables SSL socket implementation for TCP)
+max_bdevs                  | Optional | number      | The size of the name array for newly created bdevs. Default is 128.
 
 #### Example
 
@@ -4135,7 +4387,8 @@ Example response:
 
 ### bdev_nvme_set_multipath_policy {#rpc_bdev_nvme_set_multipath_policy}
 
-Set multipath policy of the NVMe bdev in multipath mode.
+Set multipath policy of the NVMe bdev in multipath mode or set multipath
+selector for active-active multipath policy.
 
 #### Parameters
 
@@ -4143,6 +4396,8 @@ Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 name                    | Required | string      | Name of the NVMe bdev
 policy                  | Required | string      | Multipath policy: active_active or active_passive
+selector                | Optional | string      | Multipath selector: round_robin or queue_depth, used in active-active mode. Default is round_robin
+rr_min_io               | Optional | number      | Number of I/Os routed to current io path before switching to another for round-robin selector. The min value is 1.
 
 #### Example
 
@@ -4167,6 +4422,102 @@ Example response:
   "jsonrpc": "2.0",
   "id": 1,
   "result": true
+}
+~~~
+
+### bdev_nvme_get_path_iostat {#rpc_bdev_nvme_get_path_iostat}
+
+Get I/O statistics for IO paths of the block device. Call RPC bdev_nvme_set_options to set enable_io_path_stat
+true before using this RPC.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+name                    | Required | string      | Name of the NVMe bdev
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_nvme_get_path_iostat",
+  "id": 1,
+  "params": {
+    "name": "NVMe0n1"
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "name": "NVMe0n1",
+    "stats": [
+      {
+        "trid": {
+          "trtype": "TCP",
+          "adrfam": "IPv4",
+          "traddr": "10.169.204.201",
+          "trsvcid": "4420",
+          "subnqn": "nqn.2016-06.io.spdk:cnode1"
+        },
+        "stat": {
+          "bytes_read": 676691968,
+          "num_read_ops": 165201,
+          "bytes_written": 0,
+          "num_write_ops": 0,
+          "bytes_unmapped": 0,
+          "num_unmap_ops": 0,
+          "max_read_latency_ticks": 521487,
+          "min_read_latency_ticks": 0,
+          "write_latency_ticks": 0,
+          "max_write_latency_ticks": 0,
+          "min_write_latency_ticks": 0,
+          "unmap_latency_ticks": 0,
+          "max_unmap_latency_ticks": 0,
+          "min_unmap_latency_ticks": 0,
+          "copy_latency_ticks": 0,
+          "max_copy_latency_ticks": 0,
+          "min_copy_latency_ticks": 0
+        }
+      },
+      {
+        "trid": {
+          "trtype": "TCP",
+          "adrfam": "IPv4",
+          "traddr": "8.8.8.6",
+          "trsvcid": "4420",
+          "subnqn": "nqn.2016-06.io.spdk:cnode1"
+        },
+        "stat": {
+          "bytes_read": 677138432,
+          "num_read_ops": 165317,
+          "bytes_written": 0,
+          "num_write_ops": 0,
+          "bytes_unmapped": 0,
+          "num_unmap_ops": 0,
+          "max_read_latency_ticks": 108525,
+          "min_read_latency_ticks": 0,
+          "write_latency_ticks": 0,
+          "max_write_latency_ticks": 0,
+          "min_write_latency_ticks": 0,
+          "unmap_latency_ticks": 0,
+          "max_unmap_latency_ticks": 0,
+          "min_unmap_latency_ticks": 0,
+          "copy_latency_ticks": 0,
+          "max_copy_latency_ticks": 0,
+          "min_copy_latency_ticks": 0
+        }
+      }
+    ]
+  }
 }
 ~~~
 
@@ -4992,6 +5343,7 @@ Construct error bdev.
 Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 base_name               | Required | string      | Base bdev name
+uuid                    | Optional | string      | UUID for this bdev
 
 #### Example
 
@@ -5616,224 +5968,6 @@ Example response:
         }
       }
     }
-}
-~~~
-### bdev_pmem_create_pool {#rpc_bdev_pmem_create_pool}
-
-Create a @ref bdev_config_pmem blk pool file. It is equivalent of following `pmempool create` command:
-
-~~~bash
-pmempool create -s $((num_blocks * block_size)) blk $block_size $pmem_file
-~~~
-
-This method is available only if SPDK was built with PMDK support.
-
-#### Parameters
-
-Name                    | Optional | Type        | Description
------------------------ | -------- | ----------- | -----------
-pmem_file               | Required | string      | Path to new pmem file
-num_blocks              | Required | number      | Number of blocks
-block_size              | Required | number      | Size of each block in bytes
-
-#### Example
-
-Example request:
-
-~~~json
-{
-  "params": {
-    "block_size": 512,
-    "num_blocks": 131072,
-    "pmem_file": "/tmp/pmem_file"
-  },
-  "jsonrpc": "2.0",
-  "method": "bdev_pmem_create_pool",
-  "id": 1
-}
-~~~
-
-Example response:
-
-~~~json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": true
-}
-~~~
-
-### bdev_pmem_get_pool_info {#rpc_bdev_pmem_get_pool_info}
-
-Retrieve basic information about PMDK memory pool.
-
-This method is available only if SPDK was built with PMDK support.
-
-#### Parameters
-
-Name                    | Optional | Type        | Description
------------------------ | -------- | ----------- | -----------
-pmem_file               | Required | string      | Path to existing pmem file
-
-#### Result
-
-Array of objects describing memory pool:
-
-Name                    | Type        | Description
------------------------ | ----------- | -----------
-num_blocks              | number      | Number of blocks
-block_size              | number      | Size of each block in bytes
-
-#### Example
-
-Example request:
-
-~~~json
-request:
-{
-  "params": {
-    "pmem_file": "/tmp/pmem_file"
-  },
-  "jsonrpc": "2.0",
-  "method": "bdev_pmem_get_pool_info",
-  "id": 1
-}
-~~~
-
-Example response:
-
-~~~json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": [
-    {
-      "block_size": 512,
-      "num_blocks": 129728
-    }
-  ]
-}
-~~~
-
-### bdev_pmem_delete_pool {#rpc_bdev_pmem_delete_pool}
-
-Delete pmem pool by removing file `pmem_file`. This method will fail if `pmem_file` is not a
-valid pmem pool file.
-
-This method is available only if SPDK was built with PMDK support.
-
-#### Parameters
-
-Name                    | Optional | Type        | Description
------------------------ | -------- | ----------- | -----------
-pmem_file               | Required | string      | Path to new pmem file
-
-#### Example
-
-Example request:
-
-~~~json
-{
-  "params": {
-    "pmem_file": "/tmp/pmem_file"
-  },
-  "jsonrpc": "2.0",
-  "method": "bdev_pmem_delete_pool",
-  "id": 1
-}
-~~~
-
-Example response:
-
-~~~json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": true
-}
-~~~
-
-### bdev_pmem_create {#rpc_bdev_pmem_create}
-
-Construct @ref bdev_config_pmem bdev.
-
-This method is available only if SPDK was built with PMDK support.
-
-#### Parameters
-
-Name                    | Optional | Type        | Description
------------------------ | -------- | ----------- | -----------
-name                    | Required | string      | Bdev name
-pmem_file               | Required | string      | Path to existing pmem blk pool file
-
-#### Result
-
-Name of newly created bdev.
-
-#### Example
-
-Example request:
-
-~~~json
-{
-  "params": {
-    "pmem_file": "/tmp/pmem_file",
-    "name": "Pmem0"
-  },
-  "jsonrpc": "2.0",
-  "method": "bdev_pmem_create",
-  "id": 1
-}
-~~~
-
-Example response:
-
-~~~json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": "Pmem0"
-}
-~~~
-
-### bdev_pmem_delete {#rpc_bdev_pmem_delete}
-
-Delete @ref bdev_config_pmem bdev. This call will not remove backing pool files.
-
-This method is available only if SPDK was built with PMDK support.
-
-#### Result
-
-`true` if bdev with provided name was deleted or `false` otherwise.
-
-#### Parameters
-
-Name                    | Optional | Type        | Description
------------------------ | -------- | ----------- | -----------
-name                    | Required | string      | Bdev name
-
-#### Example
-
-Example request:
-
-~~~json
-{
-  "params": {
-    "name": "Pmem0"
-  },
-  "jsonrpc": "2.0",
-  "method": "bdev_pmem_delete",
-  "id": 1
-}
-~~~
-
-Example response:
-
-~~~json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": true
 }
 ~~~
 
@@ -7759,6 +7893,7 @@ Name                    | Optional | Type        | Description
 nqn                     | Required | string      | Subsystem NQN
 tgt_name                | Optional | string      | Parent NVMe-oF target name.
 listen_address          | Required | object      | @ref rpc_nvmf_listen_address object
+secure_channel          | Optional | bool        | Whether all connections immediately attempt to establish a secure channel
 
 #### listen_address {#rpc_nvmf_listen_address}
 
@@ -8907,6 +9042,43 @@ Example response:
 }
 ~~~
 
+### virtio_blk_get_transports {#rpc_virtio_blk_get_transports}
+
+#### Parameters
+
+The user may specify no parameters in order to list all transports,
+or a transport name may be specified.
+
+Name                        | Optional | Type        | Description
+--------------------------- | -------- | ------------| -----------
+name                        | Optional | string      | Transport name.
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "virtio_blk_get_transports",
+  "id": 1
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    {
+      "name": "vhost_user_blk"
+    }
+  ]
+}
+~~~
+
 ### vhost_create_blk_controller {#rpc_vhost_create_blk_controller}
 
 Create vhost block controller
@@ -9382,7 +9554,8 @@ Create a logical volume on a logical volume store.
 Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 lvol_name               | Required | string      | Name of logical volume to create
-size                    | Required | number      | Desired size of logical volume in bytes
+size                    | Optional | number      | Desired size of logical volume in bytes (Deprecated. Please use size_in_mib instead.)
+size_in_mib             | Optional | number      | Desired size of logical volume in MiB
 thin_provision          | Optional | boolean     | True to enable thin provisioning
 uuid                    | Optional | string      | UUID of logical volume store to create logical volume on
 lvs_name                | Optional | string      | Name of logical volume store to create logical volume on
@@ -9406,7 +9579,7 @@ Example request:
   "id": 1,
   "params": {
     "lvol_name": "LVOL0",
-    "size": 1048576,
+    "size_in_mib": 1,
     "lvs_name": "LVS0",
     "clear_method": "unmap",
     "thin_provision": true
@@ -9506,6 +9679,55 @@ Example response:
 }
 ~~~
 
+### bdev_lvol_clone_bdev {#rpc_bdev_lvol_clone_bdev}
+
+Create a logical volume based on an external snapshot bdev. The external snapshot bdev
+is a bdev that will not be written to by any consumer and must not be an lvol in the
+lvstore as the clone.
+
+Regardless of whether the bdev is specified by name or UUID, the bdev UUID will be stored
+in the logical volume's metadata for use while the lvolstore is loading. For this reason,
+it is important that the bdev chosen has a static UUID.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+bdev                    | Required | string      | Name or UUID for bdev that acts as the external snapshot
+lvs_name                | Required | string      | logical volume store name
+clone_name              | Required | string      | Name for the logical volume to create
+
+#### Response
+
+UUID of the created logical volume clone is returned.
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_lvol_clone_bdev",
+  "id": 1,
+  "params": {
+    "bdev_uuid": "e4b40d8b-f623-416d-8234-baf5a4c83cbd",
+    "lvs_name": "lvs1",
+    "clone_name": "clone2"
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": "336f662b-08e5-4006-8e06-e2023f7f9886"
+}
+~~~
+
 ### bdev_lvol_rename {#rpc_bdev_lvol_rename}
 
 Rename a logical volume. New name will rename only the alias of the logical volume.
@@ -9552,7 +9774,8 @@ Resize a logical volume.
 Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 name                    | Required | string      | UUID or alias of the logical volume to resize
-size                    | Required | number      | Desired size of the logical volume in bytes
+size                    | Optional | number      | Desired size of the logical volume in bytes (Deprecated. Please use size_in_mib instead.)
+size_in_mib             | Optional | number      | Desired size of the logical volume in MiB
 
 #### Example
 
@@ -9565,7 +9788,7 @@ Example request:
   "id": 1,
   "params": {
     "name": "51638754-ca16-43a7-9f8f-294a0805ab0a",
-    "size": 2097152
+    "size_in_mib": 2
   }
 }
 ~~~
@@ -9721,6 +9944,58 @@ Example response:
   "id": 1,
   "result": true
 }
+~~~
+
+### bdev_lvol_get_lvols {#rpc_bdev_lvol_get_lvols}
+
+Get a list of logical volumes. This list can be limited by lvol store and will display volumes even if
+they are degraded. Degraded lvols do not have an associated bdev, thus this RPC call may return lvols
+not returned by `bdev_get_bdevs`.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+lvs_uuid                | Optional | string      | Only show volumes in the logical volume store with this UUID
+lvs_name                | Optional | string      | Only show volumes in the logical volume store with this name
+
+Either lvs_uuid or lvs_name may be specified, but not both.
+If both lvs_uuid and lvs_name are omitted, information about lvols in all logical volume stores is returned.
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_lvol_get_lvols",
+  "id": 1,
+  "params": {
+    "lvs_name": "lvs_test"
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+[
+  {
+    "alias": "lvs_test/lvol1",
+    "uuid": "b335c368-851d-4099-81e0-018cc494fdf6",
+    "name": "lvol1",
+    "is_thin_provisioned": false,
+    "is_snapshot": false,
+    "is_clone": false,
+    "is_esnap_clone": false,
+    "is_degraded": false,
+    "lvs": {
+      "name": "lvs_test",
+      "uuid": "a1c8d950-5715-4558-936d-ab9e6eca0794"
+    }
+  }
+]
 ~~~
 
 ## RAID
@@ -10422,6 +10697,209 @@ Example response:
 }
 ~~~
 
+## Linux Userspace Block Device (UBLK) {#jsonrpc_components_ublk}
+
+SPDK supports exporting bdevs though Linux ublk. The motivation behind it is to back a Linux kernel block device
+with an SPDK user space bdev.
+
+To export a device over ublk, first make sure the Linux kernel ublk driver is loaded by running 'modprobe ublk_drv'.
+
+### ublk_create_target {#rpc_ublk_create_target}
+
+Start to create ublk threads and initialize ublk target. It will return an error if user calls this RPC twice without
+ublk_destroy_target in between. It will use current cpumask in SPDK when user does not specify cpumask option.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+cpumask                 | Optional | string      | Cpumask for ublk target
+
+#### Response
+
+True if ublk target initialization is successful; False if failed.
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "params": {
+    "cpumask": "0x2"
+  },
+  "jsonrpc": "2.0",
+  "method": "ublk_create_target",
+  "id": 1
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### ublk_destroy_target {#rpc_ublk_destroy_target}
+
+Release all UBLK devices and destroy ublk target.
+
+#### Response
+
+True if ublk target destruction is successful; False if failed.
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "ublk_destroy_target",
+  "id": 1
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### ublk_start_disk {#rpc_ublk_start_disk}
+
+Start to export one SPDK bdev as a UBLK device
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+bdev_name               | Required | string      | Bdev name to export
+ublk_id                 | Required | int         | Device id
+queue_depth             | Optional | int         | Device queue depth
+num_queues              | Optional | int         | Total number of device queues
+
+#### Response
+
+UBLK device ID
+
+#### Example
+
+Example request:
+
+~~~json
+{
+ "params": {
+    "ublk_id": "1",
+    "bdev_name": "Malloc1"
+  },
+  "jsonrpc": "2.0",
+  "method": "ublk_start_disk",
+  "id": 1
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": 1
+}
+~~~
+
+### ublk_stop_disk {#rpc_ublk_stop_disk}
+
+Delete a UBLK device
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+ublk_id                 | Required | int         | Device id to delete
+
+#### Response
+
+True if UBLK device is deleted successfully; False if failed.
+
+#### Example
+
+Example request:
+
+~~~json
+{
+ "params": {
+    "ublk_id": "1",
+  },
+  "jsonrpc": "2.0",
+  "method": "ublk_stop_disk",
+  "id": 1
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### ublk_get_disks {#rpc_ublk_get_disks}
+
+Display full or specified ublk device list
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+ublk_id                 | Optional | int         | ublk device id to display
+
+#### Response
+
+Display ublk device list
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "ublk_get_disks",
+  "id": 1
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result":  [
+    {
+      "ublk_device": "/dev/ublkb1",
+      "id": 1,
+      "queue_depth": 512,
+      "num_queues": 1,
+      "bdev_name": "Malloc1"
+    }
+  ]
+}
+~~~
+
 ## Linux Network Block Device (NBD) {#jsonrpc_components_nbd}
 
 SPDK supports exporting bdevs through Linux nbd. These devices then appear as standard Linux kernel block devices
@@ -10754,9 +11232,7 @@ Example response:
     "enable_zerocopy_send_client": false,
     "zerocopy_threshold": 0,
     "tls_version": 13,
-    "enable_ktls": false,
-    "psk_key": "1234567890ABCDEF",
-    "psk_identity": "psk.spdk.io"
+    "enable_ktls": false
   }
 }
 ~~~
@@ -10781,8 +11257,6 @@ zerocopy_threshold          | Optional | number      | Set zerocopy_threshold in
 --                          | --       | --          | that fall below this threshold may be sent without zerocopy flag set
 tls_version                 | Optional | number      | TLS protocol version, e.g. 13 for v1.3 (only applies when impl_name == ssl)
 enable_ktls                 | Optional | boolean     | Enable or disable Kernel TLS (only applies when impl_name == ssl)
-psk_key                     | Optional | string      | Default PSK KEY in hexadecimal digits, e.g. 1234567890ABCDEF (only applies when impl_name == ssl)
-psk_identity                | Optional | string      | Default PSK ID, e.g. psk.spdk.io (only applies when impl_name == ssl)
 
 #### Response
 
@@ -10808,9 +11282,7 @@ Example request:
     "enable_zerocopy_send_client": false,
     "zerocopy_threshold": 10240,
     "tls_version": 13,
-    "enable_ktls": false,
-    "psk_key": "1234567890ABCDEF",
-    "psk_identity": "psk.spdk.io"
+    "enable_ktls": false
   }
 }
 ~~~
@@ -11314,7 +11786,7 @@ Resize @ref bdev_config_daos.
 Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 name                    | Required | string      | Bdev name
-new_size                | Required | number      | Bdev new capacity in MB
+new_size                | Required | number      | Bdev new capacity in MiB
 
 #### Example
 

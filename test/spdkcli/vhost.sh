@@ -14,7 +14,7 @@ SPDKCLI_BRANCH="/"
 sample_aio=$SPDK_TEST_STORAGE/sample_aio
 sample_aio2=$SPDK_TEST_STORAGE/sample_aio2
 
-trap 'on_error_exit' ERR
+trap 'cleanup' EXIT
 timing_enter run_vhost_tgt
 run_vhost_tgt
 timing_exit run_vhost_tgt
@@ -122,6 +122,10 @@ $spdkcli_job "'vhost/scsi/vhost_scsi2 remove_target 2' 'Nvme0n1p3'
 "
 timing_exit spdkcli_clear_config
 
+# Make sure we wait long enough for the nvme ctrl to disappear, otherwise
+# we are at risk of hitting -EPERM while loading bdev configuration.
+xtrace_disable_per_cmd wait_for_all_nvme_ctrls_to_detach
+
 timing_enter spdkcli_load_config
 $spdkcli_job "'load_config $testdir/config.json'
 '/lvol_stores create lvs0 Malloc0' 'lvs0' True
@@ -131,8 +135,11 @@ $spdkcli_job "'load_config $testdir/config.json'
 "
 check_match
 $spdk_clear_config_py clear_config
-# FIXME: remove this sleep when NVMe driver will be fixed to wait for reset to complete
-sleep 2
+
+# Make sure we wait long enough for the nvme ctrl to disappear, otherwise
+# we are at risk of hitting -EPERM while loading bdev configuration.
+xtrace_disable_per_cmd wait_for_all_nvme_ctrls_to_detach
+
 $spdkcli_job "'load_subsystem_config $testdir/config_bdev.json'
 'load_subsystem_config $testdir/config_vhost_scsi.json'
 'load_subsystem_config $testdir/config_vhost_blk.json'

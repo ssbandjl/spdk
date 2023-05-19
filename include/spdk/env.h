@@ -1,6 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2015 Intel Corporation.
  *   Copyright (c) NetApp, Inc.
+ *   Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES.
  *   All rights reserved.
  */
 
@@ -46,6 +47,7 @@ extern "C" {
 struct spdk_env_opts {
 	const char		*name;
 	const char		*core_mask;
+	const char		*lcore_map;
 	int			shm_id;
 	int			mem_channel;
 	int			main_core;
@@ -323,6 +325,14 @@ typedef void (spdk_mempool_obj_cb_t)(struct spdk_mempool *mp,
 				     void *opaque, void *obj, unsigned obj_idx);
 
 /**
+ * A memory chunk callback function for memory pool.
+ *
+ * Used by spdk_mempool_mem_iter().
+ */
+typedef void (spdk_mempool_mem_cb_t)(struct spdk_mempool *mp, void *opaque, void *addr,
+				     uint64_t iova, size_t len, unsigned mem_idx);
+
+/**
  * Create a thread-safe memory pool with user provided initialization function
  * and argument.
  *
@@ -415,6 +425,18 @@ uint32_t spdk_mempool_obj_iter(struct spdk_mempool *mp, spdk_mempool_obj_cb_t ob
 			       void *obj_cb_arg);
 
 /**
+ * Iterate through all memory chunks of the pool and call a function on each one.
+ *
+ * \param mp Memory pool to iterate on.
+ * \param mem_cb Function to call on each memory chunk.
+ * \param mem_cb_arg Opaque pointer passed to the callback function.
+ *
+ * \return Number of memory chunks iterated.
+ */
+uint32_t spdk_mempool_mem_iter(struct spdk_mempool *mp, spdk_mempool_mem_cb_t mem_cb,
+			       void *mem_cb_arg);
+
+/**
  * Lookup the memory pool identified by the given name.
  *
  * \param name Name of the memory pool.
@@ -440,6 +462,13 @@ uint32_t spdk_env_get_core_count(void);
  * \return the CPU core index of the current thread.
  */
 uint32_t spdk_env_get_current_core(void);
+
+/**
+ * Get the index of the main dedicated CPU core for this application.
+ *
+ * \return the index of the main dedicated CPU core.
+ */
+uint32_t spdk_env_get_main_core(void);
 
 /**
  * Get the index of the first dedicated CPU core for this application.
@@ -479,6 +508,18 @@ uint32_t spdk_env_get_next_core(uint32_t prev_core);
  * \return the socket ID for the given core.
  */
 uint32_t spdk_env_get_socket_id(uint32_t core);
+
+struct spdk_cpuset;
+
+/**
+ * Create a cpuset with each dedicated core's bit set to true.
+ *
+ * This function will first zero the cpuset and then set the
+ * bit for each core dedicated to this application to true.
+ *
+ * \param cpuset spdk_cpuset to initialize
+ */
+void spdk_env_get_cpuset(struct spdk_cpuset *cpuset);
 
 typedef int (*thread_start_fn)(void *);
 

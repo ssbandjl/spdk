@@ -15,6 +15,7 @@
 #include <sys/epoll.h>
 #endif
 
+#include "spdk/fd_group.h"
 #include "spdk/stdinc.h"
 #include "spdk/assert.h"
 #include "spdk/cpuset.h"
@@ -107,29 +108,6 @@ typedef void (*spdk_thread_pass_msg)(spdk_msg_fn fn, void *ctx,
 typedef int (*spdk_poller_fn)(void *ctx);
 
 /**
- * Function to be called to start a poller for the thread.
- *
- * \param thread_ctx Context for the thread.
- * \param fn Callback function for a poller.
- * \param arg Argument passed to callback.
- * \param period_microseconds Polling period in microseconds.
- *
- * \return a pointer to the poller on success, or NULL on failure.
- */
-typedef struct spdk_poller *(*spdk_start_poller)(void *thread_ctx,
-		spdk_poller_fn fn,
-		void *arg,
-		uint64_t period_microseconds);
-
-/**
- * Function to be called to stop a poller.
- *
- * \param poller Poller to stop.
- * \param thread_ctx Context for the thread.
- */
-typedef void (*spdk_stop_poller)(struct spdk_poller *poller, void *thread_ctx);
-
-/**
  * Callback function to set poller into interrupt mode or back to poll mode.
  *
  * \param poller Poller to set interrupt or poll mode.
@@ -193,6 +171,10 @@ typedef void (*spdk_channel_for_each_cpl)(struct spdk_io_channel_iter *i, int st
 
 #define SPDK_IO_CHANNEL_STRUCT_SIZE	96
 
+/**
+ * Message memory pool size definitions
+ */
+#define SPDK_MSG_MEMPOOL_CACHE_SIZE	1024
 /* Power of 2 minus 1 is optimal for memory consumption */
 #define SPDK_DEFAULT_MSG_MEMPOOL_SIZE (262144 - 1)
 
@@ -265,6 +247,25 @@ struct spdk_thread *spdk_thread_get_app_thread(void);
  * \param thread The thread to set.
  */
 void spdk_set_thread(struct spdk_thread *thread);
+
+/**
+ * Bind or unbind spdk_thread to its current CPU core.
+ *
+ * If spdk_thread is bound, it couldn't be rescheduled to other CPU cores until it is unbound.
+ *
+ * \param thread The thread to bind or not.
+ * \param bind true for bind, false for unbind.
+ */
+void spdk_thread_bind(struct spdk_thread *thread, bool bind);
+
+/**
+ * Returns whether the thread is bound to its current CPU core.
+ *
+ * \param thread The thread to query.
+ *
+ * \return true if bound, false otherwise
+ */
+bool spdk_thread_is_bound(struct spdk_thread *thread);
 
 /**
  * Mark the thread as exited, failing all future spdk_thread_send_msg(),
@@ -875,6 +876,17 @@ int spdk_interrupt_set_event_types(struct spdk_interrupt *intr,
 int spdk_thread_get_interrupt_fd(struct spdk_thread *thread);
 
 /**
+ * Return an fd_group that becomes ready whenever any of the registered
+ * interrupt file descriptors are ready
+ *
+ *
+ * \param thread The thread to get.
+ *
+ * \return The spdk_fd_group of the thread itself.
+ */
+struct spdk_fd_group *spdk_thread_get_interrupt_fd_group(struct spdk_thread *thread);
+
+/**
  * Set SPDK run as event driven mode
  *
  * \return 0 on success or -errno on failure
@@ -915,6 +927,9 @@ bool spdk_interrupt_mode_is_enabled(void);
 struct spdk_spinlock {
 	pthread_spinlock_t spinlock;
 	struct spdk_thread *thread;
+	struct spdk_spinlock_internal *internal;
+	bool initialized;
+	bool destroyed;
 };
 
 /**
@@ -985,7 +1000,7 @@ typedef STAILQ_HEAD(, spdk_iobuf_buffer) spdk_iobuf_buffer_stailq_t;
 
 struct spdk_iobuf_pool {
 	/** Buffer pool */
-	struct spdk_mempool		*pool;
+	struct spdk_ring		*pool;
 	/** Buffer cache */
 	spdk_iobuf_buffer_stailq_t	cache;
 	/** Number of elements in the cache */
@@ -1054,6 +1069,15 @@ void spdk_iobuf_get_opts(struct spdk_iobuf_opts *opts);
 int spdk_iobuf_register_module(const char *name);
 
 /**
+ * Unregister an iobuf pool user from a module.
+ *
+ * \name Name of the module.
+ *
+ * \return 0 on success, negative errno otherwise.
+ */
+int spdk_iobuf_unregister_module(const char *name);
+
+/**
  * Initialize an iobuf channel.
  *
  * \param ch iobuf channel to initialize.
@@ -1114,39 +1138,8 @@ void spdk_iobuf_entry_abort(struct spdk_iobuf_channel *ch, struct spdk_iobuf_ent
  *
  * \return pointer to a buffer or NULL if no buffers are currently available.
  */
-static inline void *
-spdk_iobuf_get(struct spdk_iobuf_channel *ch, uint64_t len,
-	       struct spdk_iobuf_entry *entry, spdk_iobuf_get_cb cb_fn)
-{
-	struct spdk_iobuf_pool *pool;
-	void *buf;
-
-	assert(spdk_io_channel_get_thread(ch->parent) == spdk_get_thread());
-	if (len <= ch->small.bufsize) {
-		pool = &ch->small;
-	} else {
-		assert(len <= ch->large.bufsize);
-		pool = &ch->large;
-	}
-
-	buf = (void *)STAILQ_FIRST(&pool->cache);
-	if (buf) {
-		STAILQ_REMOVE_HEAD(&pool->cache, stailq);
-		assert(pool->cache_count > 0);
-		pool->cache_count--;
-	} else {
-		buf = spdk_mempool_get(pool->pool);
-		if (!buf) {
-			STAILQ_INSERT_TAIL(pool->queue, entry, stailq);
-			entry->module = ch->module;
-			entry->cb_fn = cb_fn;
-
-			return NULL;
-		}
-	}
-
-	return (char *)buf;
-}
+void *spdk_iobuf_get(struct spdk_iobuf_channel *ch, uint64_t len, struct spdk_iobuf_entry *entry,
+		     spdk_iobuf_get_cb cb_fn);
 
 /**
  * Release a buffer back to the iobuf pool.  If there are outstanding requests waiting for a buffer,
@@ -1156,32 +1149,7 @@ spdk_iobuf_get(struct spdk_iobuf_channel *ch, uint64_t len,
  * \param buf Buffer to release
  * \param len Length of the buffer (must be the exact same value as specified in `spdk_iobuf_get()`).
  */
-static inline void
-spdk_iobuf_put(struct spdk_iobuf_channel *ch, void *buf, uint64_t len)
-{
-	struct spdk_iobuf_entry *entry;
-	struct spdk_iobuf_pool *pool;
-
-	assert(spdk_io_channel_get_thread(ch->parent) == spdk_get_thread());
-	if (len <= ch->small.bufsize) {
-		pool = &ch->small;
-	} else {
-		pool = &ch->large;
-	}
-
-	if (STAILQ_EMPTY(pool->queue)) {
-		if (pool->cache_count < pool->cache_size) {
-			STAILQ_INSERT_HEAD(&pool->cache, (struct spdk_iobuf_buffer *)buf, stailq);
-			pool->cache_count++;
-		} else {
-			spdk_mempool_put(pool->pool, buf);
-		}
-	} else {
-		entry = STAILQ_FIRST(pool->queue);
-		STAILQ_REMOVE_HEAD(pool->queue, stailq);
-		entry->cb_fn(entry, buf);
-	}
-}
+void spdk_iobuf_put(struct spdk_iobuf_channel *ch, void *buf, uint64_t len);
 
 #ifdef __cplusplus
 }

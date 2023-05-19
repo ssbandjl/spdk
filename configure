@@ -28,7 +28,10 @@ function usage() {
 	echo " --cross-prefix=prefix     Prefix for cross compilation (default: none)"
 	echo "                           example: aarch64-linux-gnu"
 	echo " --libdir=path             Configure installation path for the libraries (default: \$prefix/lib)"
-	echo ""
+	echo " --max-lcores=VAL          DPDK configuration. VAL defines maximum number of lcores supported"
+	echo "                           by EAL, or enables autodetection if set to 'detect'. When 'detect'"
+	echo "                           is specified, DPDK will detect number of cores in the system during"
+	echo "                           compilation, and will set maximum number of lcores to this value"
 	echo " --enable-debug            Configure for debug builds"
 	echo " --enable-werror           Treat compiler warnings as errors"
 	echo " --enable-asan             Enable address sanitizer"
@@ -71,13 +74,14 @@ function usage() {
 	echo "                           vfio-user initiator is always built-in in Linux."
 	echo "                           example: /usr/src/libvfio-user"
 	echo " --without-vfio-user       No path required."
-	echo " --with-pmdk[=DIR]         Build persistent memory bdev.
-					 example: /usr/share/pmdk"
-	echo " --without-pmdk		 No path required."
 	echo " --with-vbdev-compress     Build vbdev compression module and dependencies."
 	echo " --without-vbdev-compress  No path required."
+	echo " --with-dpdk-compressdev   Build accel DPDK compression module and dependencies."
+	echo " --without-dpdk-compressdev No path required."
 	echo " --with-rbd                Build Ceph RBD bdev module."
 	echo " --without-rbd             No path required."
+	echo " --with-ublk               Build ublk library."
+	echo " --without-ublk            No path required."
 	echo " --with-rdma[=DIR]         Build RDMA transport for NVMf target and initiator."
 	echo " --without-rdma            Accepts optional RDMA provider name. Can be \"verbs\" or \"mlx5_dv\"."
 	echo "                           If no provider specified, \"verbs\" provider is used by default."
@@ -434,6 +438,12 @@ for i in "$@"; do
 		--with-env=*)
 			CONFIG[ENV]="${i#*=}"
 			;;
+		--with-ublk)
+			CONFIG[UBLK]=y
+			;;
+		--without-ublk)
+			CONFIG[UBLK]=n
+			;;
 		--with-rbd)
 			CONFIG[RBD]=y
 			;;
@@ -517,23 +527,17 @@ for i in "$@"; do
 		--without-vfio-user)
 			CONFIG[VFIO_USER]=n
 			;;
-		--with-pmdk)
-			CONFIG[PMDK]=y
-			CONFIG[PMDK_DIR]=""
-			;;
-		--with-pmdk=*)
-			CONFIG[PMDK]=y
-			check_dir "$i"
-			CONFIG[PMDK_DIR]=$(readlink -f ${i#*=})
-			;;
-		--without-pmdk)
-			CONFIG[PMDK]=n
-			;;
 		--with-vbdev-compress)
 			CONFIG[VBDEV_COMPRESS]=y
 			;;
 		--without-vbdev-compress)
 			CONFIG[VBDEV_COMPRESS]=n
+			;;
+		--with-dpdk-compressdev)
+			CONFIG[DPDK_COMPRESSDEV]=y
+			;;
+		--without-dpdk-compressdev)
+			CONFIG[DPDK_COMPRESSDEV]=n
 			;;
 		--with-xnvme)
 			CONFIG[XNVME]=y
@@ -649,6 +653,15 @@ for i in "$@"; do
 			;;
 		--without-avahi)
 			CONFIG[AVAHI]=n
+			;;
+		--max-lcores='')
+			echo "Must specify max number of lcores for --max-lcores"
+			usage
+			exit 1
+			;;
+		--max-lcores=*)
+			CONFIG[MAX_LCORES]="${i#*=}"
+			CONFIG["MAX_LCORES"]=${CONFIG["MAX_LCORES"],,}
 			;;
 		--)
 			break
@@ -866,12 +879,16 @@ than or equal to 4.14 will see significantly reduced performance.
 	fi
 
 	if [ "${CONFIG[RDMA_PROV]}" == "mlx5_dv" ]; then
-		if ! echo -e '#include <spdk/stdinc.h>\n' \
-			'#include <infiniband/mlx5dv.h>\n' \
-			'#include <rdma/rdma_cma.h>\n' \
-			'int main(void) { return rdma_establish(NULL) || ' \
-			'!!IBV_QP_INIT_ATTR_SEND_OPS_FLAGS || !!MLX5_OPCODE_RDMA_WRITE; }\n' \
-			| "${BUILD_CMD[@]}" -lmlx5 -I${rootdir}/include -c - 2> /dev/null; then
+		MLX5_DV_BUILD_BUILD_CMD="
+		#include <infiniband/mlx5dv.h>\n
+		#include <rdma/rdma_cma.h>\n
+		int main(void) { return rdma_establish(NULL) ||\n
+		!!IBV_QP_INIT_ATTR_SEND_OPS_FLAGS || !!MLX5_OPCODE_RDMA_WRITE"
+		if [ "${CONFIG[CRYPTO]}" = "y" ]; then
+			MLX5_DV_BUILD_BUILD_CMD+="|| !!MLX5DV_CRYPTO_ENGINES_CAP_AES_XTS_SINGLE_BLOCK"
+		fi
+		MLX5_DV_BUILD_BUILD_CMD+=";}"
+		if ! echo -e $MLX5_DV_BUILD_BUILD_CMD | "${BUILD_CMD[@]}" -lmlx5 -I${rootdir}/include -c -; then
 			echo "mlx5_dv provider is not supported"
 			exit 1
 		fi
@@ -883,15 +900,6 @@ fi
 if [[ "${CONFIG[FC]}" = "y" ]]; then
 	if [[ -n "${CONFIG[FC_PATH]}" ]]; then
 		check_dir "${CONFIG[FC_PATH]}"
-	fi
-fi
-
-if [[ "${CONFIG[PMDK]}" = "y" ]]; then
-	if ! echo -e '#include <libpmemblk.h>\nint main(void) { return 0; }\n' \
-		| "${BUILD_CMD[@]}" -lpmemblk - 2> /dev/null; then
-		echo "--with-pmdk requires libpmemblk."
-		echo "Please install then re-run this script."
-		exit 1
 	fi
 fi
 
@@ -921,6 +929,7 @@ function mlx5_build() {
 }
 
 if [[ "${CONFIG[VBDEV_COMPRESS]}" = "y" ]]; then
+	echo "WARNING: PMDK - Persistent device support with bdev_compress is deprecated."
 	if ! echo -e '#include <libpmem.h>\nint main(void) { return 0; }\n' \
 		| "${BUILD_CMD[@]}" -lpmem - 2> /dev/null; then
 		echo "--with-vbdev-compress requires libpmem."
@@ -1013,6 +1022,16 @@ if [[ "${CONFIG[RBD]}" = "y" ]]; then
 	fi
 fi
 
+if [[ "${CONFIG[UBLK]}" = "y" ]]; then
+	if ! echo -e '#include <linux/ublk_cmd.h>\n#include <liburing.h>\n' \
+		'int main(void) { return 0; }\n' \
+		| "${BUILD_CMD[@]}" -luring - 2> /dev/null; then
+		echo "--with-ublk requires liburing and ublk_drv."
+		echo "Please install then re-run this script."
+		exit 1
+	fi
+fi
+
 if [[ "${CONFIG[ISCSI_INITIATOR]}" = "y" ]]; then
 	# Fedora installs libiscsi to /usr/lib64/iscsi for some reason.
 	if ! echo -e '#include <iscsi/iscsi.h>\n#include <iscsi/scsi-lowlevel.h>\n' \
@@ -1074,6 +1093,11 @@ fi
 if echo -e '#include <stdlib.h>\nint main(void) { arc4random(); return 0; }\n' \
 	| "${BUILD_CMD[@]}" - 2> /dev/null; then
 	CONFIG[HAVE_ARC4RANDOM]="y"
+fi
+
+if echo -e '#include <uuid/uuid.h>\nint main(void) { uuid_generate_sha1(NULL, NULL, NULL, 0); return 0; }\n' \
+	| "${BUILD_CMD[@]}" - -luuid 2> /dev/null; then
+	CONFIG[HAVE_UUID_GENERATE_SHA1]="y"
 fi
 
 if [[ "${CONFIG[OCF]}" = "y" ]]; then
@@ -1192,6 +1216,7 @@ else
 	echo "so these features will be disabled."
 	CONFIG[CRYPTO]=n
 	CONFIG[VBDEV_COMPRESS]=n
+	CONFIG[DPDK_COMPRESSDEV]=n
 fi
 
 # ISA-L-crypto complements ISA-L functionality, it is only enabled together with ISA-L
@@ -1233,6 +1258,13 @@ if [[ "${CONFIG[AVAHI]}" = "y" ]]; then
 		| "${BUILD_CMD[@]}" -lavahi-client -lavahi-common - 2> /dev/null; then
 		echo "--with-avahi requires libavahi-client and libavahi-common."
 		echo "Please install then re-run this script."
+		exit 1
+	fi
+fi
+
+if [[ -n ${CONFIG[MAX_LCORES]} ]]; then
+	if [[ ! ${CONFIG[MAX_LCORES]} =~ ^([1-9][0-9]*|detect)$ ]] || ((CONFIG[MAX_LCORES] > 1024)); then
+		echo "ERROR: Max number of lcores must be a decimal number in range [1..1024] or 'detect' (given: ${CONFIG[MAX_LCORES]})"
 		exit 1
 	fi
 fi

@@ -143,12 +143,36 @@ struct spdk_sock_impl_opts {
 	/**
 	 * Set default PSK key. Used by ssl socket module.
 	 */
-	char *psk_key;
+	uint8_t *psk_key;
+
+	/**
+	 * Size of psk_key.
+	 */
+	uint32_t psk_key_size;
 
 	/**
 	 * Set default PSK identity. Used by ssl socket module.
 	 */
 	char *psk_identity;
+
+	/**
+	 * Optional callback to retrieve PSK based on client's identity.
+	 *
+	 * \param out Buffer for PSK in binary format to be filled with found key.
+	 * \param out_len Length of "out" buffer.
+	 * \param cipher Cipher suite to be set by this callback.
+	 * \param psk_identity PSK identity for which the key needs to be found.
+	 * \param get_key_ctx Context for this callback.
+	 *
+	 * \return key length on success, -1 on failure.
+	 */
+	int (*get_key)(uint8_t *out, int out_len, const char **cipher, const char *psk_identity,
+		       void *get_key_ctx);
+
+	/**
+	 * Context to be passed to get_key() callback.
+	 */
+	void *get_key_ctx;
 };
 
 /**
@@ -319,7 +343,7 @@ int spdk_sock_close(struct spdk_sock **sock);
  *
  * \param sock Socket to flush.
  *
- * \return 0 on success, -1 on failure.
+ * \return number of bytes sent on success, -1 (with errno set) on failure
  */
 int spdk_sock_flush(struct spdk_sock *sock);
 
@@ -364,6 +388,31 @@ void spdk_sock_writev_async(struct spdk_sock *sock, struct spdk_sock_request *re
  * \return the length of the received message on success, -1 on failure.
  */
 ssize_t spdk_sock_readv(struct spdk_sock *sock, struct iovec *iov, int iovcnt);
+
+/**
+ * Receive the next portion of the stream from the socket.
+ *
+ * A buffer provided to this socket's group's pool using
+ * spdk_sock_group_provide_buf() will contain the data and be
+ * returned in *buf.
+ *
+ * Note that the amount of data in buf is determined entirely by
+ * the sock layer. You cannot request to receive only a limited
+ * amount here. You simply get whatever the next portion of the stream
+ * is, as determined by the sock module. You can place an upper limit
+ * on the size of the buffer since these buffers are originally
+ * provided to the group through spdk_sock_group_provide_buf().
+ *
+ * This code path will only work if the recvbuf is disabled. To disable
+ * the recvbuf, call spdk_sock_set_recvbuf with a size of 0.
+ *
+ * \param sock Socket to receive from.
+ * \param buf Populated with the next portion of the stream
+ * \param ctx Returned context pointer from when the buffer was provided.
+ *
+ * \return On success, the length of the buffer placed into buf, On failure, -1 with errno set.
+ */
+int spdk_sock_recv_next(struct spdk_sock *sock, void **buf, void **ctx);
 
 /**
  * Read message from the given socket asynchronously, calling the provided callback when the whole
@@ -480,6 +529,19 @@ int spdk_sock_group_add_sock(struct spdk_sock_group *group, struct spdk_sock *so
  * \return 0 on success, -1 on failure.
  */
 int spdk_sock_group_remove_sock(struct spdk_sock_group *group, struct spdk_sock *sock);
+
+/**
+ * Provides a buffer to the group to be used in its receive pool.
+ * See spdk_sock_recv_next() for more details.
+ *
+ * \param group Socket group.
+ * \param buf Pointer the buffer provided.
+ * \param len Length of the buffer.
+ * \param ctx Pointer that will be returned in spdk_sock_recv_next()
+ *
+ * \return 0 on success, -1 on failure.
+ */
+int spdk_sock_group_provide_buf(struct spdk_sock_group *group, void *buf, size_t len, void *ctx);
 
 /**
  * Poll incoming events for each registered socket.

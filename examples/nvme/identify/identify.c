@@ -25,6 +25,8 @@
 #define MAX_OCSSD_PU			128
 #define MAX_ZONE_DESC_ENTRIES		8
 
+#define FDP_LOG_PAGE_SIZE		4096
+
 static int outstanding_commands;
 
 struct feature {
@@ -45,6 +47,21 @@ static struct spdk_nvme_ana_page *g_ana_log_page;
 static struct spdk_nvme_ana_group_descriptor *g_copied_ana_desc;
 
 static size_t g_ana_log_page_size;
+
+static uint8_t g_fdp_cfg_log_page_buf[FDP_LOG_PAGE_SIZE];
+
+static uint8_t g_fdp_ruhu_log_page_buf[FDP_LOG_PAGE_SIZE];
+
+static uint8_t g_fdp_events_log_page_buf[FDP_LOG_PAGE_SIZE];
+
+static struct spdk_nvme_fdp_stats_log_page g_fdp_stats_log_page;
+
+static struct spdk_nvme_fdp_cfg_log_page *g_fdp_cfg_log_page = (void *)g_fdp_cfg_log_page_buf;
+
+static struct spdk_nvme_fdp_ruhu_log_page *g_fdp_ruhu_log_page = (void *)g_fdp_ruhu_log_page_buf;
+
+static struct spdk_nvme_fdp_events_log_page *g_fdp_events_log_page = (void *)
+		g_fdp_events_log_page_buf;
 
 static struct spdk_nvme_cmds_and_effect_log_page cmd_effects_log_page;
 
@@ -177,7 +194,7 @@ get_zns_zone_report_completion(void *cb_arg, const struct spdk_nvme_cpl *cpl)
 }
 
 static int
-get_feature(struct spdk_nvme_ctrlr *ctrlr, uint8_t fid, uint32_t nsid)
+get_feature(struct spdk_nvme_ctrlr *ctrlr, uint8_t fid, uint32_t cdw11, uint32_t nsid)
 {
 	struct spdk_nvme_cmd cmd = {};
 	struct feature *feature = &features[fid];
@@ -186,6 +203,7 @@ get_feature(struct spdk_nvme_ctrlr *ctrlr, uint8_t fid, uint32_t nsid)
 
 	cmd.opc = SPDK_NVME_OPC_GET_FEATURES;
 	cmd.cdw10_bits.get_features.fid = fid;
+	cmd.cdw11 = cdw11;
 	cmd.nsid = nsid;
 
 	return spdk_nvme_ctrlr_cmd_admin_raw(ctrlr, &cmd, NULL, 0, get_feature_completion, feature);
@@ -196,6 +214,7 @@ get_features(struct spdk_nvme_ctrlr *ctrlr, uint8_t *features_to_get, size_t num
 	     uint32_t nsid)
 {
 	size_t i;
+	uint32_t cdw11;
 
 	/* Submit only one GET FEATURES at a time. There is a known issue #1799
 	 * with Google Cloud Platform NVMe SSDs that do not handle overlapped
@@ -203,11 +222,25 @@ get_features(struct spdk_nvme_ctrlr *ctrlr, uint8_t *features_to_get, size_t num
 	 */
 	outstanding_commands = 0;
 	for (i = 0; i < num_features; i++) {
+		cdw11 = 0;
 		if (!spdk_nvme_ctrlr_is_ocssd_supported(ctrlr) &&
 		    features_to_get[i] == SPDK_OCSSD_FEAT_MEDIA_FEEDBACK) {
 			continue;
 		}
-		if (get_feature(ctrlr, features_to_get[i], nsid) == 0) {
+		if (features_to_get[i] == SPDK_NVME_FEAT_FDP) {
+			const struct spdk_nvme_ctrlr_data *cdata = spdk_nvme_ctrlr_get_data(ctrlr);
+			struct spdk_nvme_ns *ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
+			const struct spdk_nvme_ns_data *nsdata = spdk_nvme_ns_get_data(ns);
+
+			if (!cdata->ctratt.fdps) {
+				continue;
+			} else {
+				cdw11 = nsdata->endgid;
+				/* Endurance group scope */
+				nsid = 0;
+			}
+		}
+		if (get_feature(ctrlr, features_to_get[i], cdw11, nsid) == 0) {
 			outstanding_commands++;
 		} else {
 			printf("get_feature(0x%02X) failed to submit command\n", features_to_get[i]);
@@ -239,6 +272,7 @@ get_ns_features(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
 {
 	uint8_t features_to_get[] = {
 		SPDK_NVME_FEAT_ERROR_RECOVERY,
+		SPDK_NVME_FEAT_FDP,
 	};
 
 	get_features(ctrlr, features_to_get, SPDK_COUNTOF(features_to_get), nsid);
@@ -480,6 +514,114 @@ get_log_pages(struct spdk_nvme_ctrlr *ctrlr)
 }
 
 static int
+get_fdp_cfg_log_page(struct spdk_nvme_ns *ns)
+{
+	struct spdk_nvme_ctrlr *ctrlr = spdk_nvme_ns_get_ctrlr(ns);
+	const struct spdk_nvme_ns_data *nsdata = spdk_nvme_ns_get_data(ns);
+
+	outstanding_commands = 0;
+
+	if (spdk_nvme_ctrlr_is_log_page_supported(ctrlr, SPDK_NVME_LOG_FDP_CONFIGURATIONS)) {
+		/* Fetch the FDP configurations log page for only 4096 bytes */
+		if (spdk_nvme_ctrlr_cmd_get_log_page_ext(ctrlr, SPDK_NVME_LOG_FDP_CONFIGURATIONS, 0,
+				g_fdp_cfg_log_page, FDP_LOG_PAGE_SIZE, 0, 0, (nsdata->endgid << 16),
+				0, get_log_page_completion, NULL) == 0) {
+			outstanding_commands++;
+		} else {
+			printf("spdk_nvme_ctrlr_cmd_get_log_page_ext(FDP config) failed\n");
+			return -1;
+		}
+	}
+
+	while (outstanding_commands) {
+		spdk_nvme_ctrlr_process_admin_completions(ctrlr);
+	}
+
+	return 0;
+}
+
+static int
+get_fdp_ruhu_log_page(struct spdk_nvme_ns *ns)
+{
+	struct spdk_nvme_ctrlr *ctrlr = spdk_nvme_ns_get_ctrlr(ns);
+	const struct spdk_nvme_ns_data *nsdata = spdk_nvme_ns_get_data(ns);
+
+	outstanding_commands = 0;
+
+	if (spdk_nvme_ctrlr_is_log_page_supported(ctrlr, SPDK_NVME_LOG_RECLAIM_UNIT_HANDLE_USAGE)) {
+		/* Fetch the reclaim unit handle usage log page for only 4096 bytes */
+		if (spdk_nvme_ctrlr_cmd_get_log_page_ext(ctrlr, SPDK_NVME_LOG_RECLAIM_UNIT_HANDLE_USAGE, 0,
+				g_fdp_ruhu_log_page, FDP_LOG_PAGE_SIZE, 0, 0, (nsdata->endgid << 16),
+				0, get_log_page_completion, NULL) == 0) {
+			outstanding_commands++;
+		} else {
+			printf("spdk_nvme_ctrlr_cmd_get_log_page_ext(RUH usage) failed\n");
+			return -1;
+		}
+	}
+
+	while (outstanding_commands) {
+		spdk_nvme_ctrlr_process_admin_completions(ctrlr);
+	}
+
+	return 0;
+}
+
+static int
+get_fdp_stats_log_page(struct spdk_nvme_ns *ns)
+{
+	struct spdk_nvme_ctrlr *ctrlr = spdk_nvme_ns_get_ctrlr(ns);
+	const struct spdk_nvme_ns_data *nsdata = spdk_nvme_ns_get_data(ns);
+
+	outstanding_commands = 0;
+
+	if (spdk_nvme_ctrlr_is_log_page_supported(ctrlr, SPDK_NVME_LOG_FDP_STATISTICS)) {
+		if (spdk_nvme_ctrlr_cmd_get_log_page_ext(ctrlr, SPDK_NVME_LOG_FDP_STATISTICS, 0,
+				&g_fdp_stats_log_page, 64, 0, 0, (nsdata->endgid << 16), 0,
+				get_log_page_completion, NULL) == 0) {
+			outstanding_commands++;
+		} else {
+			printf("spdk_nvme_ctrlr_cmd_get_log_page_ext(FDP stats) failed\n");
+			return -1;
+		}
+	}
+
+	while (outstanding_commands) {
+		spdk_nvme_ctrlr_process_admin_completions(ctrlr);
+	}
+
+	return 0;
+}
+
+static int
+get_fdp_events_log_page(struct spdk_nvme_ns *ns)
+{
+	struct spdk_nvme_ctrlr *ctrlr = spdk_nvme_ns_get_ctrlr(ns);
+	const struct spdk_nvme_ns_data *nsdata = spdk_nvme_ns_get_data(ns);
+
+	outstanding_commands = 0;
+
+	if (spdk_nvme_ctrlr_is_log_page_supported(ctrlr, SPDK_NVME_LOG_FDP_EVENTS)) {
+		/* Only fetch FDP host events here */
+		if (spdk_nvme_ctrlr_cmd_get_log_page_ext(ctrlr, SPDK_NVME_LOG_FDP_EVENTS, 0,
+				g_fdp_events_log_page, FDP_LOG_PAGE_SIZE, 0,
+				(SPDK_NVME_FDP_REPORT_HOST_EVENTS << 8), (nsdata->endgid << 16),
+				0, get_log_page_completion, NULL) == 0) {
+			outstanding_commands++;
+		} else {
+			printf("spdk_nvme_ctrlr_cmd_get_log_page_ext(FDP events) failed\n");
+			return -1;
+		}
+	}
+
+	while (outstanding_commands) {
+		spdk_nvme_ctrlr_process_admin_completions(ctrlr);
+	}
+
+	return 0;
+}
+
+static int
 get_ocssd_chunk_info_log_page(struct spdk_nvme_ns *ns)
 {
 	struct spdk_nvme_ctrlr *ctrlr = spdk_nvme_ns_get_ctrlr(ns);
@@ -617,6 +759,182 @@ print_uline(char marker, int line_len)
 		putchar(marker);
 	}
 	putchar('\n');
+}
+
+static void
+print_fdp_cfg_log_page(void)
+{
+	uint32_t i, j;
+	struct spdk_nvme_fdp_cfg_descriptor *cfg_desc;
+	void *log = g_fdp_cfg_log_page->cfg_desc;
+
+	printf("FDP configurations log page\n");
+	printf("===========================\n");
+	if (g_hex_dump) {
+		hex_dump(g_fdp_cfg_log_page, FDP_LOG_PAGE_SIZE);
+		printf("\n");
+	}
+
+	printf("Number of FDP configurations:         %u\n", g_fdp_cfg_log_page->ncfg + 1);
+	printf("Version:                              %u\n", g_fdp_cfg_log_page->version);
+	printf("Size:                                 %u\n", g_fdp_cfg_log_page->size);
+
+	for (i = 0; i <= g_fdp_cfg_log_page->ncfg; i++) {
+		cfg_desc = log;
+		printf("FDP Configuration Descriptor:         %u\n", i);
+		printf("  Descriptor Size:                    %u\n", cfg_desc->ds);
+		printf("  Reclaim Group Identifier format:    %u\n", cfg_desc->fdpa.bits.rgif);
+		printf("  FDP Volatile Write Cache:           %s\n",
+		       cfg_desc->fdpa.bits.fdpvwc ? "Present" : "Not Present");
+		printf("  FDP Configuration:                  %s\n",
+		       cfg_desc->fdpa.bits.fdpcv ? "Valid" : "Invalid");
+		printf("  Vendor Specific Size:               %u\n", cfg_desc->vss);
+		printf("  Number of Reclaim Groups:           %u\n", cfg_desc->nrg);
+		printf("  Number of Recalim Unit Handles:     %u\n", cfg_desc->nruh);
+		printf("  Max Placement Identifiers:          %u\n", cfg_desc->maxpids + 1);
+		printf("  Number of Namespaces Suppprted:     %u\n", cfg_desc->nns);
+		printf("  Reclaim unit Nominal Size:          %" PRIx64 " bytes\n", cfg_desc->runs);
+		printf("  Estimated Reclaim Unit Time Limit:  ");
+		if (cfg_desc->erutl) {
+			printf("%u seconds\n", cfg_desc->erutl);
+		} else {
+			printf("Not Reported\n");
+		}
+		for (j = 0; j < cfg_desc->nruh; j++) {
+			printf("    RUH Desc #%03d:          RUH Type: %s\n", j,
+			       cfg_desc->ruh_desc[j].ruht == SPDK_NVME_FDP_RUHT_INITIALLY_ISOLATED ? "Initially Isolated" :
+			       cfg_desc->ruh_desc[j].ruht == SPDK_NVME_FDP_RUHT_PERSISTENTLY_ISOLATED ? "Persistently Isolated" :
+			       "Reserved");
+		}
+		log += cfg_desc->ds;
+	}
+
+	printf("\n");
+
+}
+
+static void
+print_fdp_ruhu_log_page(void)
+{
+	uint32_t i;
+	struct spdk_nvme_fdp_ruhu_descriptor *ruhu_desc;
+
+	printf("FDP reclaim unit handle usage log page\n");
+	printf("======================================\n");
+	if (g_hex_dump) {
+		hex_dump(g_fdp_ruhu_log_page, FDP_LOG_PAGE_SIZE);
+		printf("\n");
+	}
+
+	printf("Number of Reclaim Unit Handles:       %u\n", g_fdp_ruhu_log_page->nruh);
+
+	for (i = 0; i < g_fdp_ruhu_log_page->nruh; i++) {
+		ruhu_desc = &g_fdp_ruhu_log_page->ruhu_desc[i];
+
+		printf("  RUH Usage Desc #%03d:   RUH Attributes: %s\n", i,
+		       ruhu_desc->ruha == SPDK_NVME_FDP_RUHA_UNUSED ? "Unused" :
+		       ruhu_desc->ruha == SPDK_NVME_FDP_RUHA_HOST_SPECIFIED ? "Host Specified" :
+		       ruhu_desc->ruha == SPDK_NVME_FDP_RUHA_CTRLR_SPECIFIED ? "Controller Specified" :
+		       "Reserved");
+	}
+
+	printf("\n");
+}
+
+static void
+print_fdp_stats_log_page(void)
+{
+	printf("FDP statistics log page\n");
+	printf("=======================\n");
+	if (g_hex_dump) {
+		hex_dump(&g_fdp_stats_log_page, 64);
+		printf("\n");
+	}
+
+	printf("Host bytes with metadata written:  ");
+	print_uint128_dec(g_fdp_stats_log_page.hbmw);
+	printf("\n");
+	printf("Media bytes with metadata written: ");
+	print_uint128_dec(g_fdp_stats_log_page.mbmw);
+	printf("\n");
+	printf("Media bytes erased:                ");
+	print_uint128_dec(g_fdp_stats_log_page.mbe);
+	printf("\n\n");
+}
+
+static void
+print_fdp_events_log_page(void)
+{
+	uint32_t i;
+	struct spdk_nvme_fdp_event *event;
+	struct spdk_nvme_fdp_event_media_reallocated *media_reallocated;
+
+	printf("FDP events log page\n");
+	printf("===================\n");
+	if (g_hex_dump) {
+		hex_dump(g_fdp_events_log_page, FDP_LOG_PAGE_SIZE);
+		printf("\n");
+	}
+
+	printf("Number of FDP events:              %u\n", g_fdp_events_log_page->nevents);
+
+	for (i = 0; i < g_fdp_events_log_page->nevents; i++) {
+		event = &g_fdp_events_log_page->event[i];
+
+		printf("FDP Event #%u:\n", i);
+		printf("  Event Type:                      %s\n",
+		       event->etype == SPDK_NVME_FDP_EVENT_RU_NOT_WRITTEN_CAPACITY ? "RU Not Written to Capacity" :
+		       event->etype == SPDK_NVME_FDP_EVENT_RU_TIME_LIMIT_EXCEEDED ? "RU Time Limit Exceeded" :
+		       event->etype == SPDK_NVME_FDP_EVENT_CTRLR_RESET_MODIFY_RUH ? "Ctrlr Reset Modified RUH's" :
+		       event->etype == SPDK_NVME_FDP_EVENT_INVALID_PLACEMENT_ID ? "Invalid Placement Identifier" :
+		       event->etype == SPDK_NVME_FDP_EVENT_MEDIA_REALLOCATED ? "Media Reallocated" :
+		       event->etype == SPDK_NVME_FDP_EVENT_IMPLICIT_MODIFIED_RUH ? "Implicitly modified RUH" :
+		       "Reserved");
+		printf("  Placement Identifier:            %s\n",
+		       event->fdpef.bits.piv ? "Valid" : "Invalid");
+		printf("  NSID:                            %s\n",
+		       event->fdpef.bits.nsidv ? "Valid" : "Invalid");
+		printf("  Location:                        %s\n",
+		       event->fdpef.bits.lv ? "Valid" : "Invalid");
+		if (event->fdpef.bits.piv) {
+			printf("  Placement Identifier:            %u\n", event->pid);
+		} else {
+			printf("  Placement Identifier:            Reserved\n");
+		}
+		printf("  Event Timestamp:                 %" PRIx64 "\n", event->timestamp);
+		if (event->fdpef.bits.nsidv) {
+			printf("  Namespace Identifier:            %u\n", event->nsid);
+		} else {
+			printf("  Namespace Identifier:            Ignore\n");
+		}
+
+		if (event->etype == SPDK_NVME_FDP_EVENT_MEDIA_REALLOCATED) {
+			media_reallocated = (struct spdk_nvme_fdp_event_media_reallocated *)&event->event_type_specific;
+
+			printf("  LBA:                             %s\n",
+			       media_reallocated->sef.bits.lbav ? "Valid" : "Invalid");
+			printf("  Number of LBA's Moved:           %u\n", media_reallocated->nlbam);
+			if (media_reallocated->sef.bits.lbav) {
+				printf("  Logical Block Address:           %u\n", event->nsid);
+			} else {
+				printf("  Logical Block Address:           Ignore\n");
+			}
+		}
+
+		if (event->fdpef.bits.lv) {
+			printf("  Reclaim Group Identifier:        %u\n", event->rgid);
+		} else {
+			printf("  Reclaim Group Identifier:        Ignore\n");
+		}
+		if (event->fdpef.bits.lv) {
+			printf("  Reclaim Unit Handle Identifier:  %u\n", event->ruhid);
+		} else {
+			printf("  Reclaim Unit Handle Identifier:  Ignore\n");
+		}
+	}
+
+	printf("\n");
+
 }
 
 static void
@@ -791,7 +1109,7 @@ get_and_print_zns_zone_report(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *q
 	uint64_t handled_zones = 0;
 	uint64_t slba = 0;
 	size_t zdes = 0;
-	uint32_t zds, zrs;
+	uint32_t zds, zrs, format_index;
 	int rc = 0;
 
 	outstanding_commands = 0;
@@ -801,7 +1119,9 @@ get_and_print_zns_zone_report(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *q
 
 	zrs = sizeof(struct spdk_nvme_zns_zone_report);
 	zds = sizeof(struct spdk_nvme_zns_zone_desc);
-	zdes = nsdata_zns->lbafe[nsdata->flbas.format].zdes * 64;
+
+	format_index = spdk_nvme_ns_get_format_index(nsdata);
+	zdes = nsdata_zns->lbafe[format_index].zdes * 64;
 
 	report_bufsize = spdk_nvme_ns_get_max_io_xfer_size(ns);
 	report_buf = calloc(1, report_bufsize);
@@ -888,14 +1208,50 @@ print_zns_ns_data(const struct spdk_nvme_zns_ns_data *nsdata_zns)
 	if (nsdata_zns->rrl == 0) {
 		printf("Reset Recommended Limit:               Not Reported\n");
 	} else {
-		printf("Reset Recommended Limit:               %"PRIu32"\n",
+		printf("Reset Recommended Limit:               %"PRIu32" seconds\n",
 		       nsdata_zns->rrl);
+	}
+	if (nsdata_zns->rrl1 == 0) {
+		printf("Reset Recommended Limit 1:             Not Reported\n");
+	} else {
+		printf("Reset Recommended Limit 1:             %"PRIu32" seconds\n",
+		       nsdata_zns->rrl1);
+	}
+	if (nsdata_zns->rrl2 == 0) {
+		printf("Reset Recommended Limit 2:             Not Reported\n");
+	} else {
+		printf("Reset Recommended Limit 2:             %"PRIu32" seconds\n",
+		       nsdata_zns->rrl2);
+	}
+	if (nsdata_zns->rrl3 == 0) {
+		printf("Reset Recommended Limit 3:             Not Reported\n");
+	} else {
+		printf("Reset Recommended Limit 3:             %"PRIu32" seconds\n",
+		       nsdata_zns->rrl3);
 	}
 	if (nsdata_zns->frl == 0) {
 		printf("Finish Recommended Limit:              Not Reported\n");
 	} else {
-		printf("Finish Recommended Limit:              %"PRIu32"\n",
+		printf("Finish Recommended Limit:              %"PRIu32" seconds\n",
 		       nsdata_zns->frl);
+	}
+	if (nsdata_zns->frl1 == 0) {
+		printf("Finish Recommended Limit 1:            Not Reported\n");
+	} else {
+		printf("Finish Recommended Limit 1:            %"PRIu32" seconds\n",
+		       nsdata_zns->frl1);
+	}
+	if (nsdata_zns->frl2 == 0) {
+		printf("Finish Recommended Limit 2:            Not Reported\n");
+	} else {
+		printf("Finish Recommended Limit 2:            %"PRIu32" seconds\n",
+		       nsdata_zns->frl2);
+	}
+	if (nsdata_zns->frl3 == 0) {
+		printf("Finish Recommended Limit 3:            Not Reported\n");
+	} else {
+		printf("Finish Recommended Limit 3:            %"PRIu32" seconds\n",
+		       nsdata_zns->frl3);
 	}
 	printf("\n");
 }
@@ -928,7 +1284,7 @@ print_namespace(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 	uint32_t				i;
 	uint32_t				flags;
 	char					uuid_str[SPDK_UUID_STRING_LEN];
-	uint32_t				blocksize;
+	uint32_t				blocksize, format_index;
 	enum spdk_nvme_dealloc_logical_block_read_value	dlfeat_read_value;
 
 	cdata = spdk_nvme_ctrlr_get_data(ctrlr);
@@ -981,13 +1337,14 @@ print_namespace(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 		printf("Protection Information Transferred as: %s\n",
 		       nsdata->dps.md_start ? "First 8 Bytes" : "Last 8 Bytes");
 	}
-	if (nsdata->lbaf[nsdata->flbas.format].ms > 0) {
+	format_index = spdk_nvme_ns_get_format_index(nsdata);
+	if (nsdata->lbaf[format_index].ms > 0) {
 		printf("Metadata Transferred as:               %s\n",
 		       nsdata->flbas.extended ? "Extended Data LBA" : "Separate Metadata Buffer");
 	}
 	printf("Namespace Sharing Capabilities:        %s\n",
 	       nsdata->nmic.can_share ? "Multiple Controllers" : "Private");
-	blocksize = 1 << nsdata->lbaf[nsdata->flbas.format].lbads;
+	blocksize = 1 << nsdata->lbaf[format_index].lbads;
 	printf("Size (in LBAs):                        %lld (%lldGiB)\n",
 	       (long long)nsdata->nsze,
 	       (long long)nsdata->nsze * blocksize / 1024 / 1024 / 1024);
@@ -1054,9 +1411,20 @@ print_namespace(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 		printf("ANA group ID:                          %u\n", nsdata->anagrpid);
 	}
 
+	printf("Namespace Write Protected:             %s\n",
+	       nsdata->nsattr.write_protected ? "Yes" : "No");
+
+	if (cdata->ctratt.nvm_sets) {
+		printf("NVM set ID:                            %u\n", nsdata->nvmsetid);
+	}
+
+	if (cdata->ctratt.endurance_groups) {
+		printf("Endurance group ID:                    %u\n", nsdata->endgid);
+	}
+
 	printf("Number of LBA Formats:                 %d\n", nsdata->nlbaf + 1);
 	printf("Current LBA Format:                    LBA Format #%02d\n",
-	       nsdata->flbas.format);
+	       format_index);
 	for (i = 0; i <= nsdata->nlbaf; i++) {
 		printf("LBA Format #%02d: Data Size: %5d  Metadata Size: %5d\n",
 		       i, 1 << nsdata->lbaf[i].lbads, nsdata->lbaf[i].ms);
@@ -1067,6 +1435,33 @@ print_namespace(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 
 	}
 	printf("\n");
+
+	if (cdata->ctratt.fdps) {
+		union spdk_nvme_feat_fdp_cdw12 fdp_res;
+
+		if (features[SPDK_NVME_FEAT_FDP].valid) {
+			fdp_res.raw = features[SPDK_NVME_FEAT_FDP].result;
+
+			printf("Get Feature FDP:\n");
+			printf("================\n");
+			printf("  Enabled:                 %s\n",
+			       fdp_res.bits.fdpe ? "Yes" : "No");
+			printf("  FDP configuration index: %u\n\n", fdp_res.bits.fdpci);
+
+			if (fdp_res.bits.fdpe && !get_fdp_cfg_log_page(ns)) {
+				print_fdp_cfg_log_page();
+			}
+			if (fdp_res.bits.fdpe && !get_fdp_ruhu_log_page(ns)) {
+				print_fdp_ruhu_log_page();
+			}
+			if (fdp_res.bits.fdpe && !get_fdp_stats_log_page(ns)) {
+				print_fdp_stats_log_page();
+			}
+			if (fdp_res.bits.fdpe && !get_fdp_events_log_page(ns)) {
+				print_fdp_events_log_page();
+			}
+		}
+	}
 
 	if (spdk_nvme_ctrlr_is_ocssd_supported(ctrlr)) {
 		get_ocssd_geometry(ns, &geometry_data);
@@ -1179,6 +1574,8 @@ io_opc_name(uint8_t opc)
 		return "Reservation Acquire";
 	case SPDK_NVME_OPC_RESERVATION_RELEASE:
 		return "Reservation Release";
+	case SPDK_NVME_OPC_COPY:
+		return "Copy";
 	default:
 		if (opc >= 0x80) {
 			return "Vendor specific";
@@ -1374,6 +1771,8 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 	       cdata->ctratt.delete_nvm_set ? "Supported" : "Not Supported");
 	printf("  Extended LBA Formats Supported:      %s\n",
 	       cdata->ctratt.elbas ? "Supported" : "Not Supported");
+	printf("  Flexible Data Placement Supported:   %s\n",
+	       cdata->ctratt.fdps ? "Supported" : "Not Supported");
 	printf("\n");
 
 	printf("Controller Memory Buffer Support\n");

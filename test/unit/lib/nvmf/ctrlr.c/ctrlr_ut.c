@@ -27,9 +27,9 @@ struct spdk_bdev {
 	uint32_t max_active_zones;
 };
 
-const uint32_t MAX_OPEN_ZONES = 12;
-const uint32_t MAX_ACTIVE_ZONES = 34;
-const uint32_t ZONE_SIZE = 56;
+#define MAX_OPEN_ZONES 12
+#define MAX_ACTIVE_ZONES 34
+#define ZONE_SIZE 56
 
 const char subsystem_default_sn[SPDK_NVME_CTRLR_SN_LEN + 1] = "subsys_default_sn";
 const char subsystem_default_mn[SPDK_NVME_CTRLR_MN_LEN + 1] = "subsys_default_mn";
@@ -210,6 +210,9 @@ DEFINE_STUB(spdk_bdev_get_max_open_zones, uint32_t, (const struct spdk_bdev *bde
 DEFINE_STUB(spdk_bdev_get_zone_size, uint64_t, (const struct spdk_bdev *bdev), ZONE_SIZE);
 DEFINE_STUB(spdk_bdev_is_zoned, bool, (const struct spdk_bdev *bdev), false);
 
+DEFINE_STUB(spdk_nvme_ns_get_format_index, uint32_t,
+	    (const struct spdk_nvme_ns_data *nsdata), 0);
+
 int
 spdk_nvmf_qpair_disconnect(struct spdk_nvmf_qpair *qpair, nvmf_qpair_disconnect_cb cb_fn, void *ctx)
 {
@@ -229,6 +232,7 @@ nvmf_bdev_ctrlr_identify_ns(struct spdk_nvmf_ns *ns, struct spdk_nvme_ns_data *n
 	nsdata->nuse = num_blocks;
 	nsdata->nlbaf = 0;
 	nsdata->flbas.format = 0;
+	nsdata->flbas.msb_format = 0;
 	nsdata->lbaf[0].lbads = spdk_u32log2(512);
 }
 
@@ -410,7 +414,6 @@ test_connect(void)
 	struct spdk_nvmf_request req;
 	struct spdk_nvmf_qpair admin_qpair;
 	struct spdk_nvmf_qpair qpair;
-	struct spdk_nvmf_qpair qpair2;
 	struct spdk_nvmf_ctrlr ctrlr;
 	struct spdk_nvmf_tgt tgt;
 	union nvmf_h2c_msg cmd;
@@ -788,11 +791,9 @@ test_connect(void)
 	CU_ASSERT(sgroups[subsystem.id].mgmt_io_outstanding == 0);
 	ctrlr.vcprop.cc.bits.iocqes = 4;
 
-	/* I/O connect with too many existing qpairs */
+	/* I/O connect with qid that is too large */
 	memset(&rsp, 0, sizeof(rsp));
-	spdk_bit_array_set(ctrlr.qpair_mask, 0);
-	spdk_bit_array_set(ctrlr.qpair_mask, 1);
-	spdk_bit_array_set(ctrlr.qpair_mask, 2);
+	cmd.connect_cmd.qid = 3;
 	sgroups[subsystem.id].mgmt_io_outstanding++;
 	TAILQ_INSERT_TAIL(&qpair.outstanding, &req, link);
 	rc = nvmf_ctrlr_cmd_connect(&req);
@@ -802,26 +803,53 @@ test_connect(void)
 	CU_ASSERT(rsp.nvme_cpl.status.sc == SPDK_NVME_SC_INVALID_QUEUE_IDENTIFIER);
 	CU_ASSERT(qpair.ctrlr == NULL);
 	CU_ASSERT(sgroups[subsystem.id].mgmt_io_outstanding == 0);
-	spdk_bit_array_clear(ctrlr.qpair_mask, 0);
-	spdk_bit_array_clear(ctrlr.qpair_mask, 1);
-	spdk_bit_array_clear(ctrlr.qpair_mask, 2);
 
 	/* I/O connect with duplicate queue ID */
 	memset(&rsp, 0, sizeof(rsp));
-	memset(&qpair2, 0, sizeof(qpair2));
-	qpair2.group = &group;
-	qpair2.qid = 1;
 	spdk_bit_array_set(ctrlr.qpair_mask, 1);
 	cmd.connect_cmd.qid = 1;
 	sgroups[subsystem.id].mgmt_io_outstanding++;
 	TAILQ_INSERT_TAIL(&qpair.outstanding, &req, link);
 	rc = nvmf_ctrlr_cmd_connect(&req);
-	poll_threads();
 	CU_ASSERT(rc == SPDK_NVMF_REQUEST_EXEC_STATUS_ASYNCHRONOUS);
+	poll_threads();
+	/* First time, it will detect duplicate QID and schedule a retry.  So for
+	 * now we should expect the response to still be all zeroes.
+	 */
+	CU_ASSERT(spdk_mem_all_zero(&rsp, sizeof(rsp)));
+	CU_ASSERT(sgroups[subsystem.id].mgmt_io_outstanding == 1);
+
+	/* Now advance the clock, so that the retry poller executes. */
+	spdk_delay_us(DUPLICATE_QID_RETRY_US * 2);
+	poll_threads();
 	CU_ASSERT(rsp.nvme_cpl.status.sct == SPDK_NVME_SCT_COMMAND_SPECIFIC);
 	CU_ASSERT(rsp.nvme_cpl.status.sc == SPDK_NVME_SC_INVALID_QUEUE_IDENTIFIER);
 	CU_ASSERT(qpair.ctrlr == NULL);
 	CU_ASSERT(sgroups[subsystem.id].mgmt_io_outstanding == 0);
+
+	/* I/O connect with temporarily duplicate queue ID. This covers race
+	 * where qpair_mask bit may not yet be cleared, even though initiator
+	 * has closed the connection.  See issue #2955. */
+	memset(&rsp, 0, sizeof(rsp));
+	sgroups[subsystem.id].mgmt_io_outstanding++;
+	TAILQ_INSERT_TAIL(&qpair.outstanding, &req, link);
+	rc = nvmf_ctrlr_cmd_connect(&req);
+	CU_ASSERT(rc == SPDK_NVMF_REQUEST_EXEC_STATUS_ASYNCHRONOUS);
+	poll_threads();
+	/* First time, it will detect duplicate QID and schedule a retry.  So for
+	 * now we should expect the response to still be all zeroes.
+	 */
+	CU_ASSERT(spdk_mem_all_zero(&rsp, sizeof(rsp)));
+	CU_ASSERT(sgroups[subsystem.id].mgmt_io_outstanding == 1);
+
+	/* Now advance the clock, so that the retry poller executes. */
+	spdk_bit_array_clear(ctrlr.qpair_mask, 1);
+	spdk_delay_us(DUPLICATE_QID_RETRY_US * 2);
+	poll_threads();
+	CU_ASSERT(nvme_status_success(&rsp.nvme_cpl.status));
+	CU_ASSERT(qpair.ctrlr == &ctrlr);
+	CU_ASSERT(sgroups[subsystem.id].mgmt_io_outstanding == 0);
+	qpair.ctrlr = NULL;
 
 	/* I/O connect when admin qpair is being destroyed */
 	admin_qpair.group = NULL;
@@ -1333,7 +1361,7 @@ test_reservation_write_exclusive(void)
 	SPDK_CU_ASSERT_FATAL(rc == 0);
 
 	/* Unregister Host C */
-	memset(&g_ns_info.reg_hostid[2], 0, sizeof(struct spdk_uuid));
+	spdk_uuid_set_null(&g_ns_info.reg_hostid[2]);
 
 	/* Test Case: Read and Write commands from non-registrant Host C */
 	cmd.nvme_cmd.opc = SPDK_NVME_OPC_WRITE;
@@ -1402,7 +1430,7 @@ _test_reservation_write_exclusive_regs_only_and_all_regs(enum spdk_nvme_reservat
 	SPDK_CU_ASSERT_FATAL(rc == 0);
 
 	/* Unregister Host C */
-	memset(&g_ns_info.reg_hostid[2], 0, sizeof(struct spdk_uuid));
+	spdk_uuid_set_null(&g_ns_info.reg_hostid[2]);
 
 	/* Test Case: Read and Write commands from non-registrant Host C */
 	cmd.nvme_cmd.opc = SPDK_NVME_OPC_READ;
@@ -1444,7 +1472,7 @@ _test_reservation_exclusive_access_regs_only_and_all_regs(enum spdk_nvme_reserva
 	SPDK_CU_ASSERT_FATAL(rc == 0);
 
 	/* Unregister Host B */
-	memset(&g_ns_info.reg_hostid[1], 0, sizeof(struct spdk_uuid));
+	spdk_uuid_set_null(&g_ns_info.reg_hostid[1]);
 
 	/* Test Case: Issue a Read command from Host B */
 	cmd.nvme_cmd.opc = SPDK_NVME_OPC_READ;

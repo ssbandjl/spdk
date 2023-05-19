@@ -1,5 +1,6 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2016 Intel Corporation.
+ *   Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES.
  *   All rights reserved.
  */
 
@@ -16,6 +17,8 @@
 #include <rte_mempool.h>
 #include <rte_memzone.h>
 #include <rte_version.h>
+
+static __thread bool g_is_thread_unaffinitized;
 
 static uint64_t
 virt_to_phys(void *vaddr)
@@ -283,6 +286,33 @@ spdk_mempool_obj_iter(struct spdk_mempool *mp, spdk_mempool_obj_cb_t obj_cb,
 				    obj_cb_arg);
 }
 
+struct env_mempool_mem_iter_ctx {
+	spdk_mempool_mem_cb_t *user_cb;
+	void *user_arg;
+};
+
+static void
+mempool_mem_iter_remap(struct rte_mempool *mp, void *opaque, struct rte_mempool_memhdr *memhdr,
+		       unsigned mem_idx)
+{
+	struct env_mempool_mem_iter_ctx *ctx = opaque;
+
+	ctx->user_cb((struct spdk_mempool *)mp, ctx->user_arg, memhdr->addr, memhdr->iova, memhdr->len,
+		     mem_idx);
+}
+
+uint32_t
+spdk_mempool_mem_iter(struct spdk_mempool *mp, spdk_mempool_mem_cb_t mem_cb,
+		      void *mem_cb_arg)
+{
+	struct env_mempool_mem_iter_ctx ctx = {
+		.user_cb = mem_cb,
+		.user_arg = mem_cb_arg
+	};
+
+	return rte_mempool_mem_iter((struct rte_mempool *)mp, mempool_mem_iter_remap, &ctx);
+}
+
 struct spdk_mempool *
 spdk_mempool_lookup(const char *name)
 {
@@ -325,6 +355,10 @@ spdk_unaffinitize_thread(void)
 	rte_cpuset_t new_cpuset;
 	long num_cores, i;
 
+	if (g_is_thread_unaffinitized) {
+		return;
+	}
+
 	CPU_ZERO(&new_cpuset);
 
 	num_cores = sysconf(_SC_NPROCESSORS_CONF);
@@ -335,6 +369,7 @@ spdk_unaffinitize_thread(void)
 	}
 
 	rte_thread_set_affinity(&new_cpuset);
+	g_is_thread_unaffinitized = true;
 }
 
 void *
@@ -347,13 +382,17 @@ spdk_call_unaffinitized(void *cb(void *arg), void *arg)
 		return NULL;
 	}
 
-	rte_thread_get_affinity(&orig_cpuset);
+	if (g_is_thread_unaffinitized) {
+		ret = cb(arg);
+	} else {
+		rte_thread_get_affinity(&orig_cpuset);
+		spdk_unaffinitize_thread();
 
-	spdk_unaffinitize_thread();
+		ret = cb(arg);
 
-	ret = cb(arg);
-
-	rte_thread_set_affinity(&orig_cpuset);
+		rte_thread_set_affinity(&orig_cpuset);
+		g_is_thread_unaffinitized = false;
+	}
 
 	return ret;
 }

@@ -28,6 +28,11 @@ enum bdev_nvme_multipath_policy {
 	BDEV_NVME_MP_POLICY_ACTIVE_ACTIVE,
 };
 
+enum bdev_nvme_multipath_selector {
+	BDEV_NVME_MP_SELECTOR_ROUND_ROBIN = 1,
+	BDEV_NVME_MP_SELECTOR_QUEUE_DEPTH,
+};
+
 typedef void (*spdk_bdev_create_nvme_fn)(void *ctx, size_t bdev_count, int rc);
 typedef void (*spdk_bdev_nvme_start_discovery_fn)(void *ctx, int status);
 typedef void (*spdk_bdev_nvme_stop_discovery_fn)(void *ctx);
@@ -70,6 +75,13 @@ struct nvme_ns {
 	struct nvme_async_probe_ctx	*probe_ctx;
 	TAILQ_ENTRY(nvme_ns)		tailq;
 	RB_ENTRY(nvme_ns)		node;
+
+	/**
+	 * record io path stat before destroyed. Allocation of stat is
+	 * decided by option io_path_stat of RPC
+	 * bdev_nvme_set_options
+	 */
+	struct spdk_bdev_io_stat	*stat;
 };
 
 struct nvme_bdev_io;
@@ -103,6 +115,7 @@ struct nvme_ctrlr {
 	uint32_t				destruct : 1;
 	uint32_t				ana_log_page_updating : 1;
 	uint32_t				io_path_cache_clearing : 1;
+	uint32_t				dont_retry : 1;
 
 	struct nvme_ctrlr_opts			opts;
 
@@ -158,6 +171,8 @@ struct nvme_bdev {
 	pthread_mutex_t			mutex;
 	int				ref;
 	enum bdev_nvme_multipath_policy	mp_policy;
+	enum bdev_nvme_multipath_selector mp_selector;
+	uint32_t			rr_min_io;
 	TAILQ_HEAD(, nvme_ns)		nvme_ns_list;
 	bool				opal;
 	TAILQ_ENTRY(nvme_bdev)		tailq;
@@ -191,11 +206,17 @@ struct nvme_io_path {
 	/* The following are used to update io_path cache of the nvme_bdev_channel. */
 	struct nvme_bdev_channel	*nbdev_ch;
 	TAILQ_ENTRY(nvme_io_path)	tailq;
+
+	/* allocation of stat is decided by option io_path_stat of RPC bdev_nvme_set_options */
+	struct spdk_bdev_io_stat	*stat;
 };
 
 struct nvme_bdev_channel {
 	struct nvme_io_path			*current_io_path;
 	enum bdev_nvme_multipath_policy		mp_policy;
+	enum bdev_nvme_multipath_selector	mp_selector;
+	uint32_t				rr_min_io;
+	uint32_t				rr_counter;
 	STAILQ_HEAD(, nvme_io_path)		io_path_list;
 	TAILQ_HEAD(retry_io_head, spdk_bdev_io)	retry_io_list;
 	struct spdk_poller			*retry_io_poller;
@@ -264,6 +285,7 @@ struct spdk_bdev_nvme_opts {
 	uint8_t transport_tos;
 	bool nvme_error_stat;
 	uint32_t rdma_srq_size;
+	bool io_path_stat;
 };
 
 struct spdk_nvme_qpair *bdev_nvme_get_io_qpair(struct spdk_io_channel *ctrlr_io_ch);
@@ -345,10 +367,14 @@ typedef void (*bdev_nvme_set_multipath_policy_cb)(void *cb_arg, int rc);
  *
  * \param name NVMe bdev name
  * \param policy Multipath policy (active-passive or active-active)
+ * \param selector Multipath selector (round_robin, queue_depth)
+ * \param rr_min_io Number of IO to route to a path before switching to another for round-robin
  * \param cb_fn Function to be called back after completion.
  */
 void bdev_nvme_set_multipath_policy(const char *name,
 				    enum bdev_nvme_multipath_policy policy,
+				    enum bdev_nvme_multipath_selector selector,
+				    uint32_t rr_min_io,
 				    bdev_nvme_set_multipath_policy_cb cb_fn,
 				    void *cb_arg);
 

@@ -32,15 +32,15 @@ dpdk_pci_init(void)
 	 * Only DPDK in development has additional suffix past minor version.
 	 */
 	if (strlen(release) != 0) {
-		if (year == 23 && month == 3 && minor == 0) {
+		if (year == 23 && month == 7 && minor == 0) {
 			g_dpdk_fn_table = &fn_table_2211;
-			SPDK_NOTICELOG("DPDK version 23.03.0 not supported yet. Enabled only for validation.\n");
+			SPDK_NOTICELOG("DPDK version 23.07.0 not supported yet. Enabled only for validation.\n");
 			return 0;
 		}
 	}
 
-	/* Anything 23.x or higher is not supported. */
-	if (year > 22) {
+	/* Anything 24.x or higher is not supported. */
+	if (year > 23) {
 		SPDK_ERRLOG("DPDK version %d.%02d.%d not supported.\n", year, month, minor);
 		return -EINVAL;
 	}
@@ -56,6 +56,14 @@ dpdk_pci_init(void)
 			SPDK_ERRLOG("DPDK LTS version 22.11.%d not supported.\n", minor);
 			return -EINVAL;
 		}
+		g_dpdk_fn_table = &fn_table_2211;
+	} else if (year == 23) {
+		/* Only 23.03.0 is supported */
+		if (month != 3 || minor != 0) {
+			SPDK_ERRLOG("DPDK version 23.%02d.%d is not supported.\n", month, minor);
+			return -EINVAL;
+		}
+		/* There were no changes between 22.11 and 23.03, so use the 22.11 implementation */
 		g_dpdk_fn_table = &fn_table_2211;
 	} else {
 		/* Everything else we use the 22.07 implementation. */

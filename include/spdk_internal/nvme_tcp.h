@@ -1,6 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2018 Intel Corporation. All rights reserved.
  *   Copyright (c) 2020 Mellanox Technologies LTD. All rights reserved.
+ *   Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #ifndef SPDK_INTERNAL_NVME_TCP_H
@@ -9,8 +10,14 @@
 #include "spdk/likely.h"
 #include "spdk/sock.h"
 #include "spdk/dif.h"
+#include "spdk/hexlify.h"
+#include "spdk/nvmf_spec.h"
 
 #include "sgl.h"
+
+#include "openssl/evp.h"
+#include "openssl/kdf.h"
+#include "openssl/sha.h"
 
 #define SPDK_CRC32C_XOR				0xffffffffUL
 #define SPDK_NVME_TCP_DIGEST_LEN		4
@@ -47,6 +54,21 @@
          ((*((uint8_t *)(B)+1)) = (uint8_t)((uint32_t)(D) >> 8)),               \
          ((*((uint8_t *)(B)+2)) = (uint8_t)((uint32_t)(D) >> 16)),              \
          ((*((uint8_t *)(B)+3)) = (uint8_t)((uint32_t)(D) >> 24)))
+
+/* The PSK identity comprises of following components:
+ * 4-character format specifier "NVMe" +
+ * 1-character TLS protocol version indicator +
+ * 1-character PSK type indicator, specifying the used PSK +
+ * 2-characters hash specifier +
+ * NQN of the host (SPDK_NVMF_NQN_MAX_LEN -> 223) +
+ * NQN of the subsystem (SPDK_NVMF_NQN_MAX_LEN -> 223) +
+ * 2 space character separators +
+ * 1 null terminator =
+ * 457 characters. */
+#define NVMF_PSK_IDENTITY_LEN (SPDK_NVMF_NQN_MAX_LEN + SPDK_NVMF_NQN_MAX_LEN + 11)
+
+/* The maximum size of hkdf_info is defined by RFC 8446, 514B (2 + 256 + 256). */
+#define NVME_TCP_HKDF_INFO_MAX_LEN 514
 
 typedef void (*nvme_tcp_qpair_xfer_complete_cb)(void *cb_arg);
 
@@ -92,7 +114,6 @@ struct nvme_tcp_pdu {
 	TAILQ_ENTRY(nvme_tcp_pdu)			tailq;
 	uint32_t					remaining;
 	uint32_t					padding_len;
-	struct spdk_iov_sgl				sgl;
 
 	struct spdk_dif_ctx				*dif_ctx;
 
@@ -119,6 +140,9 @@ enum nvme_tcp_pdu_recv_state {
 
 	/* Active tqpair waiting for payload */
 	NVME_TCP_PDU_RECV_STATE_AWAIT_PDU_PAYLOAD,
+
+	/* Active tqpair waiting for all outstanding PDUs to complete */
+	NVME_TCP_PDU_RECV_STATE_QUIESCING,
 
 	/* Active tqpair does not wait for payload */
 	NVME_TCP_PDU_RECV_STATE_ERROR,
@@ -278,14 +302,13 @@ nvme_tcp_build_iovs(struct iovec *iov, int iovcnt, struct nvme_tcp_pdu *pdu,
 {
 	uint32_t hlen;
 	uint32_t plen __attribute__((unused));
-	struct spdk_iov_sgl *sgl;
+	struct spdk_iov_sgl sgl;
 
 	if (iovcnt == 0) {
 		return 0;
 	}
 
-	sgl = &pdu->sgl;
-	spdk_iov_sgl_init(sgl, iov, iovcnt, 0);
+	spdk_iov_sgl_init(&sgl, iov, iovcnt, 0);
 	hlen = pdu->hdr.common.hlen;
 
 	/* Header Digest */
@@ -296,7 +319,7 @@ nvme_tcp_build_iovs(struct iovec *iov, int iovcnt, struct nvme_tcp_pdu *pdu,
 	plen = hlen;
 	if (!pdu->data_len) {
 		/* PDU header + possible header digest */
-		spdk_iov_sgl_append(sgl, (uint8_t *)&pdu->hdr.raw, hlen);
+		spdk_iov_sgl_append(&sgl, (uint8_t *)&pdu->hdr.raw, hlen);
 		goto end;
 	}
 
@@ -306,18 +329,18 @@ nvme_tcp_build_iovs(struct iovec *iov, int iovcnt, struct nvme_tcp_pdu *pdu,
 		plen = hlen;
 	}
 
-	if (!spdk_iov_sgl_append(sgl, (uint8_t *)&pdu->hdr.raw, hlen)) {
+	if (!spdk_iov_sgl_append(&sgl, (uint8_t *)&pdu->hdr.raw, hlen)) {
 		goto end;
 	}
 
 	/* Data Segment */
 	plen += pdu->data_len;
 	if (spdk_likely(!pdu->dif_ctx)) {
-		if (!_nvme_tcp_sgl_append_multi(sgl, pdu->data_iov, pdu->data_iovcnt)) {
+		if (!_nvme_tcp_sgl_append_multi(&sgl, pdu->data_iov, pdu->data_iovcnt)) {
 			goto end;
 		}
 	} else {
-		if (!_nvme_tcp_sgl_append_multi_with_md(sgl, pdu->data_iov, pdu->data_iovcnt,
+		if (!_nvme_tcp_sgl_append_multi_with_md(&sgl, pdu->data_iov, pdu->data_iovcnt,
 							pdu->data_len, pdu->dif_ctx)) {
 			goto end;
 		}
@@ -326,38 +349,37 @@ nvme_tcp_build_iovs(struct iovec *iov, int iovcnt, struct nvme_tcp_pdu *pdu,
 	/* Data Digest */
 	if (g_nvme_tcp_ddgst[pdu->hdr.common.pdu_type] && ddgst_enable) {
 		plen += SPDK_NVME_TCP_DIGEST_LEN;
-		spdk_iov_sgl_append(sgl, pdu->data_digest, SPDK_NVME_TCP_DIGEST_LEN);
+		spdk_iov_sgl_append(&sgl, pdu->data_digest, SPDK_NVME_TCP_DIGEST_LEN);
 	}
 
 	assert(plen == pdu->hdr.common.plen);
 
 end:
 	if (_mapped_length != NULL) {
-		*_mapped_length = sgl->total_size;
+		*_mapped_length = sgl.total_size;
 	}
 
-	return iovcnt - sgl->iovcnt;
+	return iovcnt - sgl.iovcnt;
 }
 
 static int
 nvme_tcp_build_payload_iovs(struct iovec *iov, int iovcnt, struct nvme_tcp_pdu *pdu,
 			    bool ddgst_enable, uint32_t *_mapped_length)
 {
-	struct spdk_iov_sgl *sgl;
+	struct spdk_iov_sgl sgl;
 
 	if (iovcnt == 0) {
 		return 0;
 	}
 
-	sgl = &pdu->sgl;
-	spdk_iov_sgl_init(sgl, iov, iovcnt, pdu->rw_offset);
+	spdk_iov_sgl_init(&sgl, iov, iovcnt, pdu->rw_offset);
 
 	if (spdk_likely(!pdu->dif_ctx)) {
-		if (!_nvme_tcp_sgl_append_multi(sgl, pdu->data_iov, pdu->data_iovcnt)) {
+		if (!_nvme_tcp_sgl_append_multi(&sgl, pdu->data_iov, pdu->data_iovcnt)) {
 			goto end;
 		}
 	} else {
-		if (!_nvme_tcp_sgl_append_multi_with_md(sgl, pdu->data_iov, pdu->data_iovcnt,
+		if (!_nvme_tcp_sgl_append_multi_with_md(&sgl, pdu->data_iov, pdu->data_iovcnt,
 							pdu->data_len, pdu->dif_ctx)) {
 			goto end;
 		}
@@ -365,14 +387,14 @@ nvme_tcp_build_payload_iovs(struct iovec *iov, int iovcnt, struct nvme_tcp_pdu *
 
 	/* Data Digest */
 	if (ddgst_enable) {
-		spdk_iov_sgl_append(sgl, pdu->data_digest, SPDK_NVME_TCP_DIGEST_LEN);
+		spdk_iov_sgl_append(&sgl, pdu->data_digest, SPDK_NVME_TCP_DIGEST_LEN);
 	}
 
 end:
 	if (_mapped_length != NULL) {
-		*_mapped_length = sgl->total_size;
+		*_mapped_length = sgl.total_size;
 	}
-	return iovcnt - sgl->iovcnt;
+	return iovcnt - sgl.iovcnt;
 }
 
 static int
@@ -475,7 +497,7 @@ nvme_tcp_pdu_set_data_buf(struct nvme_tcp_pdu *pdu,
 {
 	uint32_t buf_offset, buf_len, remain_len, len;
 	uint8_t *buf;
-	struct spdk_iov_sgl *pdu_sgl, buf_sgl;
+	struct spdk_iov_sgl pdu_sgl, buf_sgl;
 
 	pdu->data_len = data_len;
 
@@ -491,9 +513,7 @@ nvme_tcp_pdu_set_data_buf(struct nvme_tcp_pdu *pdu,
 	if (iovcnt == 1) {
 		_nvme_tcp_pdu_set_data(pdu, (void *)((uint64_t)iov[0].iov_base + buf_offset), buf_len);
 	} else {
-		pdu_sgl = &pdu->sgl;
-
-		spdk_iov_sgl_init(pdu_sgl, pdu->data_iov, NVME_TCP_MAX_SGL_DESCRIPTORS, 0);
+		spdk_iov_sgl_init(&pdu_sgl, pdu->data_iov, NVME_TCP_MAX_SGL_DESCRIPTORS, 0);
 		spdk_iov_sgl_init(&buf_sgl, iov, iovcnt, 0);
 
 		spdk_iov_sgl_advance(&buf_sgl, buf_offset);
@@ -506,15 +526,15 @@ nvme_tcp_pdu_set_data_buf(struct nvme_tcp_pdu *pdu,
 			spdk_iov_sgl_advance(&buf_sgl, len);
 			remain_len -= len;
 
-			if (!spdk_iov_sgl_append(pdu_sgl, buf, len)) {
+			if (!spdk_iov_sgl_append(&pdu_sgl, buf, len)) {
 				break;
 			}
 		}
 
 		assert(remain_len == 0);
-		assert(pdu_sgl->total_size == buf_len);
+		assert(pdu_sgl.total_size == buf_len);
 
-		pdu->data_iovcnt = NVME_TCP_MAX_SGL_DESCRIPTORS - pdu_sgl->iovcnt;
+		pdu->data_iovcnt = NVME_TCP_MAX_SGL_DESCRIPTORS - pdu_sgl.iovcnt;
 	}
 }
 
@@ -548,6 +568,118 @@ nvme_tcp_pdu_calc_psh_len(struct nvme_tcp_pdu *pdu, bool hdgst_enable)
 
 	psh_len -= sizeof(struct spdk_nvme_tcp_common_pdu_hdr);
 	pdu->psh_len = psh_len;
+}
+
+static inline int
+nvme_tcp_generate_psk_identity(char *out_id, size_t out_id_len,
+			       const char *hostnqn, const char *subnqn)
+{
+	/* This hardcoded PSK identity prefix will remain until
+	 * support for different hash functions to generate PSK
+	 * key is introduced. */
+	const char *psk_id_prefix = "NVMe0R01";
+	int rc;
+
+	assert(out_id != NULL);
+
+	if (out_id_len < strlen(psk_id_prefix) + strlen(hostnqn) + strlen(subnqn) + 3) {
+		SPDK_ERRLOG("Out buffer too small!\n");
+		return -1;
+	}
+
+	rc = snprintf(out_id, out_id_len, "%s %s %s", psk_id_prefix, hostnqn, subnqn);
+	if (rc < 0) {
+		SPDK_ERRLOG("Could not generate PSK identity\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static inline int
+nvme_tcp_derive_retained_psk(const char *psk_in, const char *hostnqn, uint8_t *psk_out,
+			     uint64_t psk_out_len)
+{
+	EVP_PKEY_CTX *ctx;
+	uint64_t sha256_digest_len = SHA256_DIGEST_LENGTH;
+	uint8_t hkdf_info[NVME_TCP_HKDF_INFO_MAX_LEN] = {};
+	const char *label = "tls13 HostNQN";
+	size_t pos, labellen, nqnlen;
+	char *unhexlified = NULL;
+	int rc, hkdf_info_size;
+
+	labellen = strlen(label);
+	nqnlen = strlen(hostnqn);
+	assert(nqnlen <= SPDK_NVMF_NQN_MAX_LEN);
+
+	*(uint16_t *)&hkdf_info[0] = htons(strlen(psk_in) / 2);
+	pos = sizeof(uint16_t);
+	hkdf_info[pos] = (uint8_t)labellen;
+	pos += sizeof(uint8_t);
+	memcpy(&hkdf_info[pos], label, labellen);
+	hkdf_info[pos] = (uint8_t)nqnlen;
+	pos += sizeof(uint8_t);
+	memcpy(&hkdf_info[pos], hostnqn, nqnlen);
+
+	hkdf_info_size = pos * sizeof(uint8_t) + nqnlen;
+
+	if (sha256_digest_len > psk_out_len) {
+		SPDK_ERRLOG("Insufficient buffer size for out key!\n");
+		return -EINVAL;
+	}
+
+	ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
+	if (!ctx) {
+		SPDK_ERRLOG("Unable to initialize EVP_PKEY_CTX!\n");
+		return -ENOMEM;
+	}
+
+	/* EVP_PKEY_* functions returns 1 as a success code and 0 or negative on failure. */
+	if (EVP_PKEY_derive_init(ctx) != 1) {
+		SPDK_ERRLOG("Unable to initialize key derivation ctx for HKDF!\n");
+		rc = -ENOMEM;
+		goto end;
+	}
+	if (EVP_PKEY_CTX_set_hkdf_md(ctx, EVP_sha256()) != 1) {
+		SPDK_ERRLOG("Unable to set SHA256 method for HKDF!\n");
+		rc = -EOPNOTSUPP;
+		goto end;
+	}
+
+	unhexlified = spdk_unhexlify(psk_in);
+	if (unhexlified == NULL) {
+		SPDK_ERRLOG("Unable to unhexlify PSK!\n");
+		rc = -EINVAL;
+		goto end;
+	}
+	if (EVP_PKEY_CTX_set1_hkdf_key(ctx, unhexlified, strlen(psk_in) / 2) != 1) {
+		SPDK_ERRLOG("Unable to set PSK key for HKDF!\n");
+		rc = -ENOBUFS;
+		goto end;
+	}
+
+	if (EVP_PKEY_CTX_add1_hkdf_info(ctx, hkdf_info, hkdf_info_size) != 1) {
+		SPDK_ERRLOG("Unable to set info label for HKDF!\n");
+		rc = -ENOBUFS;
+		goto end;
+	}
+	if (EVP_PKEY_CTX_set1_hkdf_salt(ctx, NULL, 0) != 1) {
+		SPDK_ERRLOG("Unable to set salt for HKDF!\n");
+		rc = -EINVAL;
+		goto end;
+	}
+	if (EVP_PKEY_derive(ctx, psk_out, &sha256_digest_len) != 1) {
+		SPDK_ERRLOG("Unable to derive the PSK key!\n");
+		rc = -EINVAL;
+		goto end;
+	}
+
+	rc = sha256_digest_len;
+
+end:
+	free(unhexlified);
+	EVP_PKEY_CTX_free(ctx);
+	return rc;
 }
 
 #endif /* SPDK_INTERNAL_NVME_TCP_H */

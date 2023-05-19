@@ -21,7 +21,7 @@ WORKDIR=$(readlink -f "$(dirname "$0")")
 
 if ! hash $QEMU_IMG_BIN $QEMU_BIN; then
 	echo 'ERROR: QEMU is not installed on this system. Unable to run vhost tests.' >&2
-	exit 1
+	return 1
 fi
 
 mkdir -p $VHOST_DIR
@@ -673,6 +673,14 @@ function vm_setup() {
 		queue_number=$cpu_num
 	fi
 
+	# Normalize tcp ports to make sure they are available
+	ssh_socket=$(get_free_tcp_port "$ssh_socket")
+	fio_socket=$(get_free_tcp_port "$fio_socket")
+	monitor_port=$(get_free_tcp_port "$monitor_port")
+	migration_port=$(get_free_tcp_port "$migration_port")
+	gdbserver_socket=$(get_free_tcp_port "$gdbserver_socket")
+	vnc_socket=$(get_free_tcp_port "$vnc_socket")
+
 	xtrace_restore
 
 	local node_num=${!qemu_numa_node_param}
@@ -1121,7 +1129,8 @@ function run_fio() {
 		local vm_num=${vm%%:*}
 		local vmdisks=${vm#*:}
 
-		sed "s@filename=@filename=$vmdisks@" $job_file | vm_exec $vm_num "cat > /root/$job_fname"
+		sed "s@filename=@filename=$vmdisks@;s@description=\(.*\)@description=\1 (VM=$vm_num)@" "$job_file" \
+			| vm_exec $vm_num "cat > /root/$job_fname"
 
 		if $fio_gtod_reduce; then
 			vm_exec $vm_num "echo 'gtod_reduce=1' >> /root/$job_fname"
@@ -1288,4 +1297,116 @@ function error_exit() {
 
 	at_app_exit
 	exit 1
+}
+
+function lookup_dev_irqs() {
+	local vm=$1 irqs=() cpus=()
+	local script_get_irqs script_get_cpus
+
+	mkdir -p "$VHOST_DIR/irqs"
+
+	# All vhost tests depend either on virtio_blk or virtio_scsi drivers on the VM side.
+	# Considering that, simply iterate over virtio bus and pick pci device corresponding
+	# to each virtio device.
+	# For vfio-user setup, look for bare nvme devices.
+
+	script_get_irqs=$(
+		cat <<- 'SCRIPT'
+			shopt -s nullglob
+			for virtio in /sys/bus/virtio/devices/virtio*; do
+			  irqs+=("$(readlink -f "$virtio")/../msi_irqs/"*)
+			done
+			irqs+=(/sys/class/nvme/nvme*/device/msi_irqs/*)
+			printf '%u\n' "${irqs[@]##*/}"
+		SCRIPT
+	)
+
+	script_get_cpus=$(
+		cat <<- 'SCRIPT'
+			cpus=(/sys/devices/system/cpu/cpu[0-9]*)
+			printf '%u\n' "${cpus[@]##*cpu}"
+		SCRIPT
+	)
+
+	irqs=($(vm_exec "$vm" "$script_get_irqs"))
+	cpus=($(vm_exec "$vm" "$script_get_cpus"))
+	((${#irqs[@]} > 0 && ${#cpus[@]} > 0))
+
+	printf '%u\n' "${irqs[@]}" > "$VHOST_DIR/irqs/$vm.irqs"
+	printf '%u\n' "${cpus[@]}" > "$VHOST_DIR/irqs/$vm.cpus"
+}
+
+function irqs() {
+	local vm
+	for vm; do
+		vm_exec "$vm" "while :; do cat /proc/interrupts; sleep 1s; done" > "$VHOST_DIR/irqs/$vm.interrupts" &
+		irqs_pids+=($!)
+	done
+}
+
+function parse_irqs() {
+	local iter=${1:-1}
+	"$rootdir/test/vhost/parse_irqs.sh" "$VHOST_DIR/irqs/"*.interrupts
+	rm "$VHOST_DIR/irqs/"*.interrupts
+
+	mkdir -p "$VHOST_DIR/irqs/$iter"
+	mv "$VHOST_DIR/irqs/"*.parsed "$VHOST_DIR/irqs/$iter/"
+}
+
+function collect_perf() {
+	local cpus=$1 outf=$2 runtime=$3 delay=$4
+
+	mkdir -p "$VHOST_DIR/perf"
+
+	perf record -g \
+		${cpus:+-C "$cpus"} \
+		${outf:+-o "$outf"} \
+		${delay:+-D $((delay * 1000))} \
+		-z \
+		${runtime:+ -- sleep $((runtime + delay))}
+}
+
+function parse_perf() {
+	local iter=${1:-1}
+	local report out
+
+	mkdir -p "$VHOST_DIR/perf/$iter"
+	shift
+
+	for report in "$@" "$VHOST_DIR/perf/"*.perf; do
+		[[ -f $report ]] || continue
+		perf report \
+			-n \
+			-i "$report" \
+			--header \
+			--stdio > "$VHOST_DIR/perf/$iter/${report##*/}.parsed"
+		cp "$report" "$VHOST_DIR/perf/$iter/"
+	done
+	rm "$VHOST_DIR/perf/"*.perf
+}
+
+function get_from_fio() {
+	local opt=$1 conf=$2
+
+	[[ -n $opt && -f $conf ]] || return 1
+
+	awk -F= "/^$opt/{print \$2}" "$conf"
+}
+
+function get_free_tcp_port() {
+	local port=$1 to=${2:-1} sockets=()
+
+	mapfile -t sockets < /proc/net/tcp
+
+	# If there's a TCP socket in a listening state keep incrementing $port until
+	# we find one that's not used. $to determines how long should we look for:
+	#  0: don't increment, just check if given $port is in use
+	# >0: increment $to times
+	# <0: no increment limit
+
+	while [[ ${sockets[*]} == *":$(printf '%04X' "$port") 00000000:0000 0A"* ]]; do
+		((to-- && ++port <= 65535)) || return 1
+	done
+
+	echo "$port"
 }

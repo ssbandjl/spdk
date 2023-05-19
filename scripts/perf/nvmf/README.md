@@ -59,7 +59,8 @@ The following sub-chapters describe each configuration section in more detail.
     "username": "user",
     "password": "password",
     "transport": "transport_type",
-    "skip_spdk_install": bool
+    "skip_spdk_install": bool,
+    "irdma_roce_enable": bool
 }
 ```
 
@@ -76,6 +77,9 @@ Optional:
   is already in place on Initiator systems and there's no need to re-build it,
   then set this option to true.
   Default: false.
+- irdma_roce_enable - loads irdma driver with RoCEv2 network protocol enabled on Target and
+  Initiator machines. This option applies only to system with Intel E810 NICs.
+  Default: false
 
 ### Target System Configuration
 
@@ -165,6 +169,8 @@ Optional, SPDK Target only:
 - max_queue_depth - int, max number of outstanding I/O per queue. Default: 128.
 - dif_insert_strip - bool. Only for TCP transport. Enable DIF option when
   creating transport layer. Default: false.
+- num_cqe - int, number of completion queue entries. See doc/json_rpc.md
+  "nvmf_create_transport" section. Default: 4096.
 - null_block_dif_type - int, 0-3. Level of DIF type to use when creating
   null block bdev. Default: 0.
 - enable_dpdk_memory - bool. Wait for a fio ramp_time to finish and

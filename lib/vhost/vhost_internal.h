@@ -224,6 +224,7 @@ struct spdk_vhost_user_dev_backend {
 	spdk_vhost_session_fn start_session;
 	spdk_vhost_session_fn stop_session;
 	int (*alloc_vq_tasks)(struct spdk_vhost_session *vsession, uint16_t qid);
+	void (*register_vq_interrupt)(struct spdk_vhost_session *vsession, struct spdk_vhost_virtqueue *vq);
 };
 
 enum vhost_backend_type {
@@ -586,10 +587,16 @@ void virtio_blk_transport_register(const struct spdk_virtio_blk_transport_ops *o
 int virtio_blk_transport_create(const char *transport_name, const struct spdk_json_val *params);
 int virtio_blk_transport_destroy(struct spdk_virtio_blk_transport *transport,
 				 spdk_vhost_fini_cb cb_fn);
-
+struct spdk_virtio_blk_transport *virtio_blk_transport_get_first(void);
+struct spdk_virtio_blk_transport *virtio_blk_transport_get_next(
+	struct spdk_virtio_blk_transport *transport);
+void virtio_blk_transport_dump_opts(struct spdk_virtio_blk_transport *transport,
+				    struct spdk_json_write_ctx *w);
+struct spdk_virtio_blk_transport *virtio_blk_tgt_get_transport(const char *transport_name);
 const struct spdk_virtio_blk_transport_ops *virtio_blk_get_transport_ops(
 	const char *transport_name);
 
+void vhost_session_info_json(struct spdk_vhost_dev *vdev, struct spdk_json_write_ctx *w);
 
 /*
  * Macro used to register new transports.

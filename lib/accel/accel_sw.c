@@ -6,7 +6,7 @@
 
 #include "spdk/stdinc.h"
 
-#include "spdk_internal/accel_module.h"
+#include "spdk/accel_module.h"
 #include "accel_internal.h"
 
 #include "spdk/env.h"
@@ -16,10 +16,7 @@
 #include "spdk/json.h"
 #include "spdk/crc32.h"
 #include "spdk/util.h"
-
-#ifdef SPDK_CONFIG_PMDK
-#include "libpmem.h"
-#endif
+#include "spdk/xor.h"
 
 #ifdef SPDK_CONFIG_ISAL
 #include "../isa-l/include/igzip_lib.h"
@@ -30,7 +27,7 @@
 
 #define ACCEL_AES_XTS_128_KEY_SIZE 16
 #define ACCEL_AES_XTS_256_KEY_SIZE 32
-#define ACCEL_AES_XTS "AES_XTS"
+
 /* Per the AES-XTS spec, the size of data unit cannot be bigger than 2^20 blocks, 128b each block */
 #define ACCEL_AES_XTS_MAX_BLOCK_SIZE (1 << 24)
 
@@ -56,6 +53,7 @@ static struct spdk_accel_module_if g_sw_module;
 
 static void sw_accel_crypto_key_deinit(struct spdk_accel_crypto_key *_key);
 static int sw_accel_crypto_key_init(struct spdk_accel_crypto_key *key);
+static bool sw_accel_crypto_supports_tweak_mode(enum spdk_accel_crypto_tweak_mode tweak_mode);
 
 /* Post SW completions to a list and complete in a poller as we don't want to
  * complete them on the caller's stack as they'll likely submit another. */
@@ -64,20 +62,6 @@ _add_to_comp_list(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *acc
 {
 	accel_task->status = status;
 	TAILQ_INSERT_TAIL(&sw_ch->tasks_to_complete, accel_task, link);
-}
-
-/* Used when the SW engine is selected and the durable flag is set. */
-inline static int
-_check_flags(int flags)
-{
-	if (flags & ACCEL_FLAG_PERSISTENT) {
-#ifndef SPDK_CONFIG_PMDK
-		/* PMDK is required to use this flag. */
-		SPDK_ERRLOG("ACCEL_FLAG_PERSISTENT set but PMDK not configured. Configure PMDK or do not use this flag.\n");
-		return -EINVAL;
-#endif
-	}
-	return 0;
 }
 
 static bool
@@ -94,46 +78,17 @@ sw_accel_supports_opcode(enum accel_opcode opc)
 	case ACCEL_OPC_DECOMPRESS:
 	case ACCEL_OPC_ENCRYPT:
 	case ACCEL_OPC_DECRYPT:
+	case ACCEL_OPC_XOR:
 		return true;
 	default:
 		return false;
 	}
 }
 
-static inline void
-_pmem_memcpy(void *dst, const void *src, size_t len)
-{
-#ifdef SPDK_CONFIG_PMDK
-	int is_pmem = pmem_is_pmem(dst, len);
-
-	if (is_pmem) {
-		pmem_memcpy_persist(dst, src, len);
-	} else {
-		memcpy(dst, src, len);
-		pmem_msync(dst, len);
-	}
-#else
-	SPDK_ERRLOG("Function not defined without SPDK_CONFIG_PMDK enabled.\n");
-	assert(0);
-#endif
-}
-
-static void
-_sw_accel_dualcast(void *dst1, void *dst2, void *src, size_t nbytes, int flags)
-{
-	if (flags & ACCEL_FLAG_PERSISTENT) {
-		_pmem_memcpy(dst1, src, nbytes);
-		_pmem_memcpy(dst2, src, nbytes);
-	} else {
-		memcpy(dst1, src, nbytes);
-		memcpy(dst2, src, nbytes);
-	}
-}
-
 static int
 _sw_accel_dualcast_iovs(struct iovec *dst_iovs, uint32_t dst_iovcnt,
 			struct iovec *dst2_iovs, uint32_t dst2_iovcnt,
-			struct iovec *src_iovs, uint32_t src_iovcnt, int flags)
+			struct iovec *src_iovs, uint32_t src_iovcnt)
 {
 	if (spdk_unlikely(dst_iovcnt != 1 || dst2_iovcnt != 1 || src_iovcnt != 1)) {
 		return -EINVAL;
@@ -144,26 +99,15 @@ _sw_accel_dualcast_iovs(struct iovec *dst_iovs, uint32_t dst_iovcnt,
 		return -EINVAL;
 	}
 
-	_sw_accel_dualcast(dst_iovs[0].iov_base, dst2_iovs[0].iov_base, src_iovs[0].iov_base,
-			   dst_iovs[0].iov_len, flags);
+	memcpy(dst_iovs[0].iov_base, src_iovs[0].iov_base, dst_iovs[0].iov_len);
+	memcpy(dst2_iovs[0].iov_base, src_iovs[0].iov_base, dst_iovs[0].iov_len);
 
 	return 0;
 }
 
 static void
-_sw_accel_copy(void *dst, void *src, size_t nbytes, int flags)
-{
-
-	if (flags & ACCEL_FLAG_PERSISTENT) {
-		_pmem_memcpy(dst, src, nbytes);
-	} else {
-		memcpy(dst, src, nbytes);
-	}
-}
-
-static void
 _sw_accel_copy_iovs(struct iovec *dst_iovs, uint32_t dst_iovcnt,
-		    struct iovec *src_iovs, uint32_t src_iovcnt, int flags)
+		    struct iovec *src_iovs, uint32_t src_iovcnt)
 {
 	struct spdk_ioviter iter;
 	void *src, *dst;
@@ -173,7 +117,7 @@ _sw_accel_copy_iovs(struct iovec *dst_iovs, uint32_t dst_iovcnt,
 				      dst_iovs, dst_iovcnt, &src, &dst);
 	     len != 0;
 	     len = spdk_ioviter_next(&iter, &src, &dst)) {
-		_sw_accel_copy(dst, src, len, flags);
+		memcpy(dst, src, len);
 	}
 }
 
@@ -193,7 +137,7 @@ _sw_accel_compare(struct iovec *src_iovs, uint32_t src_iovcnt,
 }
 
 static int
-_sw_accel_fill(struct iovec *iovs, uint32_t iovcnt, uint8_t fill, int flags)
+_sw_accel_fill(struct iovec *iovs, uint32_t iovcnt, uint8_t fill)
 {
 	void *dst;
 	size_t nbytes;
@@ -205,23 +149,7 @@ _sw_accel_fill(struct iovec *iovs, uint32_t iovcnt, uint8_t fill, int flags)
 	dst = iovs[0].iov_base;
 	nbytes = iovs[0].iov_len;
 
-	if (flags & ACCEL_FLAG_PERSISTENT) {
-#ifdef SPDK_CONFIG_PMDK
-		int is_pmem = pmem_is_pmem(dst, nbytes);
-
-		if (is_pmem) {
-			pmem_memset_persist(dst, fill, nbytes);
-		} else {
-			memset(dst, fill, nbytes);
-			pmem_msync(dst, nbytes);
-		}
-#else
-		SPDK_ERRLOG("Function not defined without SPDK_CONFIG_PMDK enabled.\n");
-		assert(0);
-#endif
-	} else {
-		memset(dst, fill, nbytes);
-	}
+	memset(dst, fill, nbytes);
 
 	return 0;
 }
@@ -357,6 +285,12 @@ _sw_accel_decompress(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *
 
 	} while (sw_ch->state.block_state < ISAL_BLOCK_FINISH);
 	assert(sw_ch->state.avail_in == 0);
+
+	/* Get our total output size */
+	if (accel_task->output_size != NULL) {
+		assert(sw_ch->state.total_out > 0);
+		*accel_task->output_size = sw_ch->state.total_out;
+	}
 
 	return rc;
 #else
@@ -501,6 +435,15 @@ _sw_accel_decrypt(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *acc
 }
 
 static int
+_sw_accel_xor(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task)
+{
+	return spdk_xor_gen(accel_task->d.iovs[0].iov_base,
+			    accel_task->nsrcs.srcs,
+			    accel_task->nsrcs.cnt,
+			    accel_task->d.iovs[0].iov_len);
+}
+
+static int
 sw_accel_submit_tasks(struct spdk_io_channel *ch, struct spdk_accel_task *accel_task)
 {
 	struct sw_accel_io_channel *sw_ch = spdk_io_channel_get_ctx(ch);
@@ -510,28 +453,17 @@ sw_accel_submit_tasks(struct spdk_io_channel *ch, struct spdk_accel_task *accel_
 	do {
 		switch (accel_task->op_code) {
 		case ACCEL_OPC_COPY:
-			rc = _check_flags(accel_task->flags);
-			if (rc == 0) {
-				_sw_accel_copy_iovs(accel_task->d.iovs, accel_task->d.iovcnt,
-						    accel_task->s.iovs, accel_task->s.iovcnt,
-						    accel_task->flags);
-			}
+			_sw_accel_copy_iovs(accel_task->d.iovs, accel_task->d.iovcnt,
+					    accel_task->s.iovs, accel_task->s.iovcnt);
 			break;
 		case ACCEL_OPC_FILL:
-			rc = _check_flags(accel_task->flags);
-			if (rc == 0) {
-				rc = _sw_accel_fill(accel_task->d.iovs, accel_task->d.iovcnt,
-						    accel_task->fill_pattern, accel_task->flags);
-			}
+			rc = _sw_accel_fill(accel_task->d.iovs, accel_task->d.iovcnt,
+					    accel_task->fill_pattern);
 			break;
 		case ACCEL_OPC_DUALCAST:
-			rc = _check_flags(accel_task->flags);
-			if (rc == 0) {
-				rc = _sw_accel_dualcast_iovs(accel_task->d.iovs, accel_task->d.iovcnt,
-							     accel_task->d2.iovs, accel_task->d2.iovcnt,
-							     accel_task->s.iovs, accel_task->s.iovcnt,
-							     accel_task->flags);
-			}
+			rc = _sw_accel_dualcast_iovs(accel_task->d.iovs, accel_task->d.iovcnt,
+						     accel_task->d2.iovs, accel_task->d2.iovcnt,
+						     accel_task->s.iovs, accel_task->s.iovcnt);
 			break;
 		case ACCEL_OPC_COMPARE:
 			rc = _sw_accel_compare(accel_task->s.iovs, accel_task->s.iovcnt,
@@ -541,20 +473,19 @@ sw_accel_submit_tasks(struct spdk_io_channel *ch, struct spdk_accel_task *accel_
 			_sw_accel_crc32cv(accel_task->crc_dst, accel_task->s.iovs, accel_task->s.iovcnt, accel_task->seed);
 			break;
 		case ACCEL_OPC_COPY_CRC32C:
-			rc = _check_flags(accel_task->flags);
-			if (rc == 0) {
-				_sw_accel_copy_iovs(accel_task->d.iovs, accel_task->d.iovcnt,
-						    accel_task->s.iovs, accel_task->s.iovcnt,
-						    accel_task->flags);
-				_sw_accel_crc32cv(accel_task->crc_dst, accel_task->s.iovs,
-						  accel_task->s.iovcnt, accel_task->seed);
-			}
+			_sw_accel_copy_iovs(accel_task->d.iovs, accel_task->d.iovcnt,
+					    accel_task->s.iovs, accel_task->s.iovcnt);
+			_sw_accel_crc32cv(accel_task->crc_dst, accel_task->s.iovs,
+					  accel_task->s.iovcnt, accel_task->seed);
 			break;
 		case ACCEL_OPC_COMPRESS:
 			rc = _sw_accel_compress(sw_ch, accel_task);
 			break;
 		case ACCEL_OPC_DECOMPRESS:
 			rc = _sw_accel_decompress(sw_ch, accel_task);
+			break;
+		case ACCEL_OPC_XOR:
+			rc = _sw_accel_xor(sw_ch, accel_task);
 			break;
 		case ACCEL_OPC_ENCRYPT:
 			rc = _sw_accel_encrypt(sw_ch, accel_task);
@@ -593,6 +524,7 @@ static struct spdk_accel_module_if g_sw_module = {
 	.submit_tasks		= sw_accel_submit_tasks,
 	.crypto_key_init	= sw_accel_crypto_key_init,
 	.crypto_key_deinit	= sw_accel_crypto_key_deinit,
+	.crypto_supports_tweak_mode	= sw_accel_crypto_supports_tweak_mode,
 };
 
 static int
@@ -688,17 +620,6 @@ sw_accel_create_aes_xts(struct spdk_accel_crypto_key *key)
 #ifdef SPDK_CONFIG_ISAL_CRYPTO
 	struct sw_accel_crypto_key_data *key_data;
 
-	if (!key->key || !key->key2) {
-		SPDK_ERRLOG("key or key2 are missing\n");
-		return -EINVAL;
-	}
-
-	if (!key->key_size || key->key_size != key->key2_size) {
-		SPDK_ERRLOG("key size %zu is not equal to key2 size %zu or is 0\n", key->key_size,
-			    key->key2_size);
-		return -EINVAL;
-	}
-
 	key_data = calloc(1, sizeof(*key_data));
 	if (!key_data) {
 		return -ENOMEM;
@@ -731,9 +652,6 @@ sw_accel_create_aes_xts(struct spdk_accel_crypto_key *key)
 static int
 sw_accel_crypto_key_init(struct spdk_accel_crypto_key *key)
 {
-	if (!key || !key->param.cipher) {
-		return -EINVAL;
-	}
 	if (strcmp(key->param.cipher, ACCEL_AES_XTS) == 0) {
 		return sw_accel_create_aes_xts(key);
 	} else {
@@ -750,6 +668,12 @@ sw_accel_crypto_key_deinit(struct spdk_accel_crypto_key *key)
 	}
 
 	free(key->priv);
+}
+
+static bool
+sw_accel_crypto_supports_tweak_mode(enum spdk_accel_crypto_tweak_mode tweak_mode)
+{
+	return tweak_mode == SPDK_ACCEL_CRYPTO_TWEAK_MODE_SIMPLE_LBA;
 }
 
 SPDK_ACCEL_MODULE_REGISTER(sw, &g_sw_module)

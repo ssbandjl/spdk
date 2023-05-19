@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2017 Intel Corporation.
  *   All rights reserved.
- *   Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #include "spdk/stdinc.h"
@@ -593,6 +593,15 @@ spdk_fio_setup(struct thread_data *td)
 	return ctx.ret;
 }
 
+static int
+_spdk_fio_add_file(void *ctx, struct spdk_bdev *bdev)
+{
+	struct thread_data *td = ctx;
+
+	add_file(td, spdk_bdev_get_name(bdev), 0, 1);
+	return 0;
+}
+
 static void
 spdk_fio_setup_oat(void *_ctx)
 {
@@ -602,18 +611,18 @@ spdk_fio_setup_oat(void *_ctx)
 	struct fio_file *f;
 
 	if (td->o.nr_files == 1 && strcmp(td->files[0]->file_name, "*") == 0) {
-		struct spdk_bdev *bdev;
-
 		/* add all available bdevs as fio targets */
-		for (bdev = spdk_bdev_first_leaf(); bdev; bdev = spdk_bdev_next_leaf(bdev)) {
-			add_file(td, spdk_bdev_get_name(bdev), 0, 1);
-		}
+		spdk_for_each_bdev_leaf(td, _spdk_fio_add_file);
 	}
 
 	for_each_file(td, f, i) {
 		struct spdk_bdev *bdev;
 
 		if (strcmp(f->file_name, "*") == 0) {
+			/* Explicitly set file size to 0 here to make sure fio doesn't try to
+			 * actually send I/O to this "*" file.
+			 */
+			f->real_file_size = 0;
 			continue;
 		}
 
@@ -1431,7 +1440,7 @@ static struct fio_option options[] = {
 struct ioengine_ops ioengine = {
 	.name			= "spdk_bdev",
 	.version		= FIO_IOOPS_VERSION,
-	.flags			= FIO_RAWIO | FIO_NOEXTEND | FIO_NODISKUTIL | FIO_MEMALIGN,
+	.flags			= FIO_RAWIO | FIO_NOEXTEND | FIO_NODISKUTIL | FIO_MEMALIGN | FIO_DISKLESSIO,
 	.setup			= spdk_fio_setup,
 	.init			= spdk_fio_init,
 	/* .prep		= unused, */

@@ -15,7 +15,7 @@ function get_spdk_abi() {
 	else
 		# In case that someone run test manually and did not set existing
 		# spdk-abi directory via SPDK_ABI_DIR
-		echo "spdk-abi has not been found at $SPDK_ABI_DIR, cloning"
+		echo "spdk-abi has not been found${SPDK_ABI_DIR:+ at $SPDK_ABI_DIR}, cloning"
 		git clone $git_repo_abi "$dest"
 	fi
 }
@@ -50,10 +50,10 @@ function check_header_filenames() {
 
 	xtrace_disable
 
-	include_headers=$(git ls-files -- include/spdk include/spdk_internal | xargs -n 1 basename)
+	include_headers=$(git ls-files -- $rootdir/include/spdk $rootdir/include/spdk_internal | xargs -n 1 basename)
 	dups=
 	for file in $include_headers; do
-		if [[ $(git ls-files "lib/**/$file" "module/**/$file" --error-unmatch 2> /dev/null) ]]; then
+		if [[ $(git ls-files "$rootdir/lib/**/$file" "$rootdir/module/**/$file" --error-unmatch 2> /dev/null) ]]; then
 			dups+=" $file"
 			dups_found=1
 		fi
@@ -184,8 +184,10 @@ EOF
 			fi
 
 			if [[ $so_name_changed == yes ]]; then
-				# After 22.01 LTS all SO major versions were intentionally increased. Disable this check until SPDK 22.05 release.
-				found_abi_change=true
+				# After 23.01 LTS all SO major versions were intentionally increased. This check can be removed after SPDK 23.05 release.
+				if [[ "$release" == "v23.01.x" ]]; then
+					found_abi_change=true
+				fi
 				if ! $found_abi_change; then
 					echo "SO name for $so_file changed without a change to abi. please revert that change."
 					touch $fail_file
@@ -303,11 +305,11 @@ if [ "$SPDK_TEST_OCF" -eq 1 ]; then
 	config_params="$config_params --with-ocf=$rootdir/ocf.a"
 fi
 
-if [[ -f $rootdir/mk/spdk.common.mk ]]; then
+if [[ -f $rootdir/mk/config.mk ]]; then
 	$MAKE $MAKEFLAGS clean
 fi
 
-./configure $config_params --with-shared
+$rootdir/configure $config_params --with-shared
 # By setting SPDK_NO_LIB_DEPS=1, we ensure that we won't create any link dependencies.
 # Then we can be sure we get a valid accounting of the symbol dependencies we have.
 SPDK_NO_LIB_DEPS=1 $MAKE $MAKEFLAGS

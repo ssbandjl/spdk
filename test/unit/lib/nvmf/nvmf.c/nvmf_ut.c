@@ -155,16 +155,20 @@ test_nvmf_tgt_create_poll_group(void)
 	MOCK_SET(spdk_bdev_get_io_channel, &ch);
 
 	tgt.max_subsystems = 1;
-	tgt.subsystems = calloc(tgt.max_subsystems, sizeof(struct spdk_nvmf_subsystem *));
-	SPDK_CU_ASSERT_FATAL(tgt.subsystems != NULL);
+	RB_INIT(&tgt.subsystems);
 
-	tgt.subsystems[0] = &subsystem;
-	tgt.subsystems[0]->id = 0;
-	tgt.subsystems[0]->max_nsid = 1;
-	tgt.subsystems[0]->ns = calloc(1, sizeof(struct spdk_nvmf_ns *));
-	SPDK_CU_ASSERT_FATAL(tgt.subsystems[0]->ns != NULL);
+	/* Make sure subsystem has enough in subnqn so it can be
+	 * inserted into RB-tree.
+	 */
+	snprintf(subsystem.subnqn, sizeof(subsystem.subnqn), "abc");
+	RB_INSERT(subsystem_tree, &tgt.subsystems, &subsystem);
+	subsystem.id = 0;
+	subsystem.max_nsid = 1;
+	subsystem.ns = calloc(1, sizeof(struct spdk_nvmf_ns *));
+	SPDK_CU_ASSERT_FATAL(subsystem.ns != NULL);
+	MOCK_SET(spdk_nvmf_subsystem_get_first, &subsystem);
 
-	tgt.subsystems[0]->ns[0] = &ns;
+	subsystem.ns[0] = &ns;
 	ns.crkey = 0xaa;
 	ns.rtype = 0xbb;
 	TAILQ_INIT(&ns.registrants);
@@ -174,6 +178,7 @@ test_nvmf_tgt_create_poll_group(void)
 
 	TAILQ_INIT(&tgt.transports);
 	TAILQ_INIT(&tgt.poll_groups);
+	tgt.num_poll_groups = 0;
 	pthread_mutex_init(&tgt.mutex, NULL);
 	transport.tgt = &tgt;
 	TAILQ_INSERT_TAIL(&tgt.transports, &transport, link);
@@ -191,13 +196,15 @@ test_nvmf_tgt_create_poll_group(void)
 	CU_ASSERT(group.sgroups[0].ns_info[0].crkey == 0xaa);
 	CU_ASSERT(group.sgroups[0].ns_info[0].rtype == 0xbb);
 	CU_ASSERT(TAILQ_FIRST(&tgt.poll_groups) == &group);
+	CU_ASSERT(tgt.num_poll_groups == 1);
 	CU_ASSERT(group.thread == thread);
 	CU_ASSERT(group.poller != NULL);
 
 	nvmf_tgt_destroy_poll_group((void *)&tgt, (void *)&group);
 	CU_ASSERT(TAILQ_EMPTY(&tgt.poll_groups));
-	free(tgt.subsystems[0]->ns);
-	free(tgt.subsystems);
+	CU_ASSERT(tgt.num_poll_groups == 0);
+	free(subsystem.ns);
+	MOCK_CLEAR(spdk_nvmf_subsystem_get_first);
 
 	spdk_thread_exit(thread);
 	while (!spdk_thread_is_exited(thread)) {

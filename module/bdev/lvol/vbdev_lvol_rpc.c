@@ -1,6 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2017 Intel Corporation.
  *   All rights reserved.
+ *   Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #include "spdk/rpc.h"
@@ -124,7 +125,7 @@ rpc_bdev_lvol_create_lvstore(struct spdk_jsonrpc_request *request,
 	rc = vbdev_lvs_create(req.bdev_name, req.lvs_name, req.cluster_sz, clear_method,
 			      req.num_md_pages_per_cluster_ratio, rpc_lvol_store_construct_cb, request);
 	if (rc < 0) {
-		spdk_jsonrpc_send_error_response(request, -rc, spdk_strerror(rc));
+		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
 		goto cleanup;
 	}
 	free_rpc_bdev_lvol_create_lvstore(&req);
@@ -269,6 +270,7 @@ struct rpc_bdev_lvol_create {
 	char *lvs_name;
 	char *lvol_name;
 	uint64_t size;
+	uint64_t size_in_mib;
 	bool thin_provision;
 	char *clear_method;
 };
@@ -286,7 +288,8 @@ static const struct spdk_json_object_decoder rpc_bdev_lvol_create_decoders[] = {
 	{"uuid", offsetof(struct rpc_bdev_lvol_create, uuid), spdk_json_decode_string, true},
 	{"lvs_name", offsetof(struct rpc_bdev_lvol_create, lvs_name), spdk_json_decode_string, true},
 	{"lvol_name", offsetof(struct rpc_bdev_lvol_create, lvol_name), spdk_json_decode_string},
-	{"size", offsetof(struct rpc_bdev_lvol_create, size), spdk_json_decode_uint64},
+	{"size", offsetof(struct rpc_bdev_lvol_create, size), spdk_json_decode_uint64, true},
+	{"size_in_mib", offsetof(struct rpc_bdev_lvol_create, size_in_mib), spdk_json_decode_uint64, true},
 	{"thin_provision", offsetof(struct rpc_bdev_lvol_create, thin_provision), spdk_json_decode_bool, true},
 	{"clear_method", offsetof(struct rpc_bdev_lvol_create, clear_method), spdk_json_decode_string, true},
 };
@@ -311,6 +314,10 @@ invalid:
 					 spdk_strerror(-lvolerrno));
 }
 
+SPDK_LOG_DEPRECATION_REGISTER(vbdev_lvol_rpc_req_size,
+			      "rpc_bdev_lvol_create/resize req.size",
+			      "v23.09", 0);
+
 static void
 rpc_bdev_lvol_create(struct spdk_jsonrpc_request *request,
 		     const struct spdk_json_val *params)
@@ -319,6 +326,7 @@ rpc_bdev_lvol_create(struct spdk_jsonrpc_request *request,
 	enum lvol_clear_method clear_method;
 	int rc = 0;
 	struct spdk_lvol_store *lvs = NULL;
+	uint64_t size = 0;
 
 	SPDK_INFOLOG(lvol_rpc, "Creating blob\n");
 
@@ -329,6 +337,18 @@ rpc_bdev_lvol_create(struct spdk_jsonrpc_request *request,
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
 						 "spdk_json_decode_object failed");
 		goto cleanup;
+	}
+
+	if (req.size > 0 && req.size_in_mib > 0) {
+		SPDK_LOG_DEPRECATED(vbdev_lvol_rpc_req_size);
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "size is deprecated. Specify only size_in_mib instead.");
+		goto cleanup;
+	} else if (req.size_in_mib > 0) {
+		size = req.size_in_mib * 1024 * 1024;
+	} else {
+		SPDK_LOG_DEPRECATED(vbdev_lvol_rpc_req_size);
+		size = req.size;
 	}
 
 	rc = vbdev_get_lvol_store_by_uuid_xor_name(req.uuid, req.lvs_name, &lvs);
@@ -352,7 +372,7 @@ rpc_bdev_lvol_create(struct spdk_jsonrpc_request *request,
 		clear_method = LVOL_CLEAR_WITH_DEFAULT;
 	}
 
-	rc = vbdev_lvol_create(lvs, req.lvol_name, req.size, req.thin_provision,
+	rc = vbdev_lvol_create(lvs, req.lvol_name, size, req.thin_provision,
 			       clear_method, rpc_bdev_lvol_create_cb, request);
 	if (rc < 0) {
 		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
@@ -520,6 +540,89 @@ cleanup:
 }
 
 SPDK_RPC_REGISTER("bdev_lvol_clone", rpc_bdev_lvol_clone, SPDK_RPC_RUNTIME)
+
+struct rpc_bdev_lvol_clone_bdev {
+	/* name or UUID. Whichever is used, the UUID will be stored in the lvol's metadata. */
+	char *bdev_name;
+	char *lvs_name;
+	char *clone_name;
+};
+
+static void
+free_rpc_bdev_lvol_clone_bdev(struct rpc_bdev_lvol_clone_bdev *req)
+{
+	free(req->bdev_name);
+	free(req->lvs_name);
+	free(req->clone_name);
+}
+
+static const struct spdk_json_object_decoder rpc_bdev_lvol_clone_bdev_decoders[] = {
+	{
+		"bdev", offsetof(struct rpc_bdev_lvol_clone_bdev, bdev_name),
+		spdk_json_decode_string, false
+	},
+	{
+		"lvs_name", offsetof(struct rpc_bdev_lvol_clone_bdev, lvs_name),
+		spdk_json_decode_string, false
+	},
+	{
+		"clone_name", offsetof(struct rpc_bdev_lvol_clone_bdev, clone_name),
+		spdk_json_decode_string, false
+	},
+};
+
+static void
+rpc_bdev_lvol_clone_bdev(struct spdk_jsonrpc_request *request, const struct spdk_json_val *params)
+{
+	struct rpc_bdev_lvol_clone_bdev req = {};
+	struct spdk_bdev *bdev;
+	struct spdk_lvol_store *lvs = NULL;
+	struct spdk_lvol *lvol;
+	int rc;
+
+	SPDK_INFOLOG(lvol_rpc, "Cloning bdev\n");
+
+	if (spdk_json_decode_object(params, rpc_bdev_lvol_clone_bdev_decoders,
+				    SPDK_COUNTOF(rpc_bdev_lvol_clone_bdev_decoders), &req)) {
+		SPDK_INFOLOG(lvol_rpc, "spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "spdk_json_decode_object failed");
+		goto cleanup;
+	}
+
+	rc = vbdev_get_lvol_store_by_uuid_xor_name(NULL, req.lvs_name, &lvs);
+	if (rc != 0) {
+		SPDK_INFOLOG(lvol_rpc, "lvs_name '%s' not found\n", req.lvs_name);
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "lvs does not exist");
+		goto cleanup;
+	}
+
+	bdev = spdk_bdev_get_by_name(req.bdev_name);
+	if (bdev == NULL) {
+		SPDK_INFOLOG(lvol_rpc, "bdev '%s' does not exist\n", req.bdev_name);
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "bdev does not exist");
+		goto cleanup;
+	}
+
+	lvol = vbdev_lvol_get_from_bdev(bdev);
+	if (lvol != NULL && lvol->lvol_store == lvs) {
+		SPDK_INFOLOG(lvol_rpc, "bdev '%s' is an lvol in lvstore '%s\n", req.bdev_name,
+			     req.lvs_name);
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "bdev is an lvol in same lvs as clone; "
+						 "use bdev_lvol_clone instead");
+		goto cleanup;
+	}
+
+	vbdev_lvol_create_bdev_clone(req.bdev_name, lvs, req.clone_name,
+				     rpc_bdev_lvol_clone_cb, request);
+cleanup:
+	free_rpc_bdev_lvol_clone_bdev(&req);
+}
+
+SPDK_RPC_REGISTER("bdev_lvol_clone_bdev", rpc_bdev_lvol_clone_bdev, SPDK_RPC_RUNTIME)
 
 struct rpc_bdev_lvol_rename {
 	char *old_name;
@@ -712,6 +815,7 @@ SPDK_RPC_REGISTER("bdev_lvol_decouple_parent", rpc_bdev_lvol_decouple_parent, SP
 struct rpc_bdev_lvol_resize {
 	char *name;
 	uint64_t size;
+	uint64_t size_in_mib;
 };
 
 static void
@@ -722,7 +826,8 @@ free_rpc_bdev_lvol_resize(struct rpc_bdev_lvol_resize *req)
 
 static const struct spdk_json_object_decoder rpc_bdev_lvol_resize_decoders[] = {
 	{"name", offsetof(struct rpc_bdev_lvol_resize, name), spdk_json_decode_string},
-	{"size", offsetof(struct rpc_bdev_lvol_resize, size), spdk_json_decode_uint64},
+	{"size", offsetof(struct rpc_bdev_lvol_resize, size), spdk_json_decode_uint64, true},
+	{"size_in_mib", offsetof(struct rpc_bdev_lvol_resize, size_in_mib), spdk_json_decode_uint64, true},
 };
 
 static void
@@ -749,6 +854,7 @@ rpc_bdev_lvol_resize(struct spdk_jsonrpc_request *request,
 	struct rpc_bdev_lvol_resize req = {};
 	struct spdk_bdev *bdev;
 	struct spdk_lvol *lvol;
+	uint64_t size = 0;
 
 	SPDK_INFOLOG(lvol_rpc, "Resizing lvol\n");
 
@@ -759,6 +865,18 @@ rpc_bdev_lvol_resize(struct spdk_jsonrpc_request *request,
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
 						 "spdk_json_decode_object failed");
 		goto cleanup;
+	}
+
+	if (req.size > 0 && req.size_in_mib > 0) {
+		SPDK_LOG_DEPRECATED(vbdev_lvol_rpc_req_size);
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "size is deprecated. Specify only size_in_mib instead.");
+		goto cleanup;
+	} else if (req.size_in_mib > 0) {
+		size = req.size_in_mib * 1024 * 1024;
+	} else {
+		SPDK_LOG_DEPRECATED(vbdev_lvol_rpc_req_size);
+		size = req.size;
 	}
 
 	bdev = spdk_bdev_get_by_name(req.name);
@@ -774,7 +892,8 @@ rpc_bdev_lvol_resize(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	vbdev_lvol_resize(lvol, req.size, rpc_bdev_lvol_resize_cb, request);
+
+	vbdev_lvol_resize(lvol, size, rpc_bdev_lvol_resize_cb, request);
 
 cleanup:
 	free_rpc_bdev_lvol_resize(&req);
@@ -897,6 +1016,8 @@ rpc_bdev_lvol_delete(struct spdk_jsonrpc_request *request,
 	struct rpc_bdev_lvol_delete req = {};
 	struct spdk_bdev *bdev;
 	struct spdk_lvol *lvol;
+	struct spdk_uuid uuid;
+	char *lvs_name, *lvol_name;
 
 	if (spdk_json_decode_object(params, rpc_bdev_lvol_delete_decoders,
 				    SPDK_COUNTOF(rpc_bdev_lvol_delete_decoders),
@@ -907,19 +1028,40 @@ rpc_bdev_lvol_delete(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
+	/* lvol is not degraded, get lvol via bdev name or alias */
 	bdev = spdk_bdev_get_by_name(req.name);
-	if (bdev == NULL) {
-		SPDK_ERRLOG("no bdev for provided name %s\n", req.name);
-		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
-		goto cleanup;
+	if (bdev != NULL) {
+		lvol = vbdev_lvol_get_from_bdev(bdev);
+		if (lvol != NULL) {
+			goto done;
+		}
 	}
 
-	lvol = vbdev_lvol_get_from_bdev(bdev);
-	if (lvol == NULL) {
-		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
-		goto cleanup;
+	/* lvol is degraded, get lvol via UUID */
+	if (spdk_uuid_parse(&uuid, req.name) == 0) {
+		lvol = spdk_lvol_get_by_uuid(&uuid);
+		if (lvol != NULL) {
+			goto done;
+		}
 	}
 
+	/* lvol is degraded, get lvol via lvs_name/lvol_name */
+	lvol_name = strchr(req.name, '/');
+	if (lvol_name != NULL) {
+		*lvol_name = '\0';
+		lvol_name++;
+		lvs_name = req.name;
+		lvol = spdk_lvol_get_by_names(lvs_name, lvol_name);
+		if (lvol != NULL) {
+			goto done;
+		}
+	}
+
+	/* Could not find lvol, degraded or not. */
+	spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+	goto cleanup;
+
+done:
 	vbdev_lvol_destroy(lvol, rpc_bdev_lvol_delete_cb, request);
 
 cleanup:
@@ -1029,6 +1171,113 @@ cleanup:
 
 SPDK_RPC_REGISTER("bdev_lvol_get_lvstores", rpc_bdev_lvol_get_lvstores, SPDK_RPC_RUNTIME)
 SPDK_RPC_REGISTER_ALIAS_DEPRECATED(bdev_lvol_get_lvstores, get_lvol_stores)
+
+struct rpc_bdev_lvol_get_lvols {
+	char *lvs_uuid;
+	char *lvs_name;
+};
+
+static void
+free_rpc_bdev_lvol_get_lvols(struct rpc_bdev_lvol_get_lvols *req)
+{
+	free(req->lvs_uuid);
+	free(req->lvs_name);
+}
+
+static const struct spdk_json_object_decoder rpc_bdev_lvol_get_lvols_decoders[] = {
+	{"lvs_uuid", offsetof(struct rpc_bdev_lvol_get_lvols, lvs_uuid), spdk_json_decode_string, true},
+	{"lvs_name", offsetof(struct rpc_bdev_lvol_get_lvols, lvs_name), spdk_json_decode_string, true},
+};
+
+static void
+rpc_dump_lvol(struct spdk_json_write_ctx *w, struct spdk_lvol *lvol)
+{
+	struct spdk_lvol_store *lvs = lvol->lvol_store;
+	char uuid[SPDK_UUID_STRING_LEN];
+
+	spdk_json_write_object_begin(w);
+
+	spdk_json_write_named_string_fmt(w, "alias", "%s/%s", lvs->name, lvol->name);
+	spdk_json_write_named_string(w, "uuid", lvol->uuid_str);
+	spdk_json_write_named_string(w, "name", lvol->name);
+	spdk_json_write_named_bool(w, "is_thin_provisioned", spdk_blob_is_thin_provisioned(lvol->blob));
+	spdk_json_write_named_bool(w, "is_snapshot", spdk_blob_is_snapshot(lvol->blob));
+	spdk_json_write_named_bool(w, "is_clone", spdk_blob_is_clone(lvol->blob));
+	spdk_json_write_named_bool(w, "is_esnap_clone", spdk_blob_is_esnap_clone(lvol->blob));
+	spdk_json_write_named_bool(w, "is_degraded", spdk_blob_is_degraded(lvol->blob));
+
+	spdk_json_write_named_object_begin(w, "lvs");
+	spdk_json_write_named_string(w, "name", lvs->name);
+	spdk_uuid_fmt_lower(uuid, sizeof(uuid), &lvs->uuid);
+	spdk_json_write_named_string(w, "uuid", uuid);
+	spdk_json_write_object_end(w);
+
+	spdk_json_write_object_end(w);
+}
+
+static void
+rpc_dump_lvols(struct spdk_json_write_ctx *w, struct lvol_store_bdev *lvs_bdev)
+{
+	struct spdk_lvol_store *lvs = lvs_bdev->lvs;
+	struct spdk_lvol *lvol;
+
+	TAILQ_FOREACH(lvol, &lvs->lvols, link) {
+		rpc_dump_lvol(w, lvol);
+	}
+}
+
+static void
+rpc_bdev_lvol_get_lvols(struct spdk_jsonrpc_request *request, const struct spdk_json_val *params)
+{
+	struct rpc_bdev_lvol_get_lvols req = {};
+	struct spdk_json_write_ctx *w;
+	struct lvol_store_bdev *lvs_bdev = NULL;
+	struct spdk_lvol_store *lvs = NULL;
+	int rc;
+
+	if (params != NULL) {
+		if (spdk_json_decode_object(params, rpc_bdev_lvol_get_lvols_decoders,
+					    SPDK_COUNTOF(rpc_bdev_lvol_get_lvols_decoders),
+					    &req)) {
+			SPDK_INFOLOG(lvol_rpc, "spdk_json_decode_object failed\n");
+			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+							 "spdk_json_decode_object failed");
+			goto cleanup;
+		}
+
+		rc = vbdev_get_lvol_store_by_uuid_xor_name(req.lvs_uuid, req.lvs_name, &lvs);
+		if (rc != 0) {
+			spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
+			goto cleanup;
+		}
+
+		lvs_bdev = vbdev_get_lvs_bdev_by_lvs(lvs);
+		if (lvs_bdev == NULL) {
+			spdk_jsonrpc_send_error_response(request, ENODEV, spdk_strerror(-ENODEV));
+			goto cleanup;
+		}
+	}
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_array_begin(w);
+
+	if (lvs_bdev != NULL) {
+		rpc_dump_lvols(w, lvs_bdev);
+	} else {
+		for (lvs_bdev = vbdev_lvol_store_first(); lvs_bdev != NULL;
+		     lvs_bdev = vbdev_lvol_store_next(lvs_bdev)) {
+			rpc_dump_lvols(w, lvs_bdev);
+		}
+	}
+	spdk_json_write_array_end(w);
+
+	spdk_jsonrpc_end_result(request, w);
+
+cleanup:
+	free_rpc_bdev_lvol_get_lvols(&req);
+}
+
+SPDK_RPC_REGISTER("bdev_lvol_get_lvols", rpc_bdev_lvol_get_lvols, SPDK_RPC_RUNTIME)
 
 struct rpc_bdev_lvol_grow_lvstore {
 	char *uuid;

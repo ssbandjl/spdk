@@ -29,6 +29,7 @@ struct fuzz_type {
 static uint8_t					payload[VFIO_USER_MAX_PAYLOAD_SIZE];
 
 static char					*g_ctrlr_path;
+static char					*g_artifact_prefix;
 static int32_t					g_time_in_sec = 10;
 static char					*g_corpus_dir;
 static uint8_t					*g_repro_data;
@@ -37,7 +38,16 @@ static pthread_t				g_fuzz_td;
 static pthread_t				g_reactor_td;
 static struct fuzz_type				*g_fuzzer;
 
+enum IO_POLLER_STATE {
+	IO_POLLER_STATE_IDLE,
+	IO_POLLER_STATE_PROCESSING,
+	IO_POLLER_STATE_TERMINATE_INIT,
+	IO_POLLER_STATE_TERMINATE_WAIT,
+	IO_POLLER_STATE_TERMINATE_DONE,
+};
+
 struct io_thread {
+	enum IO_POLLER_STATE			state;
 	int					lba_num;
 	char					*write_buf;
 	char					*read_buf;
@@ -46,11 +56,10 @@ struct io_thread {
 	struct spdk_thread			*thread;
 	struct spdk_nvme_ctrlr			*io_ctrlr;
 	pthread_t				io_td;
+	pthread_t				term_td;
 	struct spdk_nvme_ns			*io_ns;
 	struct spdk_nvme_qpair			*io_qpair;
 	char					*io_ctrlr_path;
-	bool					io_processing;
-	bool					terminate;
 } g_io_thread;
 
 static int
@@ -98,6 +107,10 @@ TestOneInput(const uint8_t *data, size_t size)
 	char ctrlr_path[PATH_MAX];
 	int ret = 0;
 
+	if (size < g_fuzzer->bytes_per_cmd) {
+		return -1;
+	}
+
 	snprintf(ctrlr_path, sizeof(ctrlr_path), "%s/cntrl", g_ctrlr_path);
 	ret = access(ctrlr_path, F_OK);
 	if (ret != 0) {
@@ -128,16 +141,16 @@ int LLVMFuzzerRunDriver(int *argc, char ***argv, int (*UserCb)(const uint8_t *Da
 static void
 io_terminate(void *ctx)
 {
-	((struct io_thread *)ctx)->terminate = true;
+	((struct io_thread *)ctx)->state = IO_POLLER_STATE_TERMINATE_INIT;
 }
 
 static void
 exit_handler(void)
 {
-	if (g_io_thread.io_ctrlr_path) {
+	if (g_io_thread.io_ctrlr_path && g_io_thread.thread) {
 		spdk_thread_send_msg(g_io_thread.thread, io_terminate, &g_io_thread);
 
-	} else {
+	} else if (spdk_thread_get_app_thread()) {
 		spdk_app_stop(0);
 	}
 
@@ -153,15 +166,19 @@ start_fuzzer(void *ctx)
 		"-detect_leaks=1",
 		NULL,
 		NULL,
+		NULL,
 		NULL
 	};
 	char time_str[128];
+	char prefix[PATH_MAX];
 	char len_str[128];
 	char **argv = _argv;
 	int argc = SPDK_COUNTOF(_argv);
 	uint32_t len = 0;
 
 	spdk_unaffinitize_thread();
+	snprintf(prefix, sizeof(prefix), "-artifact_prefix=%s", g_artifact_prefix);
+	argv[argc - 4] = prefix;
 	len = 10 * g_fuzzer->bytes_per_cmd;
 	snprintf(len_str, sizeof(len_str), "-max_len=%d", len);
 	argv[argc - 3] = len_str;
@@ -170,6 +187,8 @@ start_fuzzer(void *ctx)
 	argv[argc - 1] = g_corpus_dir;
 
 	atexit(exit_handler);
+
+	free(g_artifact_prefix);
 
 	if (g_repro_data) {
 		printf("Running single test based on reproduction data file.\n");
@@ -196,20 +215,23 @@ read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 		spdk_nvme_qpair_print_completion(io->io_qpair, (struct spdk_nvme_cpl *)completion);
 		fprintf(stderr, "I/O read error status: %s\n",
 			spdk_nvme_cpl_get_status_string(&completion->status));
-		io->io_processing = false;
+		io->state = IO_POLLER_STATE_TERMINATE_WAIT;
 		pthread_kill(g_fuzz_td, SIGSEGV);
 		return;
 	}
 
 	if (memcmp(io->read_buf, io->write_buf, io->buf_size)) {
 		fprintf(stderr, "I/O corrupt, value not the same\n");
+		io->state = IO_POLLER_STATE_TERMINATE_WAIT;
 		pthread_kill(g_fuzz_td, SIGSEGV);
+		return;
 	}
 
 	sectors_num =  spdk_nvme_ns_get_num_sectors(io->io_ns);
 	io->lba_num = (io->lba_num + 1) % sectors_num;
-
-	io->io_processing = false;
+	if (io->state != IO_POLLER_STATE_TERMINATE_INIT) {
+		io->state = IO_POLLER_STATE_IDLE;
+	}
 }
 
 static void
@@ -223,7 +245,7 @@ write_complete(void *arg, const struct spdk_nvme_cpl *completion)
 						 (struct spdk_nvme_cpl *)completion);
 		fprintf(stderr, "I/O write error status: %s\n",
 			spdk_nvme_cpl_get_status_string(&completion->status));
-		io->io_processing = false;
+		io->state = IO_POLLER_STATE_TERMINATE_WAIT;
 		pthread_kill(g_fuzz_td, SIGSEGV);
 		return;
 	}
@@ -232,9 +254,24 @@ write_complete(void *arg, const struct spdk_nvme_cpl *completion)
 				   read_complete, io, 0);
 	if (rc != 0) {
 		fprintf(stderr, "starting read I/O failed\n");
-		io->io_processing = false;
+		io->state = IO_POLLER_STATE_TERMINATE_WAIT;
 		pthread_kill(g_fuzz_td, SIGSEGV);
 	}
+}
+
+static void *
+terminate_io_thread(void *ctx)
+{
+	struct io_thread *io = (struct io_thread *)ctx;
+
+	spdk_nvme_ctrlr_free_io_qpair(io->io_qpair);
+	spdk_nvme_detach(io->io_ctrlr);
+	spdk_free(io->write_buf);
+	spdk_free(io->read_buf);
+
+	io->state = IO_POLLER_STATE_TERMINATE_DONE;
+
+	return NULL;
 }
 
 static int
@@ -246,29 +283,41 @@ io_poller(void *ctx)
 	unsigned int seed = 0;
 	int *write_buf = (int *)io->write_buf;
 
-	if (io->io_processing) {
+	switch (io->state) {
+	case IO_POLLER_STATE_IDLE:
+		break;
+	case IO_POLLER_STATE_PROCESSING:
 		spdk_nvme_qpair_process_completions(io->io_qpair, 0);
 		return SPDK_POLLER_BUSY;
-	}
+	case IO_POLLER_STATE_TERMINATE_INIT:
+		if (spdk_nvme_qpair_get_num_outstanding_reqs(io->io_qpair) > 0) {
+			spdk_nvme_qpair_process_completions(io->io_qpair, 0);
+			return SPDK_POLLER_BUSY;
+		}
 
-	if (io->terminate) {
-		/* detaching controller here cause deadlock */
-		spdk_poller_unregister(&(io->run_poller));
-		spdk_free(io->write_buf);
-		spdk_free(io->read_buf);
+		io->state = IO_POLLER_STATE_TERMINATE_WAIT;
+		ret = pthread_create(&io->term_td, NULL, terminate_io_thread, ctx);
+		if (ret != 0) {
+			abort();
+		}
+		return SPDK_POLLER_BUSY;
+	case IO_POLLER_STATE_TERMINATE_WAIT:
+		return SPDK_POLLER_BUSY;
+	case IO_POLLER_STATE_TERMINATE_DONE:
+		spdk_poller_unregister(&io->run_poller);
 		spdk_thread_exit(spdk_get_thread());
-
 		spdk_app_stop(0);
-
 		return SPDK_POLLER_IDLE;
+	default:
+		break;
 	}
+
+	io->state = IO_POLLER_STATE_PROCESSING;
 
 	/* Compiler should optimize the "/ sizeof(int)" into a right shift. */
 	for (i = 0; i < io->buf_size / sizeof(int); i++) {
 		write_buf[i] = rand_r(&seed);
 	}
-
-	io->io_processing = true;
 
 	ret = spdk_nvme_ns_cmd_write(io->io_ns, io->io_qpair,
 				     io->write_buf, io->lba_num, 1,
@@ -354,6 +403,13 @@ init_io(void *ctx)
 	}
 
 	g_io_thread.thread = spdk_thread_create("io_thread", NULL);
+	if (g_io_thread.thread == NULL) {
+		fprintf(stderr, "cannot create io thread\n");
+		spdk_app_stop(-1);
+		pthread_kill(g_fuzz_td, SIGSEGV);
+		return NULL;
+	}
+
 	spdk_thread_send_msg(g_io_thread.thread, start_io_poller, &g_io_thread);
 
 	return NULL;
@@ -362,15 +418,25 @@ init_io(void *ctx)
 static void
 begin_fuzz(void *ctx)
 {
+	int rc = 0;
+
 	g_reactor_td = pthread_self();
 
-	pthread_create(&g_fuzz_td, NULL, start_fuzzer, NULL);
+	rc = pthread_create(&g_fuzz_td, NULL, start_fuzzer, NULL);
+	if (rc != 0) {
+		spdk_app_stop(-1);
+		return;
+	}
 
 	/* posix thread is use to avoid deadlock during spdk_nvme_connect
 	 * vfio-user version negotiation may block when waiting for response
 	 */
 	if (g_io_thread.io_ctrlr_path) {
-		pthread_create(&g_io_thread.io_td, NULL, init_io, NULL);
+		rc = pthread_create(&g_io_thread.io_td, NULL, init_io, NULL);
+		if (rc != 0) {
+			spdk_app_stop(-1);
+			pthread_kill(g_fuzz_td, SIGSEGV);
+		}
 	}
 }
 
@@ -380,6 +446,7 @@ vfio_fuzz_usage(void)
 	fprintf(stderr, " -D                        Path of corpus directory.\n");
 	fprintf(stderr, " -F                        Path for ctrlr that should be fuzzed.\n");
 	fprintf(stderr, " -N                        Name of reproduction data file.\n");
+	fprintf(stderr, " -P                        Provide a prefix to use when saving artifacts.\n");
 	fprintf(stderr, " -t                        Time to run fuzz tests (in seconds). Default: 10\n");
 	fprintf(stderr, " -Y                        Path of addition controller to perform io.\n");
 	fprintf(stderr, " -Z                        Fuzzer to run (0 to %lu)\n", NUM_FUZZERS - 1);
@@ -416,6 +483,13 @@ vfio_fuzz_parse(int ch, char *arg)
 		if (g_repro_data == NULL) {
 			fprintf(stderr, "could not load data for file %s\n", optarg);
 			return -1;
+		}
+		break;
+	case 'P':
+		g_artifact_prefix = strdup(optarg);
+		if (!g_artifact_prefix) {
+			fprintf(stderr, "cannot strdup: %s\n", optarg);
+			return -ENOMEM;
 		}
 		break;
 	case 'Y':
@@ -478,7 +552,7 @@ main(int argc, char **argv)
 	opts.name = "vfio_fuzz";
 	opts.shutdown_cb = fuzz_shutdown;
 
-	if ((rc = spdk_app_parse_args(argc, argv, &opts, "D:F:N:t:Y:Z:", NULL, vfio_fuzz_parse,
+	if ((rc = spdk_app_parse_args(argc, argv, &opts, "D:F:N:P:t:Y:Z:", NULL, vfio_fuzz_parse,
 				      vfio_fuzz_usage) != SPDK_APP_PARSE_ARGS_SUCCESS)) {
 		return rc;
 	}

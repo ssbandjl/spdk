@@ -2,6 +2,7 @@
 #  SPDX-License-Identifier: BSD-3-Clause
 #  Copyright (C) 2018 Intel Corporation
 #  All rights reserved.
+#  Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Environment variables:
 #  $valgrind    Specify the valgrind command line, if not
@@ -36,6 +37,7 @@ function unittest_blob() {
 	if [[ -e $testdir/lib/blob/blob.c/blob_ut ]]; then
 		$valgrind $testdir/lib/blob/blob.c/blob_ut
 	fi
+	$valgrind $testdir/lib/blob/blob_bdev.c/blob_bdev_ut
 	$valgrind $testdir/lib/blobfs/tree.c/tree_ut
 	$valgrind $testdir/lib/blobfs/blobfs_async_ut/blobfs_async_ut
 	# blobfs_sync_ut hangs when run under valgrind, so don't use $valgrind
@@ -179,8 +181,10 @@ else
 fi
 if [ "$cov_avail" = "yes" ]; then
 	# set unit test output dir if not specified in env var
-	if [ -z ${UT_COVERAGE+x} ]; then
+	if [[ -z $output_dir ]]; then
 		UT_COVERAGE="ut_coverage"
+	else
+		UT_COVERAGE=$output_dir/ut_coverage
 	fi
 	mkdir -p $UT_COVERAGE
 	export LCOV_OPTS="
@@ -206,6 +210,7 @@ run_test "unittest_include" $valgrind $testdir/include/spdk/histogram_data.h/his
 run_test "unittest_bdev" unittest_bdev
 if grep -q '#define SPDK_CONFIG_CRYPTO 1' $rootdir/include/spdk/config.h; then
 	run_test "unittest_bdev_crypto" $valgrind $testdir/lib/bdev/crypto.c/crypto_ut
+	run_test "unittest_bdev_crypto" $valgrind $testdir/lib/accel/dpdk_cryptodev.c/accel_dpdk_cryptodev_ut
 fi
 
 if grep -q '#define SPDK_CONFIG_VBDEV_COMPRESS 1' $rootdir/include/spdk/config.h; then
@@ -213,8 +218,8 @@ if grep -q '#define SPDK_CONFIG_VBDEV_COMPRESS 1' $rootdir/include/spdk/config.h
 	run_test "unittest_lib_reduce" $valgrind $testdir/lib/reduce/reduce.c/reduce_ut
 fi
 
-if grep -q '#define SPDK_CONFIG_PMDK 1' $rootdir/include/spdk/config.h; then
-	run_test "unittest_bdev_pmem" $valgrind $testdir/lib/bdev/pmem/bdev_pmem_ut
+if grep -q '#define SPDK_CONFIG_DPDK_COMPRESSDEV 1' $rootdir/include/spdk/config.h; then
+	run_test "unittest_dpdk_compressdev" $valgrind $testdir/lib/accel/dpdk_compressdev.c/accel_dpdk_compressdev_ut
 fi
 
 if grep -q '#define SPDK_CONFIG_RAID5F 1' $rootdir/include/spdk/config.h; then
@@ -259,9 +264,18 @@ if grep -q '#define SPDK_CONFIG_RDMA 1' $rootdir/include/spdk/config.h; then
 	run_test "unittest_nvmf_rdma" $valgrind $testdir/lib/nvmf/rdma.c/rdma_ut
 fi
 
+if grep -q '#define SPDK_CONFIG_VFIO_USER 1' $rootdir/include/spdk/config.h; then
+	run_test "unittest_nvmf_vfio_user" $valgrind $testdir/lib/nvmf/vfio_user.c/vfio_user_ut
+fi
+
 run_test "unittest_scsi" unittest_scsi
-run_test "unittest_sock" unittest_sock
+# There are several intermittent sock_ut failures on FreeBSD that need to be debugged.
+# So just disable running it on FreeBSD for now.  See issue #2943.
+if [ $(uname -s) = Linux ]; then
+	run_test "unittest_sock" unittest_sock
+fi
 run_test "unittest_thread" $valgrind $testdir/lib/thread/thread.c/thread_ut
+run_test "unittest_iobuf" $valgrind $testdir/lib/thread/iobuf.c/iobuf_ut
 run_test "unittest_util" unittest_util
 if grep -q '#define SPDK_CONFIG_VHOST 1' $rootdir/include/spdk/config.h; then
 	run_test "unittest_vhost" $valgrind $testdir/lib/vhost/vhost.c/vhost_ut

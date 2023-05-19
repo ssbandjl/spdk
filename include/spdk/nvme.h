@@ -2,6 +2,7 @@
  *   Copyright (C) 2015 Intel Corporation. All rights reserved.
  *   Copyright (c) 2019-2021 Mellanox Technologies LTD. All rights reserved.
  *   Copyright (c) 2021, 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2023 Samsung Electronics Co., Ltd. All rights reserved.
  */
 
 /** \file
@@ -569,6 +570,7 @@ enum spdk_nvme_ctrlr_flags {
 	SPDK_NVME_CTRLR_SGL_REQUIRES_DWORD_ALIGNMENT	= 1 << 4, /**< Dword alignment is required for SGL */
 	SPDK_NVME_CTRLR_ZONE_APPEND_SUPPORTED		= 1 << 5, /**< Zone Append is supported (within Zoned Namespaces) */
 	SPDK_NVME_CTRLR_DIRECTIVES_SUPPORTED		= 1 << 6, /**< The Directives is supported */
+	SPDK_NVME_CTRLR_MPTR_SGL_SUPPORTED		= 1 << 7, /**< MPTR containing SGL descriptor is supported */
 };
 
 /**
@@ -592,8 +594,8 @@ struct spdk_nvme_ns_cmd_ext_io_opts {
 	uint16_t apptag_mask;
 	/** Application tag to use end-to-end protection information. */
 	uint16_t apptag;
-	/* Hole at bytes 44-47. */
-	uint8_t reserved44[4];
+	/** Command dword 13 specific field. */
+	uint32_t cdw13;
 } __attribute__((packed));
 SPDK_STATIC_ASSERT(sizeof(struct spdk_nvme_ns_cmd_ext_io_opts) == 48, "Incorrect size");
 
@@ -1095,18 +1097,6 @@ void spdk_nvme_ctrlr_set_remove_cb(struct spdk_nvme_ctrlr *ctrlr,
 int spdk_nvme_ctrlr_reset(struct spdk_nvme_ctrlr *ctrlr);
 
 /**
- * Inform the driver that the application is preparing to reset the specified NVMe controller.
- * (Deprecated, please use spdk_nvme_ctrlr_disconnect() before freeing I/O qpairs instead.)
- *
- * This function allows the driver to make decisions knowing that a reset is about to happen.
- * For example, the pcie transport in this case could skip sending DELETE_CQ and DELETE_SQ
- * commands to the controller if an io qpair is freed after this function is called.
- *
- * \param ctrlr Opaque handle to NVMe controller.
- */
-void spdk_nvme_ctrlr_prepare_for_reset(struct spdk_nvme_ctrlr *ctrlr);
-
-/**
  * Disconnect the given NVMe controller.
  *
  * This function is used as the first operation of a full reset sequence of the given NVMe
@@ -1601,9 +1591,7 @@ struct spdk_nvme_io_qpair_opts {
 
 	/**
 	 * This flag if set to true enables the creation of submission and completion queue
-	 * asynchronously. This mode is currently supported at PCIe layer and tracks the
-	 * qpair creation with state machine and returns to the user.Default mode is set to
-	 * false to create io qpair synchronously.
+	 * asynchronously. Default mode is set to false to create io qpair synchronously.
 	 */
 	bool async_mode;
 
@@ -1872,6 +1860,16 @@ int32_t spdk_nvme_qpair_process_completions(struct spdk_nvme_qpair *qpair,
  * \return a valid spdk_nvme_qp_failure_reason.
  */
 spdk_nvme_qp_failure_reason spdk_nvme_qpair_get_failure_reason(struct spdk_nvme_qpair *qpair);
+
+/**
+ * Control if DNR is set or not for aborted commands.
+ *
+ * The default value is false.
+ *
+ * \param qpair The qpair to set.
+ * \param dnr Set the DNR bit to 1 if true or 0 if false for aborted commands.
+ */
+void spdk_nvme_qpair_set_abort_dnr(struct spdk_nvme_qpair *qpair, bool dnr);
 
 /**
  * Send the given admin command to the NVMe controller.
@@ -2685,6 +2683,24 @@ int64_t spdk_nvme_poll_group_process_completions(struct spdk_nvme_poll_group *gr
 		uint32_t completions_per_qpair, spdk_nvme_disconnected_qpair_cb disconnected_qpair_cb);
 
 /**
+ * Check if all qpairs in the poll group are connected.
+ *
+ * This function allows the caller to check if all qpairs in a poll group are
+ * connected. This API is generally only suitable during application startup,
+ * to check when a large number of async connections have completed.
+ *
+ * It is useful for applications like benchmarking tools to create
+ * a large number of qpairs, but then ensuring they are all fully connected before
+ * proceeding with I/O.
+ *
+ * \param group The group on which to poll connecting qpairs.
+ *
+ * return 0 if all qpairs are in CONNECTED state, -EIO if any connections failed to connect, -EAGAIN if
+ * any qpairs are still trying to connected.
+ */
+int spdk_nvme_poll_group_all_connected(struct spdk_nvme_poll_group *group);
+
+/**
  * Retrieve the user context for this specific poll group.
  *
  * \param group The poll group from which to retrieve the context.
@@ -2850,6 +2866,18 @@ enum spdk_nvme_pi_type spdk_nvme_ns_get_pi_type(struct spdk_nvme_ns *ns);
  * \return the metadata size of the given namespace in bytes.
  */
 uint32_t spdk_nvme_ns_get_md_size(struct spdk_nvme_ns *ns);
+
+/**
+ * Get the format index of the given namespace.
+ *
+ * This function is thread safe and can be called at any point while the controller
+ * is attached to the SPDK NVMe driver.
+ *
+ * \param nsdata pointer to the NVMe namespace data.
+ *
+ * \return the format index of the given namespace.
+ */
+uint32_t spdk_nvme_ns_get_format_index(const struct spdk_nvme_ns_data *nsdata);
 
 /**
  * Check whether if the namespace can support extended LBA when end-to-end data
@@ -3583,6 +3611,56 @@ int spdk_nvme_ns_cmd_reservation_report(struct spdk_nvme_ns *ns,
 					spdk_nvme_cmd_cb cb_fn, void *cb_arg);
 
 /**
+ * Submit an I/O management receive command to the specified NVMe namespace.
+ *
+ * The command is submitted to a qpair allocated by spdk_nvme_ctrlr_alloc_io_qpair().
+ * The user must ensure that only one thread submits I/O on a given qpair at any
+ * given time.
+ *
+ * \param ns NVMe namespace to submit the I/O mgmt receive request.
+ * \param qpair I/O queue pair to submit the request.
+ * \param payload Virtual address pointer for I/O mgmt receive data.
+ * \param len Length bytes for I/O mgmt receive data structure.
+ * \param mo Management operation to perform.
+ * \param mos Management operation specific field for the mo.
+ * \param cb_fn Callback function to invoke when the I/O is completed.
+ * \param cb_arg Argument to pass to the callback function.
+ *
+ * \return 0 if successfully submitted, negated errnos on the following error conditions:
+ * -ENOMEM: The request cannot be allocated.
+ * -ENXIO: The qpair is failed at the transport level.
+ */
+int spdk_nvme_ns_cmd_io_mgmt_recv(struct spdk_nvme_ns *ns,
+				  struct spdk_nvme_qpair *qpair, void *payload,
+				  uint32_t len, uint8_t mo, uint16_t mos,
+				  spdk_nvme_cmd_cb cb_fn, void *cb_arg);
+
+/**
+ * Submit an I/O management send command to the specified NVMe namespace.
+ *
+ * The command is submitted to a qpair allocated by spdk_nvme_ctrlr_alloc_io_qpair().
+ * The user must ensure that only one thread submits I/O on a given qpair at any
+ * given time.
+ *
+ * \param ns NVMe namespace to submit the I/O mgmt send request.
+ * \param qpair I/O queue pair to submit the request.
+ * \param payload Virtual address pointer for I/O mgmt send data.
+ * \param len Length bytes for I/O mgmt send data structure.
+ * \param mo Management operation to perform.
+ * \param mos Management operation specific field for the mo.
+ * \param cb_fn Callback function to invoke when the I/O is completed.
+ * \param cb_arg Argument to pass to the callback function.
+ *
+ * \return 0 if successfully submitted, negated errnos on the following error conditions:
+ * -ENOMEM: The request cannot be allocated.
+ * -ENXIO: The qpair is failed at the transport level.
+ */
+int spdk_nvme_ns_cmd_io_mgmt_send(struct spdk_nvme_ns *ns,
+				  struct spdk_nvme_qpair *qpair, void *payload,
+				  uint32_t len, uint8_t mo, uint16_t mos,
+				  spdk_nvme_cmd_cb cb_fn, void *cb_arg);
+
+/**
  * Submit a compare I/O to the specified NVMe namespace.
  *
  * The command is submitted to a qpair allocated by spdk_nvme_ctrlr_alloc_io_qpair().
@@ -4077,6 +4155,8 @@ struct spdk_nvme_transport_ops {
 					int array_size);
 
 	int (*ctrlr_ready)(struct spdk_nvme_ctrlr *ctrlr);
+
+	volatile struct spdk_nvme_registers *(*ctrlr_get_registers)(struct spdk_nvme_ctrlr *ctrlr);
 };
 
 /**

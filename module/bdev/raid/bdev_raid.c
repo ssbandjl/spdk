@@ -680,6 +680,10 @@ raid_bdev_get_memory_domains(void *ctx, struct spdk_memory_domain **domains, int
 	uint32_t i;
 	int domains_count = 0, rc;
 
+	if (raid_bdev->module->memory_domains_supported == false) {
+		return 0;
+	}
+
 	/* First loop to get the number of memory domains */
 	for (i = 0; i < raid_bdev->num_base_bdevs; i++) {
 		base_bdev = raid_bdev->base_bdev_info[i].bdev;
@@ -915,7 +919,7 @@ raid_bdev_init(void)
  */
 int
 raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
-		 enum raid_level level, struct raid_bdev **raid_bdev_out)
+		 enum raid_level level, struct raid_bdev **raid_bdev_out, const struct spdk_uuid *uuid)
 {
 	struct raid_bdev *raid_bdev;
 	struct spdk_bdev *raid_bdev_gen;
@@ -1020,6 +1024,10 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 	raid_bdev_gen->module = &g_raid_if;
 	raid_bdev_gen->write_cache = 0;
 
+	if (uuid) {
+		spdk_uuid_copy(&raid_bdev_gen->uuid, uuid);
+	}
+
 	TAILQ_INSERT_TAIL(&g_raid_bdev_list, raid_bdev, global_link);
 
 	*raid_bdev_out = raid_bdev;
@@ -1110,6 +1118,10 @@ raid_bdev_configure(struct raid_bdev *raid_bdev)
 	 * internal use.
 	 */
 	raid_bdev->strip_size = (raid_bdev->strip_size_kb * 1024) / blocklen;
+	if (raid_bdev->strip_size == 0 && raid_bdev->level != RAID1) {
+		SPDK_ERRLOG("Strip size cannot be smaller than the device block size\n");
+		return -EINVAL;
+	}
 	raid_bdev->strip_size_shift = spdk_u32log2(raid_bdev->strip_size);
 	raid_bdev->blocklen_shift = spdk_u32log2(blocklen);
 
