@@ -1,8 +1,17 @@
 spdk
 
-安装依赖:
+编译, 安装依赖, 安装日志: spdk_install_dep_log
+git clone https://github.com/spdk/spdk
+cd spdk
+git submodule update --init
+yum install -y vim git
+
 sudo scripts/pkgdep.sh
 sudo scripts/pkgdep.sh --all
+
+./configure
+make
+
 # 捕获异常
 trap 'set +e; trap - ERR; echo "Error!"; exit 1;' ERR
 
@@ -162,3 +171,75 @@ probe代码详解, 参考文档: https://www.cnblogs.com/vlhn/p/7727016.html
 04 - DPDK的EAL在DPDK架构中所处的位置
 
 
+from xb:
+文档
+向nvme设备提交io: doc/nvme_spec.md
+
+git add xx
+git commit --amend
+git push origin xb
+https://github.com/ssbandjl/spdk/blob/xb/doc/nvme_spec.md
+
+
+
+bdev_malloc_create
+
+examples/blob/hello_world/hello_blob.c
+
+块设备：
+创建daos bdev块设备
+daos cont create --pool=test-pool --label=test-cont --type=POSIX
+rpc.py bdev_daos_create daosdev0 test-pool test-cont 64 4096  # 块大小为4096， 共64块, 256KB
+rpc.py bdev_daos_delete daosdev0
+rpc.py bdev_daos_resize daosdev0 819
+
+rpc_bdev_daos_create
+  create_bdev_daos
+    block_size % 512 512对齐
+    daos->disk.fn_table = &daos_fn_table
+    bdev_get_daos_engine
+      daos_init()
+    bdev_daos_io_channel_create_cb
+      spdk_call_unaffinitized(_bdev_daos_io_channel_create_cb, ch)
+        rte_thread_get_affinity(&orig_cpuset)
+        spdk_unaffinitize_thread() 移除cpu亲和性
+          CPU_ZERO(&new_cpuset)
+        _bdev_daos_io_channel_create_cb
+          bdev_get_daos_engine
+          daos_pool_connect
+          daos_cont_open
+          dfs_mount(ch->pool, ch->cont, O_RDWR, &ch->dfs)
+          dfs_open
+          daos_eq_create
+        rte_thread_set_affinity(&orig_cpuset) 将cpu亲和性设回去
+      ch->poller = SPDK_POLLER_REGISTER(bdev_daos_channel_poll, ch, 0)
+    bdev_daos_io_channel_destroy_cb
+      spdk_poller_unregister
+      daos_eq_destroy
+      dfs_release
+      dfs_umount
+      daos_cont_close
+      daos_pool_disconnect
+      bdev_daos_put_engine
+    spdk_io_device_register(daos, bdev_daos_io_channel_create_cb, bdev_daos_io_channel_destroy_cb
+      thread = spdk_get_thread()
+      dev->create_cb = create_cb = bdev_daos_io_channel_create_cb
+      dev->destroy_cb = destroy_cb
+      tmp = RB_INSERT(io_device_tree, &g_io_devices, dev) 红黑树
+    spdk_bdev_register
+      bdev_register(bdev)
+      bdev_open
+      bdev_examine
+      spdk_bdev_wait_for_examine(bdev_register_finished, desc)
+    *bdev = &(daos->disk)
+
+
+io路径
+hello_world.c
+
+
+docker run -it -d --privileged --cap-add=ALL --name spdk eeb6ee3f44bd
+docker run -it -d --privileged --cap-add=ALL --name spdk -v /root/project/stor/spdk/xb/spdk:/home/xb/project/stor/spdk/xb/spdk centos:centos7.9.2009
+docker start spdk
+docker exec -u root -it spdk bash -c 'cd /home/xb/project/stor/spdk/xb/spdk;exec "${SHELL:-sh}"'
+docker exec -it spdk /bin/bash
