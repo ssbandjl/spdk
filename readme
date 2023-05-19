@@ -251,6 +251,7 @@ git submodule update --init
 ./configure --with-daos
 make -j 16
 
+
 sudo HUGE_EVEN_ALLOC=yes scripts/setup.sh
 sudo ./build/bin/nvmf_tgt -m [21,22,23,24]
 
@@ -268,7 +269,24 @@ for i in $(seq 1 "$NR_DISKS"); do
     sudo scripts/rpc.py nvmf_create_subsystem $subsystem -a -s SPDK0000000000000$i -d SPDK_Virtual_Controller_$i
     sudo scripts/rpc.py nvmf_subsystem
 
+
+daos块设备, https://docs.daos.io/v2.3/user/blockdev/
 test_daos
 cc -o /dev/null -x c -march=native -I/usr/local/include -L/usr/local/lib -I/opt/daos/include -L/opt/daos/lib64 -lgurt -ldaos -ldaos_common -ldfs test_daos_dfs.c
 
 --with-shared
+
+--with-daos=--with-daos=/path/to/daos/install/dir
+
+打开另一个终端进行配置过程。 配置是通过 scripts/rpc.py 脚本完成的，之后可以将其转储到 json 文件中，稍后可以将其传递给 nvmf_tgt。 创建由 DAOS DFS 备份的几个磁盘的最短方法是使用以下脚本（称为 export_disk.sh）
+
+
+sudo nvme connect-all -t tcp -a 172.31.91.61 -s 4420
+$ sudo umount /testfs
+$ sudo mkfs.ext4 -F -O mmp /dev/nvme1n1
+$ sudo e2mmpstatus /dev/nvme1n1
+e2mmpstatus: it is safe to mount '/dev/nvme1n1', MMP is clean
+$ sudo mount /dev/nvme1n1 /testfs
+$ sudo nvme disconnect-all
+
+
