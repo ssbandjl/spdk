@@ -21,6 +21,7 @@ C_SRCS = $(TEST_FILE)
 CFLAGS += -I$(SPDK_ROOT_DIR)/lib
 CFLAGS += -I$(SPDK_ROOT_DIR)/module
 CFLAGS += -I$(SPDK_ROOT_DIR)/test
+CFLAGS += -I/usr/include/openssl11
 CFLAGS += -ffunction-sections
 CFLAGS += -DSPDK_UNIT_TEST=1
 LDFLAGS += -Wl,--gc-sections

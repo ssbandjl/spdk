@@ -5,6 +5,7 @@
 #  Copyright (c) 2022 Dell Inc, or its subsidiaries.
 #
 
+# set -ex
 set -e
 
 trap 'echo -e "\n\nConfiguration failed\n\n" >&2' ERR
@@ -151,6 +152,7 @@ source $rootdir/CONFIG.sh
 set -- "${@//\~/~}"
 
 for i in "$@"; do
+	echo -e "para:$i"
 	case "$i" in
 		--cross-prefix=*)
 			CONFIG[CROSS_PREFIX]="${i#*=}"
