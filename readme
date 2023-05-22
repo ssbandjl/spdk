@@ -720,6 +720,7 @@ rdma.c:2484:create_ib_device:
 # modprobe nvme-rdma
 
 2.discovery
+nvme discover -t rdma -a 175.17.53.73 -s 4420
 # nvme discover -t rdma -a 192.168.80.100 -s 4420
 3.connect
 连接cnode1
@@ -774,4 +775,97 @@ log_set_level
 ./scripts/rpc.py log_get_level               # 显示当前log等级
 ./scripts/rpc.py log_set_print_level "DEBUG"  # 设置当前log打印等级
 ./scripts/rpc.py log_get_print_level         # 显示当前log打印等级
+
+支持的logflag:
+./build/bin/nvmf_tgt -h
+-L, --logflag <flag>    enable log flag (all, accel, accel_ioat, aio, app_config, app_rpc, bdev, bdev_concat, bdev_daos, bdev_ftl, bdev_malloc, bdev_null, bdev_nvme, bdev_raid, bdev_raid0, bdev_raid1, blob, blob_esnap, blob_rw, blobfs, blobfs_bdev, blobfs_bdev_rpc, blobfs_rw, ftl_core, ftl_init, gpt_parse, ioat, json_util, log, log_rpc, lvol, lvol_rpc, nbd, notify_rpc, nvme, nvme_vfio, nvmf, nvmf_tcp, opal, rdma, reactor, rpc, rpc_client, sock, sock_posix, thread, trace, vbdev_delay, vbdev_gpt, vbdev_lvol, vbdev_opal, vbdev_passthru, vbdev_split, vbdev_zone_block, vfio_pci, vfio_user, virtio, virtio_blk, virtio_dev, virtio_pci, virtio_user, virtio_vfio_user, vmd)
+
+ls -alh /sys/class/nvme
+scripts/rpc.py bdev_nvme_attach_controller -b Nvme0 -t PCIe -a 0000:e6:00.0
+
+nvme discover /dev/nvme-fabrics -t rdma -a 192.168.1.110 -s 4420
+lsmod |grep nvme
+lsmod |grep rdma
+modprobe -r nvme_rdma nvme_fabrics
+lsmod |grep mlx
+
+./scripts/rpc.py log_set_level "DEBUG" 
+./scripts/rpc.py log_set_print_level "DEBUG"
+
+scripts/rpc.py nvmf_create_transport -t RDMA
+scripts/rpc.py nvmf_get_transports
+
+scripts/rpc.py bdev_malloc_create -b Malloc0 512 512
+scripts/rpc.py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1 -a -s SPDK00000000000001 -d SPDK_Controller1
+scripts/rpc.py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 Malloc0
+scripts/rpc.py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 -t rdma -a 175.16.53.73 -s 4420
+scripts/rpc.py bdev_nvme_attach_controller -b Nvme0 -t PCIe -a 0000:e6:00.0
+scripts/rpc.py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode2 -a -s SPDK00000000000002 -d SPDK_Controller1
+scripts/rpc.py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode2 Nvme0n1
+scripts/rpc.py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode2 -t rdma -a 175.16.53.73 -s 4420\
+
+scripts/rpc.py bdev_malloc_create -b Malloc0 512 512
+scripts/rpc.py nvmf_create_subsystem nqn.2014-08.org.nvmexpress:uuid:a8dce057-b5a2-492e-8da3-9cf328f401c7 -a -s SPDK00000000000001 -d SPDK_Controller1
+scripts/rpc.py nvmf_subsystem_add_ns nqn.2014-08.org.nvmexpress:uuid:a8dce057-b5a2-492e-8da3-9cf328f401c7 Malloc0
+scripts/rpc.py nvmf_subsystem_add_listener nqn.2014-08.org.nvmexpress:uuid:a8dce057-b5a2-492e-8da3-9cf328f401c7 -t rdma -a 175.16.53.73 -s 4420
+
+scripts/rpc.py bdev_nvme_attach_controller -b Nvme0 -t PCIe -a 0000:e6:00.0
+scripts/rpc.py nvmf_create_subsystem nqn.2014-08.org.nvmexpress:uuid:a8dce057-b5a2-492e-8da3-9cf328f401c7 -a -s SPDK00000000000002 -d SPDK_Controller1
+scripts/rpc.py nvmf_subsystem_add_ns nqn.2014-08.org.nvmexpress:uuid:a8dce057-b5a2-492e-8da3-9cf328f401c7 Nvme0n1
+scripts/rpc.py nvmf_subsystem_add_listener nqn.2014-08.org.nvmexpress:uuid:a8dce057-b5a2-492e-8da3-9cf328f401c7 -t rdma -a 175.16.53.73 -s 4420
+
+
+
+modinfo nvme-rdma
+nvme list-subsys /dev/nvme0n1
+
+
+nvme discover --transport=rdma --traddr=192.168.1.3 --hostnqn=host1-rogue-nqn
+cat /etc/nvme/discovery.conf
+
+
+
+content in test_rdma.conf
+`[Nvme]
+TransportID "trtype:PCIe traddr:0000:02:00.0" Nvme0
+
+[Transport]
+
+
+Type RDMA
+
+[Subsystem1]
+NQN nqn.2016-06.io.spdk:cnode1
+Listen RDMA 192.168.1.110:4420
+AllowAnyHost Yes
+Host nqn.2016-06.io.spdk:init
+SN SPDK00000000000001
+MaxNamespaces 20
+Namespace Nvme0n1 1`
+
+app/nvmf_tgt/nvmf_tgt -m 15 -c test_rdma.conf
+
+modprobe -r nvme_rdma nvme_fabrics
+
+客户都安执行:
+[root@node215 ~]# modinfo nvme-rdma
+filename:       /lib/modules/5.10.38-21.01.el7.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
+license:        GPL v2
+srcversion:     8817A28E0A60AA47E80648C
+depends:        nvme-core,mlx_compat,rdma_cm,ib_core,nvme-fabrics  #看依赖
+
+MLNX_OFED 默认安装什么都不做的虚拟 nvme-rdma 内核模块。
+尝试使用 --with-nvmf 安装它：
+./mlnxofedinstall --with-nvmf
+这应该安装正确的 nvme-rdma 驱动程序。
+您可以检查其他 MLNX_OFED 安装选项：
+./mlnxofedinstall --help
+
+modprobe nvme_fabrics --force-modversion
+
+modprobe -r nvme-rdma nvme-fabrics nvme nvme-core 然后 modprobe nvme-rdma 或者只是重新启动主机以重新加载所有模块
+
+find / -name mlnxofedinstall
+mlnxofedinstall -h
+
 
