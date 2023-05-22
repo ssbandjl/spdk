@@ -767,3 +767,11 @@ class JSONRPCClient(object) -> __init__ -> self.sock = socket.socket(socket.AF_U
 __main__
 args.client = rpc.client.JSONRPCClient
 log_set_level
+
+
+./build/bin/nvmf_tgt --json bdev_nvme.json   # bdev_nvme.json内容请见附件  # 另开一个终端窗口
+./scripts/rpc.py log_set_level "DEBUG"      # 这里最低只能设置"ERROR"
+./scripts/rpc.py log_get_level               # 显示当前log等级
+./scripts/rpc.py log_set_print_level "DEBUG"  # 设置当前log打印等级
+./scripts/rpc.py log_get_print_level         # 显示当前log打印等级
+
