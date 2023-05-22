@@ -868,4 +868,6 @@ modprobe -r nvme-rdma nvme-fabrics nvme nvme-core 然后 modprobe nvme-rdma 或�
 find / -name mlnxofedinstall
 mlnxofedinstall -h
 
+./scripts/rpc.py nvmf_get_stats
 
+modinfo nvmet 和 modinfo nvmet-rdma 的输出——它们的描述中不应有虚拟词, 或dmesg中查看错误
