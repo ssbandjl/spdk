@@ -669,10 +669,101 @@ spdk_app_start(&opts, nvmf_tgt_started, NULL) -> nvmf_tgt_started(void *arg1)
   fflush
 ...
 
+参数说明:
+scripts/rpc.py
+def nvmf_create_transport
+
+使用提升的权限启动 nvmf_tgt 应用程序。 启动目标后，nvmf_create_transport rpc 可用于初始化给定的传输。 下面是一个示例，其中目标启动并配置了两种不同的传输。 RDMA 传输配置有 8192 字节的 I/O 单元大小、最大 I/O 大小 131072 和 8192 字节的封装数据大小。 TCP 传输配置了 16384 字节的 I/O 单元大小，每个控制器最多 8 个 qpairs，以及 8192 字节的封装数据大小
+build/bin/nvmf_tgt
+./scripts/rpc.py nvmf_create_transport -t RDMA -u 8192 -i 131072 -c 8192
+scripts/rpc.py nvmf_create_transport -t TCP -u 16384 -m 8 -c 8192
+
+#define SPDK_DEFAULT_RPC_ADDR "/var/tmp/spdk.sock"
+./scripts/rpc.py nvmf_create_transport -t RDMA -u 8192 -p 4 -c 0
 sudo ./scripts/rpc.py nvmf_create_transport -t TCP -u 2097152 -i 2097152
 nvmf_create_transport -> lib/nvmf/nvmf_rpc.c -> rpc_nvmf_create_transport
+  spdk_nvmf_get_tgt
   spdk_nvmf_transport_opts_init
+  spdk_nvmf_tgt_get_transport
+  spdk_nvmf_transport_create_async nvmf_rpc_create_transport_done
+  nvmf_transport_create
+    nvmf_get_transport_ops
+    spdk_iobuf_get_opts
+    spdk_thread_send_msg(spdk_get_thread(), _nvmf_transport_create_done, ctx) -> msg->fn = fn
 
 export C_INCLUDE_PATH=$C_INCLUDE_PATH:/usr/include/openssl11
 cp /usr/include/openssl11/openssl/kdf.h /usr/include/openssl/
 
+soft rdma, 软件模拟rdma, 
+lsmod |grep rxe
+modprobe nvme_rdma
+./build/bin/nvmf_tgt
+
+./scripts/rpc.py nvmf_create_transport -t RDMA -u 8192
+rdma.c:2484:create_ib_device:
+
+4.通过rpc创建导出bdev
+创建内存测试盘
+# scripts/rpc.py bdev_malloc_create -b Malloc0 512 512
+# scripts/rpc.py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1 -a -s SPDK00000000000001 -d SPDK_Controller1
+# scripts/rpc.py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 Malloc0
+# scripts/rpc.py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 -t rdma -a 192.168.80.100 -s 4420
+
+创建nvme盘
+# scripts/rpc.py bdev_nvme_attach_controller -b Nvme0 -t PCIe -a 0000:01:00.0
+# scripts/rpc.py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode2 -a -s SPDK00000000000002 -d SPDK_Controller1
+# scripts/rpc.py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode2 Nvme0n1
+# scripts/rpc.py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode2 -t rdma -a 192.168.80.100 -s 4420
+
+客户端
+1.load module
+# modprobe nvme-rdma
+
+2.discovery
+# nvme discover -t rdma -a 192.168.80.100 -s 4420
+3.connect
+连接cnode1
+# nvme connect -t rdma -n "nqn.2016-06.io.spdk:cnode1" -a 192.168.80.100 -s 4420
+连接cnode2
+# nvme connect -t rdma -n "nqn.2016-06.io.spdk:cnode2" -a 192.168.80.100 -s 4420
+# lsblk
+4.disconnect
+# nvme disconnect -n "nqn.2016-06.io.spdk:cnode1"
+# nvme disconnect -n "nqn.2016-06.io.spdk:cnode2"
+
+
+nvmf_rdma_create
+lib/nvmf/rdma.c -> create_ib_device
+
+nvmf_main.c:47
+spdk_app_start -> spdk_app_start(struct spdk_app_opts *opts_user
+  app_setup_env
+  spdk_reactors_init
+  spdk_reactors_start
+  _reactor_run
+  spdk_thread_poll -> thread_poll
+  msg_queue_run_batch -> msg->fn(msg->arg)
+  _nvmf_transport_create_done -> ctx->cb_fn -> _ctx->ops->create -> .create = nvmf_rdma_create,
+  nvmf_rdma_create
+    rtransport->event_channel = rdma_create_event_channel()
+    rtransport->data_wr_pool = spdk_mempool_create
+    rdma_get_devices
+    create_ib_device
+      ibv_query_device
+      nvmf_rdma_is_rxe_device
+      TAILQ_INSERT_TAIL(&rtransport->devices, device, link)
+      ibv_alloc_pd
+      spdk_rdma_create_mem_map
+      "Create IB device xxx"
+	  rc = generate_poll_fds(rtransport);
+    nvmf_rdma_accept
+
+./scripts/rpc.py --verbose=DEBUG nvmf_create_transport -t RDMA
+python3 -m pdb scripts/rpc.py nvmf_create_transport -t RDMA
+python/spdk/rpc/nvmf.py -> nvmf_create_transport -> def nvmf_create_transport
+client.call('nvmf_create_transport', params) -> def call(self, method, params={}) -> flush -> self.sock.sendall(reqstr.encode("utf-8"))
+class JSONRPCClient(object) -> __init__ -> self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) -> unix domain socket -> 
+
+__main__
+args.client = rpc.client.JSONRPCClient
+log_set_level

@@ -1,1 +1,1 @@
-./config.sh && make
+./config.sh && make -j32

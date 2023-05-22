@@ -1,0 +1,1 @@
+./scripts/rpc.py nvmf_create_transport -t RDMA -u 8192
