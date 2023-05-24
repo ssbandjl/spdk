@@ -871,3 +871,65 @@ mlnxofedinstall -h
 ./scripts/rpc.py nvmf_get_stats
 
 modinfo nvmet 和 modinfo nvmet-rdma 的输出——它们的描述中不应有虚拟词, 或dmesg中查看错误
+
+
+
+vhost, qemu, io_path
+dpdk/examples/vdpa/main.c
+rte_vhost_driver_start
+vhost_user_start_client
+vhost_user_add_connection
+fdset_add(&vhost_user.fdset, fd, vhost_user_read_cb
+vhost_user_read_cb
+vhost_user_msg_handler
+dev->notify_ops->new_device(dev->vid)
+static const struct rte_vhost_device_ops g_spdk_vhost_ops
+.new_device =  start_device
+start_device(int vid)
+spdk_thread_send_msg(vdev->thread, vhost_user_session_start, vsession) -> vhost_user_session_start(void *arg1)
+backend->start_session(vdev, vsession, NULL)
+static const struct spdk_vhost_user_dev_backend vhost_blk_user_device_backend
+.start_session =  vhost_blk_start -> vhost_blk_start(struct spdk_vhost_dev *vdev 以前 spdk_vhost_dev_backend 持有 vhost_blk 和 vhost_scsi 功能的回调，以及由 vhost_user 后端调用的回调。 此补丁将这些回调分为两个结构：spdk_vhost_dev_backend - 由 vhost_blk 和 vhost_scsi 实现，spdk_vhost_user_dev_backend - 仅由 vhost_user 后端实现，回调特定于该传输的会话管理
+  vdev_worker -> vdev_worker(void *arg)
+
+
+
+参考流程, https://rootw.github.io/2018/05/SPDK-ioanalyze/
+vdev_worker()
+    \-process_vq()
+        |-spdk_vhost_vq_avail_ring_get()
+        \-process_blk_request()
+            |-blk_iovs_setup()
+            \-spdk_bdev_readv()/spdk_bdev_writev()
+                \-spdk_bdev_io_submit()
+                    \-bdev->fn_table->submit_request()
+
+
+DPDK预备知识, 简介: https://mp.weixin.qq.com/s?__biz=MzIyNDU0ODk4OA==&mid=2247483746&idx=1&sn=1913b4bc84e93f3a46738b0e19c045b0&scene=19&key=0af7c27fedbcdd2b966410742eb13bf6af8e65619c30834a90a1a4d74b98613d5f15bc52d6badf7839c6dbc40048b39cffe215b67c97b303edf85fc71c9867828a252095a245ac4ba837a0f826fabdec3e02b2c39f19b287403cd90d50add9309be5cf26e315ca09e30e63112571f8a281fcba8392f8bd85311f155c9eabebf0&ascene=7&uin=NjA2MTUyMDIw&devicetype=Windows+10+x64&version=6309021a&lang=zh_CN&session_us=gh_e0b6b1390d76&countrycode=CN&exportkey=n_ChQIAhIQZMzD%2FYd%2BBaclr%2BU0BgDTphLkAQIE97dBBAEAAAAAABmbMIjFKSIAAAAOpnltbLcz9gKNyK89dVj0xzbpP5qJP91wBjcqFMCWnduSZ%2FOIi1pIvsvTtX2xo2UQhqX9DCSpbWXT%2Fm8jDKEcQVqSW6D7G3Z%2Fshq7agQMW%2FigiULvIsk%2BL2wmfNiTXV3k9G4cZJXjvRldK%2Fwi1EG9YNpvrQ%2FWxMkPTUtrpXmmd%2BxmZmVSjGCS2ZF9Ibe3GFMqN8%2Bv0%2FKCQb9ydCMp9xKnKKFR%2BXQ5af30OpctKZm%2BoBNULjbM3%2FX7cw34jjLylO2s2zWPyZWaVPDsnHgnKQ%3D%3D&acctmode=0&pass_ticket=%2B2fKFckRRXpy%2B4qNFfX6EiGulJ0Kj5fByeaAl97LrJFxsqIODZxD9OJFDdcnOoCGK6L1bcvrzi66DtH5PKX6oQ%3D%3D&wx_header=1&fontgear=2
+
+
+DPDK支持多线程编程，以lcore表示一个CPU。DPDK启动时，会自动检测系统中的CPU信息，并根据用户指定的-c参数（以hex值表示cpu mask信息）运行线程。为了方便线程间的通信和管理，DPDK将这些线程分为一个Master线程和其他Slave线程。Master线程是用户运行程序的主进程，Slave线程用来运行用户自定义的程序。通过这个方式，省去了用户自己创建和管理线程的步骤。下图是SPDK用这个模型跑的一个例子（见examples/perf）
+examples/nvme/perf/perf.c -> main(int argc, char **argv)
+spdk_env_init -> spdk_env_init(const struct spdk_env_opts *opts)
+  rte_eal_init(g_eal_cmdline_argcount, dpdk_args)
+    pthread_create eal_thread_loop
+      rte_eal_trace_thread_lcore_ready
+    rte_eal_cpu_init
+    rte_eal_remote_launch
+      eal_thread_wake_worker
+
+PMD，即Poll Mode Driver, 
+要编写PCIe驱动，必须能够访问BAR空间。对于用户态的程序来说，是不能直接访问BAR空间的，DPDK使用UIO来达到这个目的。UIO还有一个特点就是让用户态的驱动也可以使用中断（Linux系统中，中断只能通过内核线程处理，UIO也只是通过内核函数设置一个计数器，当用户态的程序读这个计数器的时候就知道有没有新的中断了，DPDK据此特别启用了一个线程来管理中断）。用户可以通过uio_pci_generic申明一个PCIe设备作为UIO注册到PCI Bus上。uio_pci_generic默认编译到内核中，跟前一期讲的内核NVMe驱动是同等类型（pci_driver），可以通过modprobe加载。但是uio_pci_generic没有匹配特别的device，需要用户手动配置。SPDK有一个setup脚本，这个脚本会把设备与内核的NVMe驱动unbind，再绑定到uio_pci_generic上。
+当把nvme设备bind到uio_pci_generic上后，PCI bus就会去调用它的probe函数。uio_pci_generic的probe函数如下，注册了UIO设备
+bind到uio_pci_generic的设备会出现在/dev目录下，此后，就可以通过/dev/uio#操作设备了, 
+查看驱动: ls -alh /sys/bus/pci/drivers/uio_pci_generic/
+查看uio设备: ls -alh /dev/uio0
+
+rte_eal_pci_probe
+
+下面从这两个方面分析SPDK NVMe驱动。为了方面理解，我们以SPDK的一个例子spdk/examples/nvme/identify来说明。这个例子能够打印绑定UIO的NVMe设备信息。如下图，在Main()函数中，首先调用了rte_eal_init()，然后调用spdk_nvme_probe()，并且传递了probe_cb和attach_cb两个callback函数（由用户指定）。probe_cb中判断这个设备是否加载在UIO上，如果不是就报错。attach_cb则把SPDK定义的controller对象传给print_controller()处理，print_controller提取这个controller的信息打印出来
+examples/nvme/identify/identify.c
+
+spdk, nvme, 接口, 函数, nvme命令
+include/spdk/nvme.h
+
