@@ -660,7 +660,7 @@ nvme-cli,
 https://spdk.io/doc/nvme.html#nvme_cuse
 modprobe cuse, lsmod|grep cuse
 
-export HUGE_EVEN_ALLOC=yes
+export HUGE_EVEN_ALLOC=yes   # 如果设置为“是”，大页面将均匀分布在所有“系统的 NUMA 节点（有效地忽略 HUGENODE 中设置的任何内容）”。 使用内核默认的大页面大小
 sudo ./scripts/setup.sh
 sudo ./build/bin/nvmf_tgt -m [21,22,23,24]
 app/nvmf_tgt/nvmf_main.c -> nvmf_tgt -> main
@@ -674,7 +674,7 @@ scripts/rpc.py
 def nvmf_create_transport
 
 使用提升的权限启动 nvmf_tgt 应用程序。 启动目标后，nvmf_create_transport rpc 可用于初始化给定的传输。 下面是一个示例，其中目标启动并配置了两种不同的传输。 RDMA 传输配置有 8192 字节的 I/O 单元大小、最大 I/O 大小 131072 和 8192 字节的封装数据大小。 TCP 传输配置了 16384 字节的 I/O 单元大小，每个控制器最多 8 个 qpairs，以及 8192 字节的封装数据大小
-build/bin/nvmf_tgt
+gdb build/bin/nvmf_tgt
 ./scripts/rpc.py nvmf_create_transport -t RDMA -u 8192 -i 131072 -c 8192
 scripts/rpc.py nvmf_create_transport -t TCP -u 16384 -m 8 -c 8192
 
