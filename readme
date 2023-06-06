@@ -933,3 +933,53 @@ examples/nvme/identify/identify.c
 spdk, nvme, 接口, 函数, nvme命令
 include/spdk/nvme.h
 
+
+
+(gdb) bt
+#0  spdk_nvmf_tgt_create (opts=0x7fffffffd4d0) at nvmf.c:269
+#1  0x00000000004c45b4 in nvmf_tgt_create_target () at nvmf_tgt.c:311
+#2  0x00000000004c495b in nvmf_tgt_advance_state () at nvmf_tgt.c:418
+#3  0x00000000004c4b34 in nvmf_subsystem_init () at nvmf_tgt.c:492
+#4  0x00000000005915b6 in spdk_subsystem_init_next (rc=0) at subsystem.c:166
+#5  0x0000000000561da2 in bdev_initialize_complete (cb_arg=0x0, rc=0) at bdev.c:18
+#6  0x0000000000567629 in bdev_init_complete (rc=0) at bdev.c:1953
+#7  0x00000000005676a2 in bdev_module_action_complete () at bdev.c:1995
+#8  0x0000000000567b19 in spdk_bdev_initialize (cb_fn=0x561d89 <bdev_initialize_complete>, cb_arg=0x0) at bdev.c:2126
+#9  0x0000000000561db9 in bdev_subsystem_initialize () at bdev.c:24
+#10 0x00000000005915b6 in spdk_subsystem_init_next (rc=0) at subsystem.c:166
+#11 0x000000000057f014 in accel_subsystem_initialize () at accel.c:20
+#12 0x00000000005915b6 in spdk_subsystem_init_next (rc=0) at subsystem.c:166
+#13 0x000000000058fad3 in iobuf_subsystem_initialize () at iobuf.c:57
+#14 0x00000000005915b6 in spdk_subsystem_init_next (rc=0) at subsystem.c:166
+#15 0x000000000058d167 in sock_subsystem_init () at sock.c:13
+#16 0x00000000005915b6 in spdk_subsystem_init_next (rc=0) at subsystem.c:166
+#17 0x0000000000588587 in vmd_subsystem_init () at vmd.c:63
+#18 0x00000000005915b6 in spdk_subsystem_init_next (rc=0) at subsystem.c:166
+#19 0x0000000000555bfb in scheduler_subsystem_init () at scheduler.c:23
+#20 0x00000000005915b6 in spdk_subsystem_init_next (rc=0) at subsystem.c:166
+#21 0x000000000059172c in spdk_subsystem_init (cb_fn=0x5562f1 <app_start_rpc>, cb_arg=0x0) at subsystem.c:199
+#22 0x0000000000556c39 in bootstrap_fn (arg1=0x0) at app.c:498
+#23 0x0000000000598404 in msg_queue_run_batch (thread=0xd10150, max_msgs=8) at thread.c:832
+#24 0x0000000000598d57 in thread_poll (thread=0xd10150, max_msgs=0, now=74054886509296) at thread.c:1054
+#25 0x0000000000599057 in spdk_thread_poll (thread=0xd10150, max_msgs=0, now=74054886509296) at thread.c:1147
+#26 0x000000000055b162 in _reactor_run (reactor=0xd0fd00) at reactor.c:914
+#27 0x000000000055b251 in reactor_run (arg=0xd0fd00) at reactor.c:952
+#28 0x000000000055b6c7 in spdk_reactors_start () at reactor.c:1068
+#29 0x0000000000557b65 in spdk_app_start (opts_user=0x7fffffffdee0, start_fn=0x407755 <nvmf_tgt_started>, arg1=0x0) at app.c:808
+#30 0x000000000040785d in main (argc=1, argv=0x7fffffffe0a8) at nvmf_main.c:47
+
+
+nvmf_add_discovery_subsystem 创建 discovery NVM subsystem， 这个subsystem一般设置为给所有的host可见。其主要用于实现相应的log discovery命令，告诉host端有多少NVM subsystem在线。当然这个实际会存储在g_spdk_nvmf_tgt中的变量discovery_log_page中 (如表1所示)，并且会做相应的更新
+  spdk_nvmf_subsystem_create
+  spdk_nvmf_subsystem_set_allow_any_host
+
+
+nvmf_rdma_connect
+  spdk_nvmf_tgt_new_qpair
+
+nvme_rdma_poll_group
+
+
+spdk_nvmf_request_exec_fabrics
+spdk_nvmf_request_exec
+  nvmf_ctrlr_process_fabrics_cmd
