@@ -1,3 +1,6 @@
+spdk_tgt源码分析, SPDK NVMe-oF target代码分析（转载+改编）: https://www.cnblogs.com/whl320124/articles/10450250.html
+initiator_spdk_tgt, spdk-nvmf指南: https://blog.csdn.net/zxpoiu/article/details/116003444
+
 spdk
 
 shell巧用数组:
@@ -235,7 +238,10 @@ DISK_UUID="${UUID:-`uuidgen`}"
 NR_DISKS="${1:-1}"
 BIND_IP="${TARGET_IP:-172.31.91.61}"
 
-sudo ./scripts/rpc.py nvmf_create_transport -t TCP -u 2097152 -i 2097152
+
+创建传输层:
+参数: scripts/rpc.py -> def nvmf_create_transport(args) 
+sudo ./scripts/rpc.py nvmf_create_transport -t TCP -u 2097152 -i 2097152  # -u: IO单元字节数, -i: 最大IO字节
 
 for i in $(seq 1 "$NR_DISKS"); do
     sudo ./scripts/rpc.py bdev_daos_create disk$i ${POOL_UUID} ${CONT_UUID} 1048576 4096 --uuid ${DISK_UUID}
@@ -681,15 +687,27 @@ scripts/rpc.py nvmf_create_transport -t TCP -u 16384 -m 8 -c 8192
 #define SPDK_DEFAULT_RPC_ADDR "/var/tmp/spdk.sock"
 ./scripts/rpc.py nvmf_create_transport -t RDMA -u 8192 -p 4 -c 0
 sudo ./scripts/rpc.py nvmf_create_transport -t TCP -u 2097152 -i 2097152
-nvmf_create_transport -> lib/nvmf/nvmf_rpc.c -> rpc_nvmf_create_transport
-  spdk_nvmf_get_tgt
+nvmf_create_transport -> lib/nvmf/nvmf_rpc.c -> rpc_nvmf_create_transport(struct spdk_jsonrpc_request *request
+  spdk_nvmf_get_tgt(ctx->tgt_name) -> tgt_name ?
+    TAILQ_FOREACH(tgt, &g_nvmf_tgts, link)
   spdk_nvmf_transport_opts_init
-  spdk_nvmf_tgt_get_transport
-  spdk_nvmf_transport_create_async nvmf_rpc_create_transport_done
-  nvmf_transport_create
     nvmf_get_transport_ops
-    spdk_iobuf_get_opts
-    spdk_thread_send_msg(spdk_get_thread(), _nvmf_transport_create_done, ctx) -> msg->fn = fn
+      TAILQ_FOREACH(ops, &g_spdk_nvmf_transport_ops
+    nvmf_transport_opts_copy
+  spdk_nvmf_tgt_get_transport
+    TAILQ_FOREACH(transport, &tgt->transports
+  spdk_nvmf_transport_create_async nvmf_rpc_create_transport_done
+    nvmf_transport_create
+      nvmf_get_transport_ops
+      nvmf_transport_opts_copy
+      spdk_iobuf_get_opts
+      spdk_min
+      ctx->cb_fn = cb_fn -> 设置完成回调 -> nvmf_rpc_create_transport_done
+      spdk_thread_send_msg(spdk_get_thread(), _nvmf_transport_create_done, ctx) -> msg->fn = fn -> tls_thread
+        msg = spdk_mempool_get(g_spdk_msg_mempool)
+          rte_mempool_get -> 从内存池中获取一个对象。 该函数调用多消费者或单消费者版本，具体取决于创建内存池时指定的默认行为（请参阅标志）。 如果启用缓存，则将首先从缓存中检索对象，然后从公共池中检索对象。 请注意，当本地缓存和公共池为空时，即使其他 lcore 的缓存已满，它也会返回 -ENOENT, 放回去: spdk_mempool_put
+          
+      ctx->ops->create_async(&ctx->opts, nvmf_transport_create_async_done, ctx) -> 异步
 
 export C_INCLUDE_PATH=$C_INCLUDE_PATH:/usr/include/openssl11
 cp /usr/include/openssl11/openssl/kdf.h /usr/include/openssl/
