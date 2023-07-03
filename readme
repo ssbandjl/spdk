@@ -239,9 +239,7 @@ NR_DISKS="${1:-1}"
 BIND_IP="${TARGET_IP:-172.31.91.61}"
 
 
-创建传输层:
-参数: scripts/rpc.py -> def nvmf_create_transport(args) 
-sudo ./scripts/rpc.py nvmf_create_transport -t TCP -u 2097152 -i 2097152  # -u: IO单元字节数, -i: 最大IO字节
+
 
 for i in $(seq 1 "$NR_DISKS"); do
     sudo ./scripts/rpc.py bdev_daos_create disk$i ${POOL_UUID} ${CONT_UUID} 1048576 4096 --uuid ${DISK_UUID}
@@ -675,9 +673,10 @@ spdk_app_start(&opts, nvmf_tgt_started, NULL) -> nvmf_tgt_started(void *arg1)
   fflush
 ...
 
-参数说明:
-scripts/rpc.py
-def nvmf_create_transport
+
+创建传输层:
+参数: scripts/rpc.py -> def nvmf_create_transport(args) 
+sudo ./scripts/rpc.py nvmf_create_transport -t TCP -u 2097152 -i 2097152  # -u: IO单元字节数, -i: 最大IO字节
 
 使用提升的权限启动 nvmf_tgt 应用程序。 启动目标后，nvmf_create_transport rpc 可用于初始化给定的传输。 下面是一个示例，其中目标启动并配置了两种不同的传输。 RDMA 传输配置有 8192 字节的 I/O 单元大小、最大 I/O 大小 131072 和 8192 字节的封装数据大小。 TCP 传输配置了 16384 字节的 I/O 单元大小，每个控制器最多 8 个 qpairs，以及 8192 字节的封装数据大小
 gdb build/bin/nvmf_tgt
@@ -706,7 +705,11 @@ nvmf_create_transport -> lib/nvmf/nvmf_rpc.c -> rpc_nvmf_create_transport(struct
       spdk_thread_send_msg(spdk_get_thread(), _nvmf_transport_create_done, ctx) -> msg->fn = fn -> tls_thread
         msg = spdk_mempool_get(g_spdk_msg_mempool)
           rte_mempool_get -> 从内存池中获取一个对象。 该函数调用多消费者或单消费者版本，具体取决于创建内存池时指定的默认行为（请参阅标志）。 如果启用缓存，则将首先从缓存中检索对象，然后从公共池中检索对象。 请注意，当本地缓存和公共池为空时，即使其他 lcore 的缓存已满，它也会返回 -ENOENT, 放回去: spdk_mempool_put
-          
+        spdk_ring_enqueue
+          rte_ring_enqueue_bulk
+            rte_ring_enqueue_bulk_elem
+              
+        thread_send_msg_notification(thread)
       ctx->ops->create_async(&ctx->opts, nvmf_transport_create_async_done, ctx) -> 异步
 
 export C_INCLUDE_PATH=$C_INCLUDE_PATH:/usr/include/openssl11
