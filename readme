@@ -15,10 +15,12 @@ examples/blob/hello_world/hello_blob.c
 块设备：
 创建daos bdev块设备
 daos cont create --pool=test-pool --label=test-cont --type=POSIX
-rpc.py bdev_daos_create daosdev0 test-pool test-cont 64 4096  # 块大小为4096， 共64块, 256KB
+rpc.py bdev_daos_create daosdev0 test-pool test-cont 64 4096  # 块大小为4096, 64块, 总大小256KB
 rpc.py bdev_daos_delete daosdev0
-rpc.py bdev_daos_resize daosdev0 819
+rpc.py bdev_daos_resize daosdev0 8192 #8192 MiB
 
+
+SPDK_RPC_REGISTER("bdev_daos_create", rpc_bdev_daos_create, SPDK_RPC_RUNTIME)
 rpc_bdev_daos_create
   create_bdev_daos
     block_size % 512 512对齐
