@@ -1,5 +1,10 @@
 spdk_tgt源码分析, SPDK NVMe-oF target代码分析（转载+改编）: https://www.cnblogs.com/whl320124/articles/10450250.html
 initiator_spdk_tgt, spdk-nvmf指南: https://blog.csdn.net/zxpoiu/article/details/116003444
+搭建远端存储，深度解读SPDK NVMe-oF target: https://mp.weixin.qq.com/s?__biz=MzI3NDA4ODY4MA==&mid=2653335091&idx=1&sn=81344e9239956c5045cee444073ec24b&chksm=f0cb59b4c7bcd0a21d2179b09a4e242457b7bca877120512cbea0f5ca83bf4ecc8777ce3f43f&scene=21#wechat_redirect
+使用SPDK lib搭建自己的NVMe-oF Target应用: https://blog.csdn.net/weixin_60043341/article/details/126505064
+SPDK线程模型解析: https://blog.csdn.net/weixin_37097605/article/details/101488760
+
+
 
 spdk
 
@@ -757,28 +762,91 @@ nvme discover -t rdma -a 175.17.53.73 -s 4420
 nvmf_rdma_create
 lib/nvmf/rdma.c -> create_ib_device
 
+gdb调试spdk_nvme_tgt
 nvmf_main.c:47
-spdk_app_start -> spdk_app_start(struct spdk_app_opts *opts_user
+spdk_app_opts_init -> opts=0x7fffffffdee0, opts_size=224
+  #define SET_FIELD(field, value) -> 临时定义宏
+  SET_FIELD(enable_coredump, true) -> 设置默认选项
+  ...
+  SET_FIELD(disable_signal_handlers, false)
+gdb -> p opts
+spdk_app_parse_args -> 解析参数
+spdk_app_start(&opts, nvmf_tgt_started, NULL) -> spdk_app_start(struct spdk_app_opts *opts_user -> g_start_fn = start_fn
+  app_copy_opts
+  spdk_log_set_print_level
   app_setup_env
-  spdk_reactors_init
+  calculate_mempool_size
+  spdk_log_open
+  spdk_reactors_init(size_t msg_mempool_size) -> 初始化 reactor, spdk线程模型: https://zhuanlan.zhihu.com/p/560861776
+    g_spdk_event_mempool = spdk_mempool_create(mempool_name
+      rte_mempool_create
+    spdk_env_get_last_core
+      SPDK_ENV_FOREACH_CORE -> 遍历cpu
+    posix_memalign
+    g_core_infos = calloc
+    spdk_thread_lib_init_ext(reactor_thread_op, reactor_thread_op_supported -> g_thread_op_fn -> g_thread_op_supported_fn -> 初始化线程库。 必须在分配任何线程之前调用一次 thread_op_fn 和 thread_op_type_supported_fn 必须同时指定或不指定 -> nvmeof_tgt: https://blog.csdn.net/weixin_60043341/article/details/126505064, 将g_new_thread_fn赋值为reactor_thread_op，从而实现后续以spdk_create_thread创建的逻辑层面的thread都和具体的reactor相关联, 使用SPDK lib搭建自己的NVMe-oF Target应用: https://mp.weixin.qq.com/s/niKa3wnlRuz4LJ47mJBJvQ
+      _thread_lib_init
+        g_spdk_msg_mempool = spdk_mempool_create -> 创建消息池msgpool
+    SPDK_ENV_FOREACH_CORE reactor_construct -> 构造reactor
+      reactor->events = spdk_ring_create
+      if (reactor_interrupt_init(reactor) -> 默认中断模式 -> 中断：在thd和reactor中应用fd_group，每个reactor和每个线程分配一个fd组。 同时，每个线程被视为一个中断源，注册到其相应的反应器中。 reacotr 的egrp函数是唯一等待事件的阻塞点
+        spdk_fd_group_create
+        reactor->resched_fd = eventfd
+        SPDK_FD_GROUP_ADD(reactor->fgrp, reactor->resched_fd, reactor_schedule_thread_event
+          epoll_ctl(epfd
+        SPDK_FD_GROUP_ADD reactor->events_fd event_queue_run_batch
+      spdk_interrupt_mode_is_enabled
+    reactor = spdk_reactor_get(current_core)
+    g_scheduling_reactor = reactor
+  spdk_cpuset_set_cpu
+  spdk_thread_create("app_thread", &tmp_cpumask) -> 创建一个新的 SPDK 线程对象。 请注意，通过 spdk_thread_create() 创建的第一个线程将被指定为应用程序线程。 其他 SPDK 库可能会限制某些 API 只能在此应用程序线程的上下文中调用
+    spdk_interrupt_mode_is_enabled -> 默认禁用中断
+    g_thread_op_fn(thread, SPDK_THREAD_OP_NEW) -> reactor_thread_op
+      _reactor_schedule_thread
+        spdk_cpuset_zero
+        spdk_cpuset_set_cpu
+        spdk_cpuset_xor -> 异或, eactor：避免在intr中将线程调度到reactor，目前，spdk_thread无法在处于中断模式的reactor上执行，但spdk_thread的中断未启用。 所以避免调度 spdk_thread 就可以了
+          dst->cpus[i] ^= src->cpus[i]
+        spdk_cpuset_copy -> copy dst <- src
+        spdk_cpuset_and -> dst->cpus[i] &= src->cpus[i]
+        spdk_cpuset_get_cpu(cpumask, core) -> return (set->cpus[cpu / 8] >> (cpu % 8)) & 1U -> 位运算
+        evt = spdk_event_allocate(core, _schedule_thread, lw_thread, NULL)
+          event = spdk_mempool_get(g_spdk_event_mempool)
+          event->fn = fn
+        lw_thread->tsc_start = spdk_get_ticks() -> lib/event: 将线程的运行时间添加到framework_get_reactors RPC的输出中，收集每个SPDK线程的运行时间并将其添加到framework_get_reactors RPC的输出中
+        spdk_event_call(evt)
+          rc = spdk_ring_enqueue(reactor->events, (void **)&event, 1, NULL) -> 消息事件入队
+          rc = write(reactor->events_fd, &notify, sizeof(notify)) -> 默认不通知
+  spdk_thread_send_msg(spdk_thread_get_app_thread(), bootstrap_fn, NULL)
+    msg->fn = fn
+    spdk_ring_enqueue(thread->messages, (void **)&msg, 1, NULL) -> 消息其实是通过spdk_ring_enqueue()放入了ring-buffer中的。在后续的poller挂在的函数中对ring-buffer中的消息进行处理, 代码分析: https://zhuanlan.zhihu.com/p/423779832
+    thread_send_msg_notification(thread)
   spdk_reactors_start
-  _reactor_run
-  spdk_thread_poll -> thread_poll
-  msg_queue_run_batch -> msg->fn(msg->arg)
-  _nvmf_transport_create_done -> ctx->cb_fn -> _ctx->ops->create -> .create = nvmf_rdma_create,
-  nvmf_rdma_create
-    rtransport->event_channel = rdma_create_event_channel()
-    rtransport->data_wr_pool = spdk_mempool_create
-    rdma_get_devices
-    create_ib_device
-      ibv_query_device
-      nvmf_rdma_is_rxe_device
-      TAILQ_INSERT_TAIL(&rtransport->devices, device, link)
-      ibv_alloc_pd
-      spdk_rdma_create_mem_map
-      "Create IB device xxx"
-	  rc = generate_poll_fds(rtransport);
-    nvmf_rdma_accept
+    reactor_run(reactor)
+      while (1)
+      _reactor_run(reactor)
+        event_queue_run_batch(reactor)
+          count = spdk_ring_dequeue(reactor->events, events, SPDK_EVENT_BATCH_SIZE)
+           event->fn(event->arg1, event->arg2) -> _schedule_thread(void *arg1, void *arg2)
+
+        spdk_thread_poll -> thread_poll
+          msg_queue_run_batch -> msg->fn(msg->arg) -> bootstrap_fn
+          _nvmf_transport_create_done -> ctx->cb_fn -> _ctx->ops->create -> .create = nvmf_rdma_create,
+          nvmf_rdma_create
+            rtransport->event_channel = rdma_create_event_channel()
+            rtransport->data_wr_pool = spdk_mempool_create
+            rdma_get_devices
+            create_ib_device
+              ibv_query_device
+              nvmf_rdma_is_rxe_device
+              TAILQ_INSERT_TAIL(&rtransport->devices, device, link)
+              ibv_alloc_pd
+              spdk_rdma_create_mem_map
+              "Create IB device xxx"
+            rc = generate_poll_fds(rtransport);
+            nvmf_rdma_accept
+    spdk_env_thread_wait_all()
+
 
 ./scripts/rpc.py --verbose=DEBUG nvmf_create_transport -t RDMA
 python3 -m pdb scripts/rpc.py nvmf_create_transport -t RDMA
