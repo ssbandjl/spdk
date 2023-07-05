@@ -3,6 +3,8 @@ initiator_spdk_tgt, spdk-nvmf指南: https://blog.csdn.net/zxpoiu/article/detail
 搭建远端存储，深度解读SPDK NVMe-oF target: https://mp.weixin.qq.com/s?__biz=MzI3NDA4ODY4MA==&mid=2653335091&idx=1&sn=81344e9239956c5045cee444073ec24b&chksm=f0cb59b4c7bcd0a21d2179b09a4e242457b7bca877120512cbea0f5ca83bf4ecc8777ce3f43f&scene=21#wechat_redirect
 使用SPDK lib搭建自己的NVMe-oF Target应用: https://blog.csdn.net/weixin_60043341/article/details/126505064
 SPDK线程模型解析: https://blog.csdn.net/weixin_37097605/article/details/101488760
+spdk api文档: https://spdk.io/doc/jsonrpc.html
+
 
 
 
@@ -253,6 +255,8 @@ for i in $(seq 1 "$NR_DISKS"); do
     sudo scripts/rpc.py nvmf_subsystem_add_ns $subsystem  disk$i
     sudo scripts/rpc.py nvmf_subsystem_add_listener $subsystem -t tcp -a ${BIND_IP} -s 4420
 done
+
+/opt/xxx/script/tgt/rpc.py nvmf_subsystem_add_listener nqn.2014-08.org.nvmexpress.discovery -t rdma -a 172.17.29.217 -s 4420
 
 块设备：
 创建daos bdev块设备
@@ -730,7 +734,7 @@ rdma.c:2484:create_ib_device:
 
 4.通过rpc创建导出bdev
 创建内存测试盘
-# scripts/rpc.py bdev_malloc_create -b Malloc0 512 512
+# scripts/rpc.py bdev_malloc_create -b Malloc0 512 512 #块大小=512, 块数=512, 1GB=512 * 2048
 # scripts/rpc.py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1 -a -s SPDK00000000000001 -d SPDK_Controller1
 # scripts/rpc.py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 Malloc0
 # scripts/rpc.py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 -t rdma -a 192.168.80.100 -s 4420
@@ -1072,3 +1076,24 @@ nvme_rdma_poll_group
 spdk_nvmf_request_exec_fabrics
 spdk_nvmf_request_exec
   nvmf_ctrlr_process_fabrics_cmd
+
+spdkh
+rpc_nvmf_put_blockservice2transport
+  spdk_nvmf_get_tgt
+  nvmf_transport_set_bs_network
+    spdk_nvmf_transport_bs_state
+
+
+nvme connect 
+
+
+
+.create = nvmf_rdma_create
+nvmf_rdma_create(struct spdk_nvmf_transport_opts *opts)
+nvmf_rdma_accept
+  nvmf_process_cm_event
+  case RDMA_CM_EVENT_CONNECT_REQUEST
+  nvmf_rdma_connect(struct spdk_nvmf_transport *transport, struct rdma_cm_event *event)
+    spdk_nvmf_tgt_new_qpair(transport->tgt, &rqpair->qpair)
+
+
