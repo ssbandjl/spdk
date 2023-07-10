@@ -39,7 +39,7 @@ static char *g_psk_identity;
 struct hello_context_t {
 	bool is_server;
 	char *host;
-	char *sock_impl_name;
+	const char *sock_impl_name;
 	int port;
 	int zcopy;
 	int ktls;
@@ -54,6 +54,7 @@ struct hello_context_t {
 	struct spdk_sock *sock;
 
 	struct spdk_sock_group *group;
+	void *buf;
 	struct spdk_poller *poller_in;
 	struct spdk_poller *poller_out;
 	struct spdk_poller *time_out;
@@ -143,6 +144,8 @@ hello_sock_close_timeout_poll(void *arg)
 {
 	struct hello_context_t *ctx = arg;
 	SPDK_NOTICELOG("Connection closed\n");
+
+	free(ctx->buf);
 
 	spdk_poller_unregister(&ctx->time_out);
 	spdk_poller_unregister(&ctx->poller_in);
@@ -242,6 +245,7 @@ hello_sock_connect(struct hello_context_t *ctx)
 	impl_opts.enable_ktls = ctx->ktls;
 	impl_opts.tls_version = ctx->tls_version;
 	impl_opts.psk_identity = ctx->psk_identity;
+	impl_opts.tls_cipher_suites = "TLS_AES_128_GCM_SHA256";
 
 	opts.opts_size = sizeof(opts);
 	spdk_sock_get_default_opts(&opts);
@@ -277,49 +281,64 @@ hello_sock_connect(struct hello_context_t *ctx)
 	rc = spdk_sock_getaddr(ctx->sock, saddr, sizeof(saddr), &sport, caddr, sizeof(caddr), &cport);
 	if (rc < 0) {
 		SPDK_ERRLOG("Cannot get connection addresses\n");
-		spdk_sock_close(&ctx->sock);
-		return -1;
+		goto err;
 	}
 
 	SPDK_NOTICELOG("Connection accepted from (%s, %hu) to (%s, %hu)\n", caddr, cport, saddr, sport);
 
-	fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL) | O_NONBLOCK);
+	rc = fcntl(STDIN_FILENO, F_GETFL);
+	if (rc == -1) {
+		SPDK_ERRLOG("Getting file status flag failed: %s\n", strerror(errno));
+		goto err;
+	}
+
+	if (fcntl(STDIN_FILENO, F_SETFL, rc | O_NONBLOCK) == -1) {
+		SPDK_ERRLOG("Setting file status flag failed: %s\n", strerror(errno));
+		goto err;
+	}
 
 	g_is_running = true;
 	ctx->poller_in = SPDK_POLLER_REGISTER(hello_sock_recv_poll, ctx, 0);
 	ctx->poller_out = SPDK_POLLER_REGISTER(hello_sock_writev_poll, ctx, 0);
 
 	return 0;
+err:
+	spdk_sock_close(&ctx->sock);
+	return -1;
 }
 
 static void
 hello_sock_cb(void *arg, struct spdk_sock_group *group, struct spdk_sock *sock)
 {
-	ssize_t n;
-	char buf[BUFFER_SIZE];
-	struct iovec iov;
+	int rc;
 	struct hello_context_t *ctx = arg;
+	struct iovec iov = {};
+	ssize_t n;
+	void *user_ctx;
 
-	n = spdk_sock_recv(sock, buf, sizeof(buf));
-	if (n < 0) {
+	rc = spdk_sock_recv_next(sock, &iov.iov_base, &user_ctx);
+	if (rc < 0) {
 		if (errno == EAGAIN || errno == EWOULDBLOCK) {
-			SPDK_ERRLOG("spdk_sock_recv() failed, errno %d: %s\n",
-				    errno, spdk_strerror(errno));
 			return;
 		}
 
-		SPDK_ERRLOG("spdk_sock_recv() failed, errno %d: %s\n",
-			    errno, spdk_strerror(errno));
+		if (errno != ENOTCONN && errno != ECONNRESET) {
+			SPDK_ERRLOG("spdk_sock_recv_zcopy() failed, errno %d: %s\n",
+				    errno, spdk_strerror(errno));
+		}
 	}
 
-	if (n > 0) {
-		ctx->bytes_in += n;
-		iov.iov_base = buf;
-		iov.iov_len = n;
+	iov.iov_len = rc;
+
+	if (iov.iov_len > 0) {
+		ctx->bytes_in += iov.iov_len;
 		n = spdk_sock_writev(sock, &iov, 1);
 		if (n > 0) {
+			assert(n == rc);
 			ctx->bytes_out += n;
 		}
+
+		spdk_sock_group_provide_buf(ctx->group, iov.iov_base, BUFFER_SIZE, NULL);
 		return;
 	}
 
@@ -405,6 +424,7 @@ hello_sock_listen(struct hello_context_t *ctx)
 	impl_opts.enable_ktls = ctx->ktls;
 	impl_opts.tls_version = ctx->tls_version;
 	impl_opts.psk_identity = ctx->psk_identity;
+	impl_opts.tls_cipher_suites = "TLS_AES_128_GCM_SHA256";
 
 	opts.opts_size = sizeof(opts);
 	spdk_sock_get_default_opts(&opts);
@@ -441,6 +461,23 @@ hello_sock_listen(struct hello_context_t *ctx)
 	 * Create sock group for server socket
 	 */
 	ctx->group = spdk_sock_group_create(NULL);
+	if (ctx->group == NULL) {
+		SPDK_ERRLOG("Cannot create sock group\n");
+		spdk_sock_close(&ctx->sock);
+		return -1;
+	}
+
+	/*
+	 * Provide a buffer to the group to be used with receive.
+	 */
+	ctx->buf = calloc(1, BUFFER_SIZE);
+	if (ctx->buf == NULL) {
+		SPDK_ERRLOG("Cannot allocate memory for sock group\n");
+		spdk_sock_close(&ctx->sock);
+		return -1;
+	}
+
+	spdk_sock_group_provide_buf(ctx->group, ctx->buf, BUFFER_SIZE, NULL);
 
 	g_is_running = true;
 
@@ -509,6 +546,30 @@ main(int argc, char **argv)
 	hello_context.psk_key = g_psk_key;
 	hello_context.psk_identity = g_psk_identity;
 	hello_context.verbose = g_verbose;
+
+	if (hello_context.sock_impl_name == NULL) {
+		hello_context.sock_impl_name = spdk_sock_get_default_impl();
+
+		if (hello_context.sock_impl_name == NULL) {
+			SPDK_ERRLOG("No sock implementations available!\n");
+			exit(-1);
+		}
+	}
+
+	if (hello_context.is_server) {
+		struct spdk_sock_impl_opts impl_opts = {};
+		size_t len = sizeof(impl_opts);
+
+		rc = spdk_sock_impl_get_opts(hello_context.sock_impl_name, &impl_opts, &len);
+		if (rc < 0) {
+			exit(rc);
+		}
+
+		/* Our applications will post buffers to be used for receiving. That feature
+		 * is mutually exclusive with the recv pipe, so we need to disable it. */
+		impl_opts.enable_recv_pipe = false;
+		spdk_sock_impl_set_opts(hello_context.sock_impl_name, &impl_opts, len);
+	}
 
 	rc = spdk_app_start(&opts, hello_start, &hello_context);
 	if (rc) {

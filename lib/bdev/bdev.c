@@ -425,7 +425,7 @@ static void bdev_ch_retry_io(struct spdk_bdev_channel *bdev_ch);
 
 #define bdev_get_ext_io_opt(opts, field, defval) \
 	(((opts) != NULL && offsetof(struct spdk_bdev_ext_io_opts, field) + \
-	 sizeof((opts)->field) <= sizeof(*(opts))) ? (opts)->field : (defval))
+	 sizeof((opts)->field) <= (opts)->size) ? (opts)->field : (defval))
 
 void
 spdk_bdev_get_opts(struct spdk_bdev_opts *opts, size_t opts_size)
@@ -774,7 +774,7 @@ spdk_bdev_examine(const char *name)
 	struct spdk_bdev_examine_item *item;
 	struct spdk_thread *thread = spdk_get_thread();
 
-	if (spdk_unlikely(spdk_thread_get_app_thread() != thread)) {
+	if (spdk_unlikely(!spdk_thread_is_app_thread(thread))) {
 		SPDK_ERRLOG("Cannot examine bdev %s on thread %p (%s)\n", name, thread,
 			    thread ? spdk_thread_get_name(thread) : "null");
 		return -EINVAL;
@@ -7949,7 +7949,7 @@ spdk_bdev_register(struct spdk_bdev *bdev)
 	struct spdk_thread *thread = spdk_get_thread();
 	int rc;
 
-	if (spdk_unlikely(spdk_thread_get_app_thread() != spdk_get_thread())) {
+	if (spdk_unlikely(!spdk_thread_is_app_thread(NULL))) {
 		SPDK_ERRLOG("Cannot examine bdev %s on thread %p (%s)\n", bdev->name, thread,
 			    thread ? spdk_thread_get_name(thread) : "null");
 		return -EINVAL;

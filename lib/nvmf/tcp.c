@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2018 Intel Corporation. All rights reserved.
  *   Copyright (c) 2019, 2020 Mellanox Technologies LTD. All rights reserved.
- *   Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2022, 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #include "spdk/accel.h"
@@ -45,6 +45,8 @@
 #define SPDK_NVMF_TCP_DEFAULT_BUFFER_CACHE_SIZE UINT32_MAX
 #define SPDK_NVMF_TCP_DEFAULT_DIF_INSERT_OR_STRIP false
 #define SPDK_NVMF_TCP_DEFAULT_ABORT_TIMEOUT_SEC 1
+
+#define TCP_PSK_INVALID_PERMISSIONS 0177
 
 const struct spdk_nvmf_transport_ops spdk_nvmf_transport_tcp;
 
@@ -347,7 +349,11 @@ struct tcp_psk_entry {
 	char				subnqn[SPDK_NVMF_NQN_MAX_LEN + 1];
 	char				psk_identity[NVMF_PSK_IDENTITY_LEN];
 	uint8_t				psk[SPDK_TLS_PSK_MAX_LEN];
+
+	/* Original path saved to emit SPDK configuration via "save_config". */
+	char				psk_path[PATH_MAX];
 	uint32_t			psk_size;
+	enum nvme_tcp_cipher_suite	tls_cipher_suite;
 	TAILQ_ENTRY(tcp_psk_entry)	link;
 };
 
@@ -817,8 +823,7 @@ tcp_sock_get_key(uint8_t *out, int out_len, const char **cipher, const char *psk
 	struct tcp_psk_entry *entry;
 	struct spdk_nvmf_tcp_transport *ttransport = get_key_ctx;
 	size_t psk_len;
-
-	*cipher = NULL;
+	int rc;
 
 	TAILQ_FOREACH(entry, &ttransport->psks, link) {
 		if (strcmp(psk_identity, entry->psk_identity) != 0) {
@@ -831,8 +836,27 @@ tcp_sock_get_key(uint8_t *out, int out_len, const char **cipher, const char *psk
 				    out_len, psk_len);
 			return -ENOBUFS;
 		}
-		memcpy(out, entry->psk, psk_len);
-		return psk_len;
+
+		/* Convert PSK to the TLS PSK format. */
+		rc = nvme_tcp_derive_tls_psk(entry->psk, psk_len, psk_identity, out, out_len,
+					     entry->tls_cipher_suite);
+		if (rc < 0) {
+			SPDK_ERRLOG("Could not generate TLS PSK\n");
+		}
+
+		switch (entry->tls_cipher_suite) {
+		case NVME_TCP_CIPHER_AES_128_GCM_SHA256:
+			*cipher = "TLS_AES_128_GCM_SHA256";
+			break;
+		case NVME_TCP_CIPHER_AES_256_GCM_SHA384:
+			*cipher = "TLS_AES_256_GCM_SHA384";
+			break;
+		default:
+			*cipher = NULL;
+			return -ENOTSUP;
+		}
+
+		return rc;
 	}
 
 	SPDK_ERRLOG("Could not find PSK for identity: %s\n", psk_identity);
@@ -885,6 +909,7 @@ nvmf_tcp_listen(struct spdk_nvmf_transport *transport, const struct spdk_nvme_tr
 		impl_opts.tls_version = SPDK_TLS_VERSION_1_3;
 		impl_opts.get_key = tcp_sock_get_key;
 		impl_opts.get_key_ctx = ttransport;
+		impl_opts.tls_cipher_suites = "TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256";
 		opts.impl_opts = &impl_opts;
 		opts.impl_opts_size = sizeof(impl_opts);
 	}
@@ -1343,14 +1368,27 @@ nvmf_tcp_discover(struct spdk_nvmf_transport *transport,
 		  struct spdk_nvme_transport_id *trid,
 		  struct spdk_nvmf_discovery_log_page_entry *entry)
 {
+	struct spdk_nvmf_tcp_port *port;
+	struct spdk_nvmf_tcp_transport *ttransport;
+
 	entry->trtype = SPDK_NVMF_TRTYPE_TCP;
 	entry->adrfam = trid->adrfam;
-	entry->treq.secure_channel = SPDK_NVMF_TREQ_SECURE_CHANNEL_NOT_REQUIRED;
 
 	spdk_strcpy_pad(entry->trsvcid, trid->trsvcid, sizeof(entry->trsvcid), ' ');
 	spdk_strcpy_pad(entry->traddr, trid->traddr, sizeof(entry->traddr), ' ');
 
-	entry->tsas.tcp.sectype = SPDK_NVME_TCP_SECURITY_NONE;
+	ttransport = SPDK_CONTAINEROF(transport, struct spdk_nvmf_tcp_transport, transport);
+	port = nvmf_tcp_find_port(ttransport, trid);
+
+	assert(port != NULL);
+
+	if (strcmp(spdk_sock_get_impl_name(port->listen_sock), "ssl") == 0) {
+		entry->treq.secure_channel = SPDK_NVMF_TREQ_SECURE_CHANNEL_REQUIRED;
+		entry->tsas.tcp.sectype = SPDK_NVME_TCP_SECURITY_TLS_1_3;
+	} else {
+		entry->treq.secure_channel = SPDK_NVMF_TREQ_SECURE_CHANNEL_NOT_REQUIRED;
+		entry->tsas.tcp.sectype = SPDK_NVME_TCP_SECURITY_NONE;
+	}
 }
 
 static struct spdk_nvmf_tcp_control_msg_list *
@@ -1497,6 +1535,13 @@ nvmf_tcp_poll_group_destroy(struct spdk_nvmf_transport_poll_group *group)
 
 	if (tgroup->accel_channel) {
 		spdk_put_io_channel(tgroup->accel_channel);
+	}
+
+	if (tgroup->group.transport == NULL) {
+		/* Transport can be NULL when nvmf_tcp_poll_group_create()
+		 * calls this function directly in a failure path. */
+		free(tgroup);
+		return;
 	}
 
 	ttransport = SPDK_CONTAINEROF(tgroup->group.transport, struct spdk_nvmf_tcp_transport, transport);
@@ -3482,6 +3527,44 @@ static const struct spdk_json_object_decoder tcp_subsystem_add_host_opts_decoder
 };
 
 static int
+tcp_load_psk(const char *fname, char *buf, size_t bufsz)
+{
+	FILE *psk_file;
+	struct stat statbuf;
+	int rc;
+
+	if (stat(fname, &statbuf) != 0) {
+		SPDK_ERRLOG("Could not read permissions for PSK file\n");
+		return -EACCES;
+	}
+
+	if ((statbuf.st_mode & TCP_PSK_INVALID_PERMISSIONS) != 0) {
+		SPDK_ERRLOG("Incorrect permissions for PSK file\n");
+		return -EPERM;
+	}
+	if ((size_t)statbuf.st_size >= bufsz) {
+		SPDK_ERRLOG("Invalid PSK: too long\n");
+		return -EINVAL;
+	}
+	psk_file = fopen(fname, "r");
+	if (psk_file == NULL) {
+		SPDK_ERRLOG("Could not open PSK file\n");
+		return -EINVAL;
+	}
+
+	memset(buf, 0, bufsz);
+	rc = fread(buf, 1, statbuf.st_size, psk_file);
+	if (rc != statbuf.st_size) {
+		SPDK_ERRLOG("Failed to read PSK\n");
+		fclose(psk_file);
+		return -EINVAL;
+	}
+
+	fclose(psk_file);
+	return 0;
+}
+
+static int
 nvmf_tcp_subsystem_add_host(struct spdk_nvmf_transport *transport,
 			    const struct spdk_nvmf_subsystem *subsystem,
 			    const char *hostnqn,
@@ -3491,8 +3574,12 @@ nvmf_tcp_subsystem_add_host(struct spdk_nvmf_transport *transport,
 	struct spdk_nvmf_tcp_transport *ttransport;
 	struct tcp_psk_entry *entry;
 	char psk_identity[NVMF_PSK_IDENTITY_LEN];
-	uint64_t key_len;
+	uint8_t psk_configured[SPDK_TLS_PSK_MAX_LEN] = {};
+	char psk_interchange[SPDK_TLS_PSK_MAX_LEN] = {};
+	uint8_t tls_cipher_suite;
 	int rc = 0;
+	uint8_t psk_retained_hash;
+	uint64_t psk_configured_size;
 
 	if (transport_specific == NULL) {
 		return 0;
@@ -3503,7 +3590,7 @@ nvmf_tcp_subsystem_add_host(struct spdk_nvmf_transport *transport,
 
 	memset(&opts, 0, sizeof(opts));
 
-	/* Decode PSK */
+	/* Decode PSK file path */
 	if (spdk_json_decode_object_relaxed(transport_specific, tcp_subsystem_add_host_opts_decoder,
 					    SPDK_COUNTOF(tcp_subsystem_add_host_opts_decoder), &opts)) {
 		SPDK_ERRLOG("spdk_json_decode_object failed\n");
@@ -3513,11 +3600,45 @@ nvmf_tcp_subsystem_add_host(struct spdk_nvmf_transport *transport,
 	if (opts.psk == NULL) {
 		return 0;
 	}
+	if (strlen(opts.psk) >= sizeof(entry->psk)) {
+		SPDK_ERRLOG("PSK path too long\n");
+		rc = -EINVAL;
+		goto end;
+	}
+
+	rc = tcp_load_psk(opts.psk, psk_interchange, sizeof(psk_interchange));
+	if (rc) {
+		SPDK_ERRLOG("Could not retrieve PSK from file\n");
+		goto end;
+	}
+
+	/* Parse PSK interchange to get length of base64 encoded data.
+	 * This is then used to decide which cipher suite should be used
+	 * to generate PSK identity and TLS PSK later on. */
+	rc = nvme_tcp_parse_interchange_psk(psk_interchange, psk_configured, sizeof(psk_configured),
+					    &psk_configured_size, &psk_retained_hash);
+	if (rc < 0) {
+		SPDK_ERRLOG("Failed to parse PSK interchange!\n");
+		goto end;
+	}
+
+	/* The Base64 string encodes the configured PSK (32 or 48 bytes binary).
+	 * This check also ensures that psk_configured_size is smaller than
+	 * psk_retained buffer size. */
+	if (psk_configured_size == SHA256_DIGEST_LENGTH) {
+		tls_cipher_suite = NVME_TCP_CIPHER_AES_128_GCM_SHA256;
+	} else if (psk_configured_size == SHA384_DIGEST_LENGTH) {
+		tls_cipher_suite = NVME_TCP_CIPHER_AES_256_GCM_SHA384;
+	} else {
+		SPDK_ERRLOG("Unrecognized cipher suite!\n");
+		rc = -EINVAL;
+		goto end;
+	}
 
 	ttransport = SPDK_CONTAINEROF(transport, struct spdk_nvmf_tcp_transport, transport);
 	/* Generate PSK identity. */
 	rc = nvme_tcp_generate_psk_identity(psk_identity, NVMF_PSK_IDENTITY_LEN, hostnqn,
-					    subsystem->subnqn);
+					    subsystem->subnqn, tls_cipher_suite);
 	if (rc) {
 		rc = -EINVAL;
 		goto end;
@@ -3555,28 +3676,32 @@ nvmf_tcp_subsystem_add_host(struct spdk_nvmf_transport *transport,
 		free(entry);
 		goto end;
 	}
-	if (strlen(opts.psk) >= sizeof(entry->psk)) {
-		SPDK_ERRLOG("PSK of length: %ld cannot fit in max buffer size: %ld\n", strlen(opts.psk),
-			    sizeof(entry->psk));
-		rc = -EINVAL;
-		free(entry);
-		goto end;
-	}
+	entry->tls_cipher_suite = tls_cipher_suite;
 
-	/* Derive retained PSK. */
-	rc = nvme_tcp_derive_retained_psk(opts.psk, hostnqn, entry->psk, SPDK_TLS_PSK_MAX_LEN);
-	if (rc < 0) {
-		SPDK_ERRLOG("Unable to derive retained PSK!\n");
-		goto end;
+	/* No hash indicates that Configured PSK must be used as Retained PSK. */
+	if (psk_retained_hash == NVME_TCP_HASH_ALGORITHM_NONE) {
+		/* Psk configured is either 32 or 48 bytes long. */
+		memcpy(entry->psk, psk_configured, psk_configured_size);
+		entry->psk_size = psk_configured_size;
+	} else {
+		/* Derive retained PSK. */
+		rc = nvme_tcp_derive_retained_psk(psk_configured, psk_configured_size, hostnqn, entry->psk,
+						  SPDK_TLS_PSK_MAX_LEN, psk_retained_hash);
+		if (rc < 0) {
+			SPDK_ERRLOG("Unable to derive retained PSK!\n");
+			free(entry);
+			goto end;
+		}
+		entry->psk_size = rc;
 	}
-	entry->psk_size = rc;
 
 	TAILQ_INSERT_TAIL(&ttransport->psks, entry, link);
 	rc = 0;
 
 end:
-	key_len = strnlen(opts.psk, SPDK_TLS_PSK_MAX_LEN);
-	spdk_memset_s(opts.psk, key_len, 0, key_len);
+	spdk_memset_s(psk_configured, sizeof(psk_configured), 0, sizeof(psk_configured));
+	spdk_memset_s(psk_interchange, sizeof(psk_interchange), 0, sizeof(psk_interchange));
+
 	free(opts.psk);
 
 	return rc;

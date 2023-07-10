@@ -173,6 +173,16 @@ struct spdk_sock_impl_opts {
 	 * Context to be passed to get_key() callback.
 	 */
 	void *get_key_ctx;
+
+	/**
+	 * Cipher suite. Used by ssl socket module.
+	 * For connecting side, it must contain a single cipher:
+	 * example: "TLS_AES_256_GCM_SHA384"
+	 *
+	 * For listening side, it may be a colon separated list of ciphers:
+	 * example: "TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256"
+	 */
+	const char *tls_cipher_suites;
 };
 
 /**
@@ -221,7 +231,7 @@ struct spdk_sock_opts {
 	 * Size of the impl_opts structure.
 	 */
 	size_t impl_opts_size;
-} __attribute__((packed));
+};
 SPDK_STATIC_ASSERT(sizeof(struct spdk_sock_opts) == 40, "Incorrect size");
 
 /**
@@ -250,6 +260,15 @@ void spdk_sock_get_default_opts(struct spdk_sock_opts *opts);
  */
 int spdk_sock_getaddr(struct spdk_sock *sock, char *saddr, int slen, uint16_t *sport,
 		      char *caddr, int clen, uint16_t *cport);
+
+/**
+ * Get socket implementation name.
+ *
+ * \param sock Pointer to SPDK socket.
+ *
+ * \return Implementation name of given socket.
+ */
+const char *spdk_sock_get_impl_name(struct spdk_sock *sock);
 
 /**
  * Create a socket using the specific sock implementation, connect the socket
@@ -413,16 +432,6 @@ ssize_t spdk_sock_readv(struct spdk_sock *sock, struct iovec *iov, int iovcnt);
  * \return On success, the length of the buffer placed into buf, On failure, -1 with errno set.
  */
 int spdk_sock_recv_next(struct spdk_sock *sock, void **buf, void **ctx);
-
-/**
- * Read message from the given socket asynchronously, calling the provided callback when the whole
- * buffer is filled or an error is encountered.  Only a single read request can be active at a time
- * (including synchronous reads).
- *
- * \param sock Socket to receive message.
- * \param req The read request to submit.
- */
-void spdk_sock_readv_async(struct spdk_sock *sock, struct spdk_sock_request *req);
 
 /**
  * Set the value used to specify the low water mark (in bytes) for this socket.
@@ -607,7 +616,7 @@ int spdk_sock_impl_set_opts(const char *impl_name, const struct spdk_sock_impl_o
 			    size_t len);
 
 /**
- * Set the given sock implementation to be used a default one.
+ * Set the given sock implementation to be used as the default one.
  *
  * Note: passing a specific sock implementation name in some sock API functions
  * (such as @ref spdk_sock_connect, @ref spdk_sock_listen and etc) ignores the default value set by this function.
@@ -616,6 +625,13 @@ int spdk_sock_impl_set_opts(const char *impl_name, const struct spdk_sock_impl_o
  * \return 0 on success, -1 on failure. errno is set to indicate the reason of failure.
  */
 int spdk_sock_set_default_impl(const char *impl_name);
+
+/**
+ * Get the name of the current default implementation
+ *
+ * \return The name of the default implementation
+ */
+const char *spdk_sock_get_default_impl(void);;
 
 /**
  * Write socket subsystem configuration into provided JSON context.

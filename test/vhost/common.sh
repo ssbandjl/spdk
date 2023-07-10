@@ -13,9 +13,8 @@ VM_DIR=$VHOST_DIR/vms
 TARGET_DIR=$VHOST_DIR/vhost
 VM_PASSWORD="root"
 
-VM_IMAGE=${VM_IMAGE:-"$DEPENDENCY_DIR/spdk_test_image.qcow2"}
-DEFAULT_FIO_BIN=${DEFAULT_FIO_BIN:-"$DEPENDENCY_DIR/fio"}
-FIO_BIN=${FIO_BIN:-"$DEFAULT_FIO_BIN"}
+VM_IMAGE=${VM_IMAGE:-"$DEPENDENCY_DIR/vhost/spdk_test_image.qcow2"}
+FIO_BIN=${FIO_BIN:-}
 
 WORKDIR=$(readlink -f "$(dirname "$0")")
 
@@ -488,7 +487,7 @@ function vm_shutdown_all() {
 	done
 
 	notice "Waiting for VMs to shutdown..."
-	local timeo=30
+	local timeo=90
 	while [[ $timeo -gt 0 ]]; do
 		local all_vms_down=1
 		for vm in $vms; do
@@ -1144,11 +1143,11 @@ function run_fio() {
 
 		if ! $run_server_mode; then
 			if [[ -n "$fio_bin" ]]; then
-				if ! $run_plugin_mode; then
+				if ! $run_plugin_mode && [[ -e $fio_bin ]]; then
 					vm_exec $vm_num 'cat > /root/fio; chmod +x /root/fio' < $fio_bin
 					vm_fio_bin="/root/fio"
 				else
-					vm_fio_bin="/usr/src/fio/fio"
+					vm_fio_bin=$fio_bin
 				fi
 			fi
 

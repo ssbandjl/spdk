@@ -25,10 +25,9 @@
 #ifdef __linux__
 #include <sys/timerfd.h>
 #include <sys/eventfd.h>
-#include <execinfo.h>
 #endif
 
-#ifdef __FreeBSD__
+#ifdef SPDK_HAVE_EXECINFO_H
 #include <execinfo.h>
 #endif
 
@@ -589,6 +588,16 @@ struct spdk_thread *
 spdk_thread_get_app_thread(void)
 {
 	return g_app_thread;
+}
+
+bool
+spdk_thread_is_app_thread(struct spdk_thread *thread)
+{
+	if (thread == NULL) {
+		thread = _get_thread();
+	}
+
+	return g_app_thread == thread;
 }
 
 void
@@ -2327,6 +2336,8 @@ spdk_get_io_channel(void *io_device)
 		RB_REMOVE(io_channel_tree, &ch->thread->io_channels, ch);
 		dev->refcnt--;
 		free(ch);
+		SPDK_ERRLOG("could not create io_channel for io_device %s (%p): %s (rc=%d)\n",
+			    dev->name, io_device, spdk_strerror(-rc), rc);
 		pthread_mutex_unlock(&g_devlist_mutex);
 		return NULL;
 	}
@@ -2934,7 +2945,7 @@ sspin_fini_internal(struct spdk_spinlock *sspin)
 #endif
 }
 
-#ifdef DEBUG
+#if defined(DEBUG) && defined(SPDK_HAVE_EXECINFO_H)
 #define SSPIN_GET_STACK(sspin, which) \
 	do { \
 		if (sspin->internal != NULL) { \
@@ -2949,6 +2960,7 @@ sspin_fini_internal(struct spdk_spinlock *sspin)
 static void
 sspin_stack_print(const char *title, const struct sspin_stack *sspin_stack)
 {
+#ifdef SPDK_HAVE_EXECINFO_H
 	char **stack;
 	size_t i;
 
@@ -2968,6 +2980,7 @@ sspin_stack_print(const char *title, const struct sspin_stack *sspin_stack)
 		SPDK_ERRLOG("    #%" PRIu64 ": %s\n", i, stack[i]);
 	}
 	free(stack);
+#endif /* SPDK_HAVE_EXECINFO_H */
 }
 
 static void

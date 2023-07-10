@@ -68,7 +68,7 @@ struct spdk_posix_sock_group_impl {
 	int				placement_id;
 };
 
-static struct spdk_sock_impl_opts g_spdk_posix_sock_impl_opts = {
+static struct spdk_sock_impl_opts g_posix_impl_opts = {
 	.recv_buf_size = DEFAULT_SO_RCVBUF_SIZE,
 	.send_buf_size = DEFAULT_SO_SNDBUF_SIZE,
 	.enable_recv_pipe = true,
@@ -83,7 +83,23 @@ static struct spdk_sock_impl_opts g_spdk_posix_sock_impl_opts = {
 	.psk_key_size = 0,
 	.psk_identity = NULL,
 	.get_key = NULL,
-	.get_key_ctx = NULL
+	.get_key_ctx = NULL,
+	.tls_cipher_suites = NULL
+};
+
+static struct spdk_sock_impl_opts g_ssl_impl_opts = {
+	.recv_buf_size = MIN_SO_RCVBUF_SIZE,
+	.send_buf_size = MIN_SO_SNDBUF_SIZE,
+	.enable_recv_pipe = true,
+	.enable_quickack = false,
+	.enable_placement_id = PLACEMENT_NONE,
+	.enable_zerocopy_send_server = true,
+	.enable_zerocopy_send_client = false,
+	.zerocopy_threshold = 0,
+	.tls_version = 0,
+	.enable_ktls = false,
+	.psk_key = NULL,
+	.psk_identity = NULL
 };
 
 static struct spdk_sock_map g_map = {
@@ -128,13 +144,15 @@ posix_sock_copy_impl_opts(struct spdk_sock_impl_opts *dest, const struct spdk_so
 	SET_FIELD(psk_identity);
 	SET_FIELD(get_key);
 	SET_FIELD(get_key_ctx);
+	SET_FIELD(tls_cipher_suites);
 
 #undef SET_FIELD
 #undef FIELD_OK
 }
 
 static int
-posix_sock_impl_get_opts(struct spdk_sock_impl_opts *opts, size_t *len)
+_sock_impl_get_opts(struct spdk_sock_impl_opts *opts, struct spdk_sock_impl_opts *impl_opts,
+		    size_t *len)
 {
 	if (!opts || !len) {
 		errno = EINVAL;
@@ -144,14 +162,27 @@ posix_sock_impl_get_opts(struct spdk_sock_impl_opts *opts, size_t *len)
 	assert(sizeof(*opts) >= *len);
 	memset(opts, 0, *len);
 
-	posix_sock_copy_impl_opts(opts, &g_spdk_posix_sock_impl_opts, *len);
-	*len = spdk_min(*len, sizeof(g_spdk_posix_sock_impl_opts));
+	posix_sock_copy_impl_opts(opts, impl_opts, *len);
+	*len = spdk_min(*len, sizeof(*impl_opts));
 
 	return 0;
 }
 
 static int
-posix_sock_impl_set_opts(const struct spdk_sock_impl_opts *opts, size_t len)
+posix_sock_impl_get_opts(struct spdk_sock_impl_opts *opts, size_t *len)
+{
+	return _sock_impl_get_opts(opts, &g_posix_impl_opts, len);
+}
+
+static int
+ssl_sock_impl_get_opts(struct spdk_sock_impl_opts *opts, size_t *len)
+{
+	return _sock_impl_get_opts(opts, &g_ssl_impl_opts, len);
+}
+
+static int
+_sock_impl_set_opts(const struct spdk_sock_impl_opts *opts, struct spdk_sock_impl_opts *impl_opts,
+		    size_t len)
 {
 	if (!opts) {
 		errno = EINVAL;
@@ -159,16 +190,29 @@ posix_sock_impl_set_opts(const struct spdk_sock_impl_opts *opts, size_t len)
 	}
 
 	assert(sizeof(*opts) >= len);
-	posix_sock_copy_impl_opts(&g_spdk_posix_sock_impl_opts, opts, len);
+	posix_sock_copy_impl_opts(impl_opts, opts, len);
 
 	return 0;
 }
 
+static int
+posix_sock_impl_set_opts(const struct spdk_sock_impl_opts *opts, size_t len)
+{
+	return _sock_impl_set_opts(opts, &g_posix_impl_opts, len);
+}
+
+static int
+ssl_sock_impl_set_opts(const struct spdk_sock_impl_opts *opts, size_t len)
+{
+	return _sock_impl_set_opts(opts, &g_ssl_impl_opts, len);
+}
+
 static void
-posix_opts_get_impl_opts(const struct spdk_sock_opts *opts, struct spdk_sock_impl_opts *dest)
+_opts_get_impl_opts(const struct spdk_sock_opts *opts, struct spdk_sock_impl_opts *dest,
+		    const struct spdk_sock_impl_opts *default_impl)
 {
 	/* Copy the default impl_opts first to cover cases when user's impl_opts is smaller */
-	memcpy(dest, &g_spdk_posix_sock_impl_opts, sizeof(*dest));
+	memcpy(dest, default_impl, sizeof(*dest));
 
 	if (opts->impl_opts != NULL) {
 		assert(sizeof(*dest) >= opts->impl_opts_size);
@@ -338,8 +382,8 @@ posix_sock_set_recvbuf(struct spdk_sock *_sock, int sz)
 	}
 
 	/* Set kernel buffer size to be at least MIN_SO_RCVBUF_SIZE and
-	 * g_spdk_posix_sock_impl_opts.recv_buf_size. */
-	min_size = spdk_max(MIN_SO_RCVBUF_SIZE, g_spdk_posix_sock_impl_opts.recv_buf_size);
+	 * _sock->impl_opts.recv_buf_size. */
+	min_size = spdk_max(MIN_SO_RCVBUF_SIZE, _sock->impl_opts.recv_buf_size);
 
 	if (sz < min_size) {
 		sz = min_size;
@@ -365,8 +409,8 @@ posix_sock_set_sendbuf(struct spdk_sock *_sock, int sz)
 	assert(sock != NULL);
 
 	/* Set kernel buffer size to be at least MIN_SO_SNDBUF_SIZE and
-	 * g_spdk_posix_sock_impl_opts.send_buf_size. */
-	min_size = spdk_max(MIN_SO_SNDBUF_SIZE, g_spdk_posix_sock_impl_opts.send_buf_size);
+	 * _sock->impl_opts.send_buf_size. */
+	min_size = spdk_max(MIN_SO_SNDBUF_SIZE, _sock->impl_opts.send_buf_size);
 
 	if (sz < min_size) {
 		sz = min_size;
@@ -519,29 +563,27 @@ posix_fd_create(struct addrinfo *res, struct spdk_sock_opts *opts,
 	return fd;
 }
 
-static unsigned int
-posix_sock_tls_psk_server_cb(SSL *ssl,
-			     const char *id,
-			     unsigned char *psk,
-			     unsigned int max_psk_len)
+static int
+posix_sock_psk_find_session_server_cb(SSL *ssl, const unsigned char *identity,
+				      size_t identity_len, SSL_SESSION **sess)
 {
-	const char *cipher = NULL;
-	struct spdk_sock_impl_opts *impl_opts;
-	int rc;
-
-	impl_opts = SSL_get_app_data(ssl);
-	SPDK_DEBUGLOG(sock_posix, "Received PSK ID '%s'\n", id);
-	if (id == NULL) {
-		SPDK_ERRLOG("Received empty PSK ID\n");
-		return 0;
-	}
-
-	SPDK_DEBUGLOG(sock_posix, "Length of Client's PSK KEY %u\n", max_psk_len);
+	struct spdk_sock_impl_opts *impl_opts = SSL_get_app_data(ssl);
+	uint8_t key[SSL_MAX_MASTER_KEY_LENGTH] = {};
+	int keylen;
+	int rc, i;
+	STACK_OF(SSL_CIPHER) *ciphers;
+	const SSL_CIPHER *cipher;
+	const char *cipher_name;
+	const char *user_cipher = NULL;
+	bool found = false;
 
 	if (impl_opts->get_key) {
-		rc = impl_opts->get_key(psk, max_psk_len, &cipher, id, impl_opts->get_key_ctx);
-		assert(cipher == NULL);
-		return rc > 0 ? rc : 0;
+		rc = impl_opts->get_key(key, sizeof(key), &user_cipher, identity, impl_opts->get_key_ctx);
+		if (rc < 0) {
+			SPDK_ERRLOG("Unable to find PSK for identity: %s\n", identity);
+			return 0;
+		}
+		keylen = rc;
 	} else {
 		if (impl_opts->psk_key == NULL) {
 			SPDK_ERRLOG("PSK is not set\n");
@@ -549,55 +591,143 @@ posix_sock_tls_psk_server_cb(SSL *ssl,
 		}
 
 		SPDK_DEBUGLOG(sock_posix, "Length of Client's PSK ID %lu\n", strlen(impl_opts->psk_identity));
-		if (strcmp(impl_opts->psk_identity, id) != 0) {
+		if (strcmp(impl_opts->psk_identity, identity) != 0) {
 			SPDK_ERRLOG("Unknown Client's PSK ID\n");
 			return 0;
 		}
-		if (impl_opts->psk_key_size > max_psk_len) {
-			SPDK_ERRLOG("PSK too long\n");
-			return 0;
-		}
+		keylen = impl_opts->psk_key_size;
 
-		memcpy(psk, impl_opts->psk_key, impl_opts->psk_key_size);
-		return impl_opts->psk_key_size;
+		memcpy(key, impl_opts->psk_key, keylen);
+		user_cipher = impl_opts->tls_cipher_suites;
 	}
+
+	if (user_cipher == NULL) {
+		SPDK_ERRLOG("Cipher suite not set\n");
+		return 0;
+	}
+
+	*sess = SSL_SESSION_new();
+	if (*sess == NULL) {
+		SPDK_ERRLOG("Unable to allocate new SSL session\n");
+		return 0;
+	}
+
+	ciphers = SSL_get_ciphers(ssl);
+	for (i = 0; i < sk_SSL_CIPHER_num(ciphers); i++) {
+		cipher = sk_SSL_CIPHER_value(ciphers, i);
+		cipher_name = SSL_CIPHER_get_name(cipher);
+
+		if (strcmp(user_cipher, cipher_name) == 0) {
+			rc = SSL_SESSION_set_cipher(*sess, cipher);
+			if (rc != 1) {
+				SPDK_ERRLOG("Unable to set cipher: %s\n", cipher_name);
+				goto err;
+			}
+			found = true;
+			break;
+		}
+	}
+	if (found == false) {
+		SPDK_ERRLOG("No suitable cipher found\n");
+		goto err;
+	}
+
+	SPDK_DEBUGLOG(sock_posix, "Cipher selected: %s\n", cipher_name);
+
+	rc = SSL_SESSION_set_protocol_version(*sess, TLS1_3_VERSION);
+	if (rc != 1) {
+		SPDK_ERRLOG("Unable to set TLS version: %d\n", TLS1_3_VERSION);
+		goto err;
+	}
+
+	rc = SSL_SESSION_set1_master_key(*sess, key, keylen);
+	if (rc != 1) {
+		SPDK_ERRLOG("Unable to set PSK for session\n");
+		goto err;
+	}
+
+	return 1;
+
+err:
+	SSL_SESSION_free(*sess);
+	*sess = NULL;
+	return 0;
 }
 
-static unsigned int
-posix_sock_tls_psk_client_cb(SSL *ssl, const char *hint,
-			     char *identity,
-			     unsigned int max_identity_len,
-			     unsigned char *psk,
-			     unsigned int max_psk_len)
+static int
+posix_sock_psk_use_session_client_cb(SSL *ssl, const EVP_MD *md, const unsigned char **identity,
+				     size_t *identity_len, SSL_SESSION **sess)
 {
-	long key_len;
-	struct spdk_sock_impl_opts *impl_opts;
-
-	impl_opts = SSL_get_app_data(ssl);
-
-	if (hint) {
-		SPDK_DEBUGLOG(sock_posix,  "Received PSK identity hint '%s'\n", hint);
-	}
+	struct spdk_sock_impl_opts *impl_opts = SSL_get_app_data(ssl);
+	int rc, i;
+	STACK_OF(SSL_CIPHER) *ciphers;
+	const SSL_CIPHER *cipher;
+	const char *cipher_name;
+	long keylen;
+	bool found = false;
 
 	if (impl_opts->psk_key == NULL) {
 		SPDK_ERRLOG("PSK is not set\n");
+		return 0;
+	}
+	if (impl_opts->psk_key_size > SSL_MAX_MASTER_KEY_LENGTH) {
+		SPDK_ERRLOG("PSK too long\n");
+		return 0;
+	}
+	keylen = impl_opts->psk_key_size;
+
+	if (impl_opts->tls_cipher_suites == NULL) {
+		SPDK_ERRLOG("Cipher suite not set\n");
+		return 0;
+	}
+	*sess = SSL_SESSION_new();
+	if (*sess == NULL) {
+		SPDK_ERRLOG("Unable to allocate new SSL session\n");
+		return 0;
+	}
+
+	ciphers = SSL_get_ciphers(ssl);
+	for (i = 0; i < sk_SSL_CIPHER_num(ciphers); i++) {
+		cipher = sk_SSL_CIPHER_value(ciphers, i);
+		cipher_name = SSL_CIPHER_get_name(cipher);
+
+		if (strcmp(impl_opts->tls_cipher_suites, cipher_name) == 0) {
+			rc = SSL_SESSION_set_cipher(*sess, cipher);
+			if (rc != 1) {
+				SPDK_ERRLOG("Unable to set cipher: %s\n", cipher_name);
+				goto err;
+			}
+			found = true;
+			break;
+		}
+	}
+	if (found == false) {
+		SPDK_ERRLOG("No suitable cipher found\n");
 		goto err;
 	}
-	key_len = impl_opts->psk_key_size;
-	if ((strlen(impl_opts->psk_identity) + 1 > max_identity_len)
-	    || (key_len > max_psk_len)) {
-		SPDK_ERRLOG("PSK ID or Key buffer is not sufficient\n");
+
+	SPDK_DEBUGLOG(sock_posix, "Cipher selected: %s\n", cipher_name);
+
+	rc = SSL_SESSION_set_protocol_version(*sess, TLS1_3_VERSION);
+	if (rc != 1) {
+		SPDK_ERRLOG("Unable to set TLS version: %d\n", TLS1_3_VERSION);
 		goto err;
 	}
-	spdk_strcpy_pad(identity, impl_opts->psk_identity, strlen(impl_opts->psk_identity), 0);
-	SPDK_DEBUGLOG(sock_posix, "Sending PSK identity '%s'\n", identity);
 
-	memcpy(psk, impl_opts->psk_key, key_len);
-	SPDK_DEBUGLOG(sock_posix, "Provided out-of-band (OOB) PSK for TLS1.3 client\n");
+	rc = SSL_SESSION_set1_master_key(*sess, impl_opts->psk_key, keylen);
+	if (rc != 1) {
+		SPDK_ERRLOG("Unable to set PSK for session\n");
+		goto err;
+	}
 
-	return key_len;
+	*identity_len = strlen(impl_opts->psk_identity);
+	*identity = impl_opts->psk_identity;
+
+	return 1;
 
 err:
+	SSL_SESSION_free(*sess);
+	*sess = NULL;
 	return 0;
 }
 
@@ -626,12 +756,6 @@ posix_sock_create_ssl_context(const SSL_METHOD *method, struct spdk_sock_opts *o
 	switch (impl_opts->tls_version) {
 	case 0:
 		/* auto-negotioation */
-		break;
-	case SPDK_TLS_VERSION_1_1:
-		tls_version = TLS1_1_VERSION;
-		break;
-	case SPDK_TLS_VERSION_1_2:
-		tls_version = TLS1_2_VERSION;
 		break;
 	case SPDK_TLS_VERSION_1_3:
 		tls_version = TLS1_3_VERSION;
@@ -667,6 +791,14 @@ posix_sock_create_ssl_context(const SSL_METHOD *method, struct spdk_sock_opts *o
 		}
 	}
 
+	/* SSL_CTX_set_ciphersuites() return 1 if the requested
+	 * cipher suite list was configured, and 0 otherwise. */
+	if (impl_opts->tls_cipher_suites != NULL &&
+	    SSL_CTX_set_ciphersuites(ctx, impl_opts->tls_cipher_suites) != 1) {
+		SPDK_ERRLOG("Unable to set TLS cipher suites for SSL'\n");
+		goto err;
+	}
+
 	return ctx;
 
 err:
@@ -688,7 +820,7 @@ ssl_sock_connect_loop(SSL_CTX *ctx, int fd, struct spdk_sock_impl_opts *impl_opt
 	}
 	SSL_set_fd(ssl, fd);
 	SSL_set_app_data(ssl, impl_opts);
-	SSL_set_psk_client_callback(ssl, posix_sock_tls_psk_client_cb);
+	SSL_set_psk_use_session_callback(ssl, posix_sock_psk_use_session_client_cb);
 	SPDK_DEBUGLOG(sock_posix, "SSL object creation finished: %p\n", ssl);
 	SPDK_DEBUGLOG(sock_posix, "%s = SSL_state_string_long(%p)\n", SSL_state_string_long(ssl), ssl);
 	while ((rc = SSL_connect(ssl)) != 1) {
@@ -727,7 +859,7 @@ ssl_sock_accept_loop(SSL_CTX *ctx, int fd, struct spdk_sock_impl_opts *impl_opts
 	}
 	SSL_set_fd(ssl, fd);
 	SSL_set_app_data(ssl, impl_opts);
-	SSL_set_psk_server_callback(ssl, posix_sock_tls_psk_server_cb);
+	SSL_set_psk_find_session_callback(ssl, posix_sock_psk_find_session_server_cb);
 	SPDK_DEBUGLOG(sock_posix, "SSL object creation finished: %p\n", ssl);
 	SPDK_DEBUGLOG(sock_posix, "%s = SSL_state_string_long(%p)\n", SSL_state_string_long(ssl), ssl);
 	while ((rc = SSL_accept(ssl)) != 1) {
@@ -860,7 +992,11 @@ posix_sock_create(const char *ip, int port,
 	SSL *ssl = 0;
 
 	assert(opts != NULL);
-	posix_opts_get_impl_opts(opts, &impl_opts);
+	if (enable_ssl) {
+		_opts_get_impl_opts(opts, &impl_opts, &g_ssl_impl_opts);
+	} else {
+		_opts_get_impl_opts(opts, &impl_opts, &g_posix_impl_opts);
+	}
 
 	if (ip == NULL) {
 		return NULL;
@@ -1501,12 +1637,6 @@ posix_sock_recv(struct spdk_sock *sock, void *buf, size_t len)
 	return posix_sock_readv(sock, iov, 1);
 }
 
-static void
-posix_sock_readv_async(struct spdk_sock *sock, struct spdk_sock_request *req)
-{
-	req->cb_fn(req->cb_arg, -ENOTSUP);
-}
-
 static ssize_t
 posix_sock_writev(struct spdk_sock *_sock, struct iovec *iov, int iovcnt)
 {
@@ -1675,7 +1805,7 @@ posix_sock_group_impl_get_optimal(struct spdk_sock *_sock, struct spdk_sock_grou
 }
 
 static struct spdk_sock_group_impl *
-posix_sock_group_impl_create(void)
+_sock_group_impl_create(uint32_t enable_placement_id)
 {
 	struct spdk_posix_sock_group_impl *group_impl;
 	int fd;
@@ -1700,12 +1830,24 @@ posix_sock_group_impl_create(void)
 	TAILQ_INIT(&group_impl->socks_with_data);
 	group_impl->placement_id = -1;
 
-	if (g_spdk_posix_sock_impl_opts.enable_placement_id == PLACEMENT_CPU) {
+	if (enable_placement_id == PLACEMENT_CPU) {
 		spdk_sock_map_insert(&g_map, spdk_env_get_current_core(), &group_impl->base);
 		group_impl->placement_id = spdk_env_get_current_core();
 	}
 
 	return &group_impl->base;
+}
+
+static struct spdk_sock_group_impl *
+posix_sock_group_impl_create(void)
+{
+	return _sock_group_impl_create(g_posix_impl_opts.enable_placement_id);
+}
+
+static struct spdk_sock_group_impl *
+ssl_sock_group_impl_create(void)
+{
+	return _sock_group_impl_create(g_ssl_impl_opts.enable_placement_id);
 }
 
 static void
@@ -1798,7 +1940,7 @@ posix_sock_group_impl_add_sock(struct spdk_sock_group_impl *_group, struct spdk_
 		TAILQ_INSERT_TAIL(&group->socks_with_data, sock, link);
 	}
 
-	if (g_spdk_posix_sock_impl_opts.enable_placement_id == PLACEMENT_MARK) {
+	if (_sock->impl_opts.enable_placement_id == PLACEMENT_MARK) {
 		posix_sock_update_mark(_group, _sock);
 	} else if (sock->placement_id != -1) {
 		rc = spdk_sock_map_insert(&g_map, sock->placement_id, &group->base);
@@ -2035,18 +2177,30 @@ posix_sock_group_impl_poll(struct spdk_sock_group_impl *_group, int max_events,
 }
 
 static int
-posix_sock_group_impl_close(struct spdk_sock_group_impl *_group)
+_sock_group_impl_close(struct spdk_sock_group_impl *_group, uint32_t enable_placement_id)
 {
 	struct spdk_posix_sock_group_impl *group = __posix_group_impl(_group);
 	int rc;
 
-	if (g_spdk_posix_sock_impl_opts.enable_placement_id == PLACEMENT_CPU) {
+	if (enable_placement_id == PLACEMENT_CPU) {
 		spdk_sock_map_release(&g_map, spdk_env_get_current_core());
 	}
 
 	rc = close(group->fd);
 	free(group);
 	return rc;
+}
+
+static int
+posix_sock_group_impl_close(struct spdk_sock_group_impl *_group)
+{
+	return _sock_group_impl_close(_group, g_posix_impl_opts.enable_placement_id);
+}
+
+static int
+ssl_sock_group_impl_close(struct spdk_sock_group_impl *_group)
+{
+	return _sock_group_impl_close(_group, g_ssl_impl_opts.enable_placement_id);
 }
 
 static struct spdk_net_impl g_posix_net_impl = {
@@ -2058,7 +2212,6 @@ static struct spdk_net_impl g_posix_net_impl = {
 	.close		= posix_sock_close,
 	.recv		= posix_sock_recv,
 	.readv		= posix_sock_readv,
-	.readv_async	= posix_sock_readv_async,
 	.writev		= posix_sock_writev,
 	.recv_next	= posix_sock_recv_next,
 	.writev_async	= posix_sock_writev_async,
@@ -2119,13 +2272,13 @@ static struct spdk_net_impl g_ssl_net_impl = {
 	.is_ipv4	= posix_sock_is_ipv4,
 	.is_connected	= posix_sock_is_connected,
 	.group_impl_get_optimal	= posix_sock_group_impl_get_optimal,
-	.group_impl_create	= posix_sock_group_impl_create,
+	.group_impl_create	= ssl_sock_group_impl_create,
 	.group_impl_add_sock	= posix_sock_group_impl_add_sock,
 	.group_impl_remove_sock = posix_sock_group_impl_remove_sock,
 	.group_impl_poll	= posix_sock_group_impl_poll,
-	.group_impl_close	= posix_sock_group_impl_close,
-	.get_opts	= posix_sock_impl_get_opts,
-	.set_opts	= posix_sock_impl_set_opts,
+	.group_impl_close	= ssl_sock_group_impl_close,
+	.get_opts	= ssl_sock_impl_get_opts,
+	.set_opts	= ssl_sock_impl_set_opts,
 };
 
 SPDK_NET_IMPL_REGISTER(ssl, &g_ssl_net_impl, DEFAULT_SOCK_PRIORITY);

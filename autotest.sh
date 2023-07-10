@@ -204,9 +204,9 @@ if [ $SPDK_RUN_FUNCTIONAL_TEST -eq 1 ]; then
 		if [[ $SPDK_TEST_NVME_PMR -eq 1 ]]; then
 			run_test "nvme_pmr" $rootdir/test/nvme/nvme_pmr.sh
 		fi
-		if [[ $SPDK_TEST_NVME_SCC -eq 1 ]]; then
-			run_test "nvme_scc" $rootdir/test/nvme/nvme_scc.sh
-		fi
+
+		run_test "nvme_scc" $rootdir/test/nvme/nvme_scc.sh
+
 		if [[ $SPDK_TEST_NVME_BP -eq 1 ]]; then
 			run_test "nvme_bp" $rootdir/test/nvme/nvme_bp.sh
 		fi
@@ -380,7 +380,5 @@ if hash lcov && ! [[ "$CC_TYPE" == *"clang"* ]]; then
 	$LCOV -q -r $out/cov_total.info '*/examples/vmd/*' -o $out/cov_total.info
 	$LCOV -q -r $out/cov_total.info '*/app/spdk_lspci/*' -o $out/cov_total.info
 	$LCOV -q -r $out/cov_total.info '*/app/spdk_top/*' -o $out/cov_total.info
-	owner=$(stat -c "%U" .)
-	sudo -u $owner git clean -f "*.gcda"
 	rm -f cov_base.info cov_test.info OLD_STDOUT OLD_STDERR
 fi

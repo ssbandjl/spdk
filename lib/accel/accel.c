@@ -1,6 +1,6 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2020 Intel Corporation.
- *   Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES.
+ *   Copyright (c) 2022, 2023 NVIDIA CORPORATION & AFFILIATES.
  *   All rights reserved.
  */
 
@@ -36,7 +36,6 @@
 #define ACCEL_BUFFER_OFFSET_MASK	((uintptr_t)ACCEL_BUFFER_BASE - 1)
 
 #define ACCEL_CRYPTO_TWEAK_MODE_DEFAULT	SPDK_ACCEL_CRYPTO_TWEAK_MODE_SIMPLE_LBA
-#define ACCEL_CRYPTO_TWEAK_MODE_CHAR_MAX	32
 
 struct accel_module {
 	struct spdk_accel_module_if	*module;
@@ -139,6 +138,7 @@ struct accel_buffer {
 
 struct accel_io_channel {
 	struct spdk_io_channel			*module_ch[ACCEL_OPC_LAST];
+	struct spdk_io_channel			*driver_channel;
 	void					*task_pool_base;
 	struct spdk_accel_sequence		*seq_pool_base;
 	struct accel_buffer			*buf_pool_base;
@@ -245,6 +245,8 @@ _accel_get_opc_name(enum accel_opcode opcode, const char **opcode_name)
 int
 spdk_accel_assign_opc(enum accel_opcode opcode, const char *name)
 {
+	char *copy;
+
 	if (g_modules_started == true) {
 		/* we don't allow re-assignment once things have started */
 		return -EINVAL;
@@ -255,8 +257,13 @@ spdk_accel_assign_opc(enum accel_opcode opcode, const char *name)
 		return -EINVAL;
 	}
 
+	copy = strdup(name);
+	if (copy == NULL) {
+		return -ENOMEM;
+	}
+
 	/* module selection will be validated after the framework starts. */
-	g_modules_opc_override[opcode] = strdup(name);
+	g_modules_opc_override[opcode] = copy;
 
 	return 0;
 }
@@ -1587,8 +1594,6 @@ accel_process_sequence(struct spdk_accel_sequence *seq)
 	seq->in_process_sequence = true;
 
 	task = TAILQ_FIRST(&seq->tasks);
-	assert(task != NULL);
-
 	do {
 		state = seq->state;
 		switch (state) {
@@ -1673,7 +1678,7 @@ accel_process_sequence(struct spdk_accel_sequence *seq)
 			assert(!TAILQ_EMPTY(&seq->tasks));
 
 			accel_sequence_set_state(seq, ACCEL_SEQUENCE_STATE_DRIVER_AWAIT_TASK);
-			rc = g_accel_driver->execute_sequence(seq);
+			rc = g_accel_driver->execute_sequence(accel_ch->driver_channel, seq);
 			if (spdk_unlikely(rc != 0)) {
 				SPDK_ERRLOG("Failed to execute sequence: %p using driver: %s\n",
 					    seq, g_accel_driver->name);
@@ -1681,6 +1686,8 @@ accel_process_sequence(struct spdk_accel_sequence *seq)
 			}
 			break;
 		case ACCEL_SEQUENCE_STATE_DRIVER_COMPLETE:
+			/* Get the task again, as the driver might have completed some tasks
+			 * synchronously */
 			task = TAILQ_FIRST(&seq->tasks);
 			if (task == NULL) {
 				/* Immediately return here to make sure we don't touch the sequence
@@ -2033,11 +2040,16 @@ accel_aes_xts_keys_equal(const char *k1, size_t k1_len, const char *k2, size_t k
 	return x == 0;
 }
 
-static const char *g_tweak_modes[SPDK_ACCEL_CRYPTO_TWEAK_MODE_MAX] = {
+static const char *g_tweak_modes[] = {
 	[SPDK_ACCEL_CRYPTO_TWEAK_MODE_SIMPLE_LBA] = "SIMPLE_LBA",
 	[SPDK_ACCEL_CRYPTO_TWEAK_MODE_JOIN_NEG_LBA_WITH_LBA] = "JOIN_NEG_LBA_WITH_LBA",
 	[SPDK_ACCEL_CRYPTO_TWEAK_MODE_INCR_512_FULL_LBA] = "INCR_512_FULL_LBA",
 	[SPDK_ACCEL_CRYPTO_TWEAK_MODE_INCR_512_UPPER_LBA] = "INCR_512_UPPER_LBA",
+};
+
+static const char *g_ciphers[] = {
+	[SPDK_ACCEL_CIPHER_AES_CBC] = "AES_CBC",
+	[SPDK_ACCEL_CIPHER_AES_XTS] = "AES_XTS",
 };
 
 int
@@ -2046,6 +2058,8 @@ spdk_accel_crypto_key_create(const struct spdk_accel_crypto_key_create_param *pa
 	struct spdk_accel_module_if *module;
 	struct spdk_accel_crypto_key *key;
 	size_t hex_key_size, hex_key2_size;
+	bool found = false;
+	size_t i;
 	int rc;
 
 	if (!param || !param->hex_key || !param->cipher || !param->key_name) {
@@ -2062,7 +2076,8 @@ spdk_accel_crypto_key_create(const struct spdk_accel_crypto_key_create_param *pa
 		SPDK_ERRLOG("No accel module found assigned for crypto operation\n");
 		return -ENOENT;
 	}
-	if (!module->crypto_key_init) {
+
+	if (!module->crypto_key_init || !module->crypto_supports_cipher) {
 		SPDK_ERRLOG("Accel module \"%s\" doesn't support crypto operations\n", module->name);
 		return -ENOTSUP;
 	}
@@ -2075,6 +2090,22 @@ spdk_accel_crypto_key_create(const struct spdk_accel_crypto_key_create_param *pa
 	key->param.key_name = strdup(param->key_name);
 	if (!key->param.key_name) {
 		rc = -ENOMEM;
+		goto error;
+	}
+
+	for (i = 0; i < SPDK_COUNTOF(g_ciphers); ++i) {
+		assert(g_ciphers[i]);
+
+		if (strncmp(param->cipher, g_ciphers[i], strlen(g_ciphers[i])) == 0) {
+			key->cipher = i;
+			found = true;
+			break;
+		}
+	}
+
+	if (!found) {
+		SPDK_ERRLOG("Failed to parse cipher\n");
+		rc = -EINVAL;
 		goto error;
 	}
 
@@ -2142,7 +2173,7 @@ spdk_accel_crypto_key_create(const struct spdk_accel_crypto_key_create_param *pa
 
 	key->tweak_mode = ACCEL_CRYPTO_TWEAK_MODE_DEFAULT;
 	if (param->tweak_mode) {
-		bool found = false;
+		found = false;
 
 		key->param.tweak_mode = strdup(param->tweak_mode);
 		if (!key->param.tweak_mode) {
@@ -2150,10 +2181,10 @@ spdk_accel_crypto_key_create(const struct spdk_accel_crypto_key_create_param *pa
 			goto error;
 		}
 
-		for (uint32_t i = 0; i < SPDK_COUNTOF(g_tweak_modes); ++i) {
-			assert(strlen(g_tweak_modes[i]) < ACCEL_CRYPTO_TWEAK_MODE_CHAR_MAX);
+		for (i = 0; i < SPDK_COUNTOF(g_tweak_modes); ++i) {
+			assert(g_tweak_modes[i]);
 
-			if (strncmp(param->tweak_mode, g_tweak_modes[i], ACCEL_CRYPTO_TWEAK_MODE_CHAR_MAX) == 0) {
+			if (strncmp(param->tweak_mode, g_tweak_modes[i], strlen(g_tweak_modes[i])) == 0) {
 				key->tweak_mode = i;
 				found = true;
 				break;
@@ -2175,22 +2206,29 @@ spdk_accel_crypto_key_create(const struct spdk_accel_crypto_key_create_param *pa
 		goto error;
 	}
 
-	if (strcmp(key->param.cipher, ACCEL_AES_XTS) == 0) {
+	if (!module->crypto_supports_cipher(key->cipher)) {
+		SPDK_ERRLOG("Module %s doesn't support %s cipher\n", module->name, g_ciphers[key->cipher]);
+		rc = -EINVAL;
+		goto error;
+	}
+
+	if (key->cipher == SPDK_ACCEL_CIPHER_AES_XTS) {
 		if (!key->key2) {
-			SPDK_ERRLOG("%s key2 is missing\n", ACCEL_AES_XTS);
+			SPDK_ERRLOG("%s key2 is missing\n", g_ciphers[key->cipher]);
 			rc = -EINVAL;
 			goto error;
 		}
 
 		if (key->key_size != key->key2_size) {
-			SPDK_ERRLOG("%s key size %zu is not equal to key2 size %zu\n", ACCEL_AES_XTS, key->key_size,
+			SPDK_ERRLOG("%s key size %zu is not equal to key2 size %zu\n", g_ciphers[key->cipher],
+				    key->key_size,
 				    key->key2_size);
 			rc = -EINVAL;
 			goto error;
 		}
 
 		if (accel_aes_xts_keys_equal(key->key, key->key_size, key->key2, key->key2_size)) {
-			SPDK_ERRLOG("%s identical keys are not secure\n", ACCEL_AES_XTS);
+			SPDK_ERRLOG("%s identical keys are not secure\n", g_ciphers[key->cipher]);
 			rc = -EINVAL;
 			goto error;
 		}
@@ -2332,6 +2370,14 @@ accel_create_channel(void *io_device, void *ctx_buf)
 		}
 	}
 
+	if (g_accel_driver != NULL) {
+		accel_ch->driver_channel = g_accel_driver->get_io_channel();
+		if (accel_ch->driver_channel == NULL) {
+			SPDK_ERRLOG("Failed to get driver's IO channel\n");
+			goto err;
+		}
+	}
+
 	rc = spdk_iobuf_channel_init(&accel_ch->iobuf, "accel", g_opts.small_cache_size,
 				     g_opts.large_cache_size);
 	if (rc != 0) {
@@ -2341,6 +2387,9 @@ accel_create_channel(void *io_device, void *ctx_buf)
 
 	return 0;
 err:
+	if (accel_ch->driver_channel != NULL) {
+		spdk_put_io_channel(accel_ch->driver_channel);
+	}
 	for (j = 0; j < i; j++) {
 		spdk_put_io_channel(accel_ch->module_ch[j]);
 	}
@@ -2374,6 +2423,10 @@ accel_destroy_channel(void *io_device, void *ctx_buf)
 
 	spdk_iobuf_channel_fini(&accel_ch->iobuf);
 
+	if (accel_ch->driver_channel != NULL) {
+		spdk_put_io_channel(accel_ch->driver_channel);
+	}
+
 	for (i = 0; i < ACCEL_OPC_LAST; i++) {
 		assert(accel_ch->module_ch[i] != NULL);
 		spdk_put_io_channel(accel_ch->module_ch[i]);
@@ -2396,14 +2449,24 @@ spdk_accel_get_io_channel(void)
 	return spdk_get_io_channel(&spdk_accel_module_list);
 }
 
-static void
+static int
 accel_module_initialize(void)
 {
-	struct spdk_accel_module_if *accel_module;
+	struct spdk_accel_module_if *accel_module, *tmp_module;
+	int rc = 0, module_rc;
 
-	TAILQ_FOREACH(accel_module, &spdk_accel_module_list, tailq) {
-		accel_module->module_init();
+	TAILQ_FOREACH_SAFE(accel_module, &spdk_accel_module_list, tailq, tmp_module) {
+		module_rc = accel_module->module_init();
+		if (module_rc) {
+			SPDK_ERRLOG("Module %s initialization failed with %d\n", accel_module->name, module_rc);
+			TAILQ_REMOVE(&spdk_accel_module_list, accel_module, tailq);
+			if (!rc) {
+				rc = module_rc;
+			}
+		}
 	}
+
+	return rc;
 }
 
 static void
@@ -2424,6 +2487,16 @@ spdk_accel_initialize(void)
 	struct spdk_accel_module_if *accel_module = NULL;
 	int rc;
 
+	/*
+	 * We need a unique identifier for the accel framework, so use the
+	 * spdk_accel_module_list address for this purpose.
+	 */
+	spdk_io_device_register(&spdk_accel_module_list, accel_create_channel, accel_destroy_channel,
+				sizeof(struct accel_io_channel), "accel");
+
+	spdk_spin_init(&g_keyring_spin);
+	spdk_spin_init(&g_stats_lock);
+
 	rc = spdk_memory_domain_create(&g_accel_domain, SPDK_DMA_DEVICE_TYPE_ACCEL, NULL,
 				       "SPDK_ACCEL_DMA_DEVICE");
 	if (rc != 0) {
@@ -2431,11 +2504,11 @@ spdk_accel_initialize(void)
 		return rc;
 	}
 
-	spdk_spin_init(&g_keyring_spin);
-	spdk_spin_init(&g_stats_lock);
-
 	g_modules_started = true;
-	accel_module_initialize();
+	rc = accel_module_initialize();
+	if (rc) {
+		return rc;
+	}
 
 	/* Create our priority global map of opcodes to modules, we populate starting
 	 * with the software module (guaranteed to be first on the list) and then
@@ -2458,13 +2531,11 @@ spdk_accel_initialize(void)
 			accel_module = _module_find_by_name(g_modules_opc_override[op]);
 			if (accel_module == NULL) {
 				SPDK_ERRLOG("Invalid module name of %s\n", g_modules_opc_override[op]);
-				rc = -EINVAL;
-				goto error;
+				return -EINVAL;
 			}
 			if (accel_module->supports_opcode(op) == false) {
 				SPDK_ERRLOG("Module %s does not support op code %d\n", accel_module->name, op);
-				rc = -EINVAL;
-				goto error;
+				return -EINVAL;
 			}
 			g_modules_opc[op].module = accel_module;
 		}
@@ -2472,8 +2543,7 @@ spdk_accel_initialize(void)
 
 	if (g_modules_opc[ACCEL_OPC_ENCRYPT].module != g_modules_opc[ACCEL_OPC_DECRYPT].module) {
 		SPDK_ERRLOG("Different accel modules are assigned to encrypt and decrypt operations");
-		rc = -EINVAL;
-		goto error;
+		return -EINVAL;
 	}
 
 	for (op = 0; op < ACCEL_OPC_LAST; op++) {
@@ -2484,29 +2554,16 @@ spdk_accel_initialize(void)
 	rc = spdk_iobuf_register_module("accel");
 	if (rc != 0) {
 		SPDK_ERRLOG("Failed to register accel iobuf module\n");
-		goto error;
+		return rc;
 	}
 
-	/*
-	 * We need a unique identifier for the accel framework, so use the
-	 * spdk_accel_module_list address for this purpose.
-	 */
-	spdk_io_device_register(&spdk_accel_module_list, accel_create_channel, accel_destroy_channel,
-				sizeof(struct accel_io_channel), "accel");
-
 	return 0;
-error:
-	spdk_memory_domain_destroy(g_accel_domain);
-
-	return rc;
 }
 
 static void
 accel_module_finish_cb(void)
 {
 	spdk_accel_fini_cb cb_fn = g_fini_cb_fn;
-
-	spdk_memory_domain_destroy(g_accel_domain);
 
 	cb_fn(g_fini_cb_arg);
 	g_fini_cb_fn = NULL;
@@ -2635,6 +2692,10 @@ spdk_accel_module_finish(void)
 	if (!g_accel_module) {
 		spdk_spin_destroy(&g_keyring_spin);
 		spdk_spin_destroy(&g_stats_lock);
+		if (g_accel_domain) {
+			spdk_memory_domain_destroy(g_accel_domain);
+			g_accel_domain = NULL;
+		}
 		accel_module_finish_cb();
 		return;
 	}

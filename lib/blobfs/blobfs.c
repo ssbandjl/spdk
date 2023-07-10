@@ -1103,8 +1103,8 @@ __fs_create_file_done(void *arg, int fserrno)
 	struct spdk_fs_request *req = arg;
 	struct spdk_fs_cb_args *args = &req->args;
 
-	__wake_caller(args, fserrno);
 	SPDK_DEBUGLOG(blobfs, "file=%s\n", args->op.create.name);
+	__wake_caller(args, fserrno);
 }
 
 static void
@@ -1250,8 +1250,8 @@ __fs_open_file_done(void *arg, struct spdk_file *file, int bserrno)
 	struct spdk_fs_cb_args *args = &req->args;
 
 	args->file = file;
-	__wake_caller(args, bserrno);
 	SPDK_DEBUGLOG(blobfs, "file=%s\n", args->op.open.name);
+	__wake_caller(args, bserrno);
 }
 
 static void
@@ -1720,6 +1720,11 @@ __read_done(void *ctx, int bserrno)
 	struct spdk_fs_cb_args *args = &req->args;
 	void *buf;
 
+	if (bserrno) {
+		__rw_done(req, bserrno);
+		return;
+	}
+
 	assert(req != NULL);
 	buf = (void *)((uintptr_t)args->op.rw.pin_buf + (args->op.rw.offset & (args->op.rw.blocklen - 1)));
 	if (args->op.rw.is_read) {
@@ -1886,6 +1891,7 @@ spdk_file_read_async(struct spdk_file *file, struct spdk_io_channel *channel,
 {
 	SPDK_DEBUGLOG(blobfs, "file=%s offset=%jx length=%jx\n",
 		      file->name, offset, length);
+
 	__readwrite(file, channel, payload, offset, length, cb_fn, cb_arg, 1);
 }
 

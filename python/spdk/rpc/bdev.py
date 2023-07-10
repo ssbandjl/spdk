@@ -436,6 +436,19 @@ def bdev_raid_delete(client, name):
     return client.call('bdev_raid_delete', params)
 
 
+def bdev_raid_remove_base_bdev(client, name):
+    """Remove base bdev from existing raid bdev
+
+    Args:
+        name: base bdev name
+
+    Returns:
+        None
+    """
+    params = {'name': name}
+    return client.call('bdev_raid_remove_base_bdev', params)
+
+
 def bdev_aio_create(client, filename, name, block_size=None, readonly=False):
     """Construct a Linux AIO block device.
 
@@ -733,7 +746,7 @@ def bdev_nvme_attach_controller(client, name, trtype, traddr, adrfam=None, trsvc
         0 means no such timeout.
         If fast_io_fail_timeout_sec is not zero, it has to be not less than reconnect_delay_sec and less than
         ctrlr_loss_timeout_sec if ctrlr_loss_timeout_sec is not -1. (optional)
-        psk: Set PSK and enable TCP SSL socket implementation (optional)
+        psk: Set PSK file path and enable TCP SSL socket implementation (optional)
         max_bdevs: Size of the name array for newly created bdevs. Default is 128. (optional)
 
     Returns:
@@ -849,16 +862,52 @@ def bdev_nvme_detach_controller(client, name, trtype=None, traddr=None,
     return client.call('bdev_nvme_detach_controller', params)
 
 
-def bdev_nvme_reset_controller(client, name):
-    """Reset NVMe controller.
+def bdev_nvme_reset_controller(client, name, cntlid):
+    """Reset an NVMe controller or all NVMe controllers in an NVMe bdev controller.
 
     Args:
         name: controller name
+        cntlid: NVMe controller ID (optional)
     """
 
     params = {'name': name}
 
+    if cntlid is not None:
+        params['cntlid'] = cntlid
+
     return client.call('bdev_nvme_reset_controller', params)
+
+
+def bdev_nvme_enable_controller(client, name, cntlid):
+    """Enable an NVMe controller or all NVMe controllers in an NVMe bdev controller.
+
+    Args:
+        name: controller name
+        cntlid: NVMe controller ID (optional)
+    """
+
+    params = {'name': name}
+
+    if cntlid is not None:
+        params['cntlid'] = cntlid
+
+    return client.call('bdev_nvme_enable_controller', params)
+
+
+def bdev_nvme_disable_controller(client, name, cntlid):
+    """Disable an NVMe controller or all NVMe controllers in an NVMe bdev controller.
+
+    Args:
+        name: controller name
+        cntlid: NVMe controller ID (optional)
+    """
+
+    params = {'name': name}
+
+    if cntlid is not None:
+        params['cntlid'] = cntlid
+
+    return client.call('bdev_nvme_disable_controller', params)
 
 
 def bdev_nvme_start_discovery(client, name, trtype, traddr, adrfam=None, trsvcid=None,

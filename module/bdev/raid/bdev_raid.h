@@ -41,17 +41,19 @@ enum raid_bdev_state {
 	RAID_BDEV_STATE_MAX
 };
 
+typedef void (*raid_bdev_remove_base_bdev_cb)(void *ctx, int status);
+
 /*
  * raid_base_bdev_info contains information for the base bdevs which are part of some
  * raid. This structure contains the per base bdev information. Whatever is
  * required per base device for raid bdev will be kept here
  */
 struct raid_base_bdev_info {
+	/* The raid bdev that this base bdev belongs to */
+	struct raid_bdev	*raid_bdev;
+
 	/* name of the bdev */
 	char			*name;
-
-	/* pointer to base spdk bdev */
-	struct spdk_bdev	*bdev;
 
 	/* pointer to base bdev descriptor opened by raid bdev */
 	struct spdk_bdev_desc	*desc;
@@ -62,6 +64,12 @@ struct raid_base_bdev_info {
 	 * descriptor will be closed
 	 */
 	bool			remove_scheduled;
+
+	/* callback for base bdev removal */
+	raid_bdev_remove_base_bdev_cb remove_cb;
+
+	/* context of the callback */
+	void			*remove_cb_ctx;
 
 	/* Hold the number of blocks to know how large the base bdev is resized. */
 	uint64_t		blockcnt;
@@ -104,6 +112,9 @@ struct raid_bdev {
 
 	/* array of base bdev info */
 	struct raid_base_bdev_info	*base_bdev_info;
+
+	/* lock to protect the base bdev array */
+	struct spdk_spinlock		base_bdev_lock;
 
 	/* strip size of raid bdev in blocks */
 	uint32_t			strip_size;
@@ -177,6 +188,8 @@ const char *raid_bdev_level_to_str(enum raid_level level);
 enum raid_bdev_state raid_bdev_str_to_state(const char *str);
 const char *raid_bdev_state_to_str(enum raid_bdev_state state);
 void raid_bdev_write_info_json(struct raid_bdev *raid_bdev, struct spdk_json_write_ctx *w);
+int raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev, raid_bdev_remove_base_bdev_cb cb_fn,
+			       void *cb_ctx);
 
 /*
  * RAID module descriptor

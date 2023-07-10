@@ -97,8 +97,6 @@ export SPDK_TEST_ISCSI_INITIATOR
 export SPDK_TEST_NVME
 : ${SPDK_TEST_NVME_PMR=0}
 export SPDK_TEST_NVME_PMR
-: ${SPDK_TEST_NVME_SCC=0}
-export SPDK_TEST_NVME_SCC
 : ${SPDK_TEST_NVME_BP=0}
 export SPDK_TEST_NVME_BP
 : ${SPDK_TEST_NVME_CLI=0}
@@ -242,7 +240,7 @@ export LSAN_OPTIONS=suppressions="$asan_suppression_file"
 export DEFAULT_RPC_ADDR="/var/tmp/spdk.sock"
 
 if [ -z "${DEPENDENCY_DIR:-}" ]; then
-	export DEPENDENCY_DIR=$HOME/spdk_dependencies
+	export DEPENDENCY_DIR=/var/spdk/dependencies
 else
 	export DEPENDENCY_DIR
 fi
@@ -256,6 +254,9 @@ export QEMU_BIN=${QEMU_BIN:-}
 export VFIO_QEMU_BIN=${VFIO_QEMU_BIN:-}
 
 export AR_TOOL=$rootdir/scripts/ar-xnvme-fixer
+
+# For testing nvmes which are attached to some sort of a fanout switch in the CI pool
+export UNBIND_ENTIRE_IOMMU_GROUP=${UNBIND_ENTIRE_IOMMU_GROUP:-no}
 
 # pass our valgrind desire on to unittest.sh
 if [ $SPDK_RUN_VALGRIND -eq 0 ]; then
@@ -685,6 +686,24 @@ function timing() {
 		test_stack=$(echo "$test_stack" | sed -e 's@;[^;]*$@@')
 	fi
 }
+
+function timing_cmd() (
+	# The use-case here is this: ts=$(timing_cmd echo bar). Since stdout is always redirected
+	# to a pipe handling the $(), lookup the stdin's device and determine if it's sane to send
+	# cmd's output to it. If not, just null it.
+
+	[[ -t 0 ]] && exec {cmd_out}>&0 || exec {cmd_out}> /dev/null
+
+	local time=0 TIMEFORMAT=%2R # seconds
+
+	# We redirect cmd's std{out,err} to a separate fd dup'ed to stdin's device (or /dev/null) to
+	# catch only output from the time builtin - output from the actual cmd would be still visible,
+	# but $() will return just the time's data, hence making it possible to just do:
+	#  time_of_super_verbose_cmd=$(timing_cmd super_verbose_cmd)
+	time=$({ time "$@" >&"$cmd_out" 2>&1; } 2>&1)
+
+	echo "$time"
+)
 
 function timing_enter() {
 	xtrace_disable

@@ -382,6 +382,43 @@ function check_include_style() {
 	return $rc
 }
 
+function check_opts_structs() {
+	local IFS="|" out types=(
+		spdk_nvme_ns_cmd_ext_io_opts
+		spdk_dif_ctx_init_ext_opts
+	)
+
+	if out=$(git grep -InE "(\.|->)size[[:space:]]*=[[:space:]]*sizeof\(struct (${types[*]})\)"); then
+		cat <<- WARN
+			Found incorrect *ext_opts struct usage.  Use SPDK_SIZEOF() to calculate its size.
+
+			$out
+		WARN
+		return 1
+	fi
+}
+
+function check_attr_packed() {
+	local out
+
+	# For now, we only care about the packed attribute in selected files.  We only check those
+	# used by Timberland (see https://github.com/timberland-sig), as they're using msvc, which
+	# doesn't support the __attribute__ keyword.
+	if out=$(git grep -In '__attribute__((packed))' \
+		'include/spdk/nvme*.h' \
+		'include/spdk/sock.h' \
+		'include/spdk_internal/nvme*.h' \
+		'lib/nvme' 'lib/sock'); then
+		cat <<- WARN
+			Found forbidden __attribute__((packed)).  Try to pack the structures manually or
+			use #pragma pack instead.
+
+			$out
+		WARN
+		return 1
+	fi
+}
+
 function check_python_style() {
 	local rc=0
 
@@ -787,6 +824,8 @@ check_eof || rc=1
 check_posix_includes || rc=1
 check_naming_conventions || rc=1
 check_include_style || rc=1
+check_opts_structs || rc=1
+check_attr_packed || rc=1
 check_python_style || rc=1
 check_bash_style || rc=1
 check_bash_static_analysis || rc=1

@@ -37,7 +37,6 @@ enum spdk_accel_crypto_tweak_mode {
 	 * so initial lba = (BLOCK_SIZE_IN_BYTES / 512) * LBA
 	 * Tweak[127:0] = {lba[63:0], 64'b0} */
 	SPDK_ACCEL_CRYPTO_TWEAK_MODE_INCR_512_UPPER_LBA,
-	SPDK_ACCEL_CRYPTO_TWEAK_MODE_MAX,
 };
 
 struct spdk_accel_crypto_key {
@@ -46,6 +45,7 @@ struct spdk_accel_crypto_key {
 	size_t key_size;				/**< Key size in bytes */
 	char *key2;					/**< Key2 in binary form */
 	size_t key2_size;				/**< Key2 size in bytes */
+	enum spdk_accel_cipher cipher;
 	enum spdk_accel_crypto_tweak_mode tweak_mode;
 	struct spdk_accel_module_if *module_if;			/**< Accel module the key belongs to */
 	struct spdk_accel_crypto_key_create_param param;	/**< User input parameters */
@@ -176,6 +176,11 @@ struct spdk_accel_module_if {
 	bool (*crypto_supports_tweak_mode)(enum spdk_accel_crypto_tweak_mode tweak_mode);
 
 	/**
+	 * Returns true if given cipher is supported.
+	 */
+	bool (*crypto_supports_cipher)(enum spdk_accel_cipher cipher);
+
+	/**
 	 * Returns memory domains supported by the module.  If NULL, the module does not support
 	 * memory domains.  The `domains` array can be NULL, in which case this function only
 	 * returns the number of supported memory domains.
@@ -219,11 +224,16 @@ struct spdk_accel_driver {
 	 * to the driver.  `spdk_accel_sequence_continue()` should only be called if this function
 	 * succeeds (i.e. returns 0).
 	 *
-	 * \param Sequence of tasks to execute.
+	 * \param ch IO channel obtained by `get_io_channel()`.
+	 * \param seq Sequence of tasks to execute.
 	 *
 	 * \return 0 on success, negative errno on failure.
 	 */
-	int (*execute_sequence)(struct spdk_accel_sequence *seq);
+	int (*execute_sequence)(struct spdk_io_channel *ch, struct spdk_accel_sequence *seq);
+	/**
+	 * Returns IO channel that will be passed to `execute_sequence()`.
+	 */
+	struct spdk_io_channel *(*get_io_channel)(void);
 
 	TAILQ_ENTRY(spdk_accel_driver)	tailq;
 };

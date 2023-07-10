@@ -201,15 +201,18 @@ bdev_part_remap_dif(struct spdk_bdev_io *bdev_io, uint32_t offset,
 	struct spdk_dif_ctx dif_ctx;
 	struct spdk_dif_error err_blk = {};
 	int rc;
+	struct spdk_dif_ctx_init_ext_opts dif_opts;
 
 	if (spdk_likely(!(bdev->dif_check_flags & SPDK_DIF_FLAGS_REFTAG_CHECK))) {
 		return 0;
 	}
 
+	dif_opts.size = SPDK_SIZEOF(&dif_opts, dif_pi_format);
+	dif_opts.dif_pi_format = SPDK_DIF_PI_FORMAT_16;
 	rc = spdk_dif_ctx_init(&dif_ctx,
 			       bdev->blocklen, bdev->md_len, bdev->md_interleave,
 			       bdev->dif_is_head_of_md, bdev->dif_type, bdev->dif_check_flags,
-			       offset, 0, 0, 0, 0);
+			       offset, 0, 0, 0, 0, &dif_opts);
 	if (rc != 0) {
 		SPDK_ERRLOG("Initialization of DIF context failed\n");
 		return rc;
@@ -598,7 +601,7 @@ spdk_bdev_part_construct_ext(struct spdk_bdev_part *part, struct spdk_bdev_part_
 	 * based on the namespace UUID, the base bdev's UUID and the block range of the
 	 * partition.
 	 */
-	if (!spdk_mem_all_zero(&opts.uuid, sizeof(opts.uuid))) {
+	if (!spdk_uuid_is_null(&opts.uuid)) {
 		spdk_uuid_copy(&part->internal.bdev.uuid, &opts.uuid);
 	} else {
 		struct {

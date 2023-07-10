@@ -6,7 +6,7 @@
 SPDK_ROOT_DIR := $(abspath $(CURDIR)/../..)
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 
-SO_VER := 10
+SO_VER := 11
 SO_MINOR := 0
 
 C_SRCS = nvme_ctrlr_cmd.c nvme_ctrlr.c nvme_fabric.c nvme_ns_cmd.c \
@@ -45,6 +45,8 @@ ifeq ($(CONFIG_NVME_CUSE),y)
 # fuse requires to set _FILE_OFFSET_BITS to 64 bits even for 64 bit machines
 CFLAGS += -D_FILE_OFFSET_BITS=64
 endif
+
+CFLAGS += -Wpointer-arith
 
 SPDK_MAP_FILE = $(abspath $(CURDIR)/spdk_nvme.map)
 

@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2016 Intel Corporation. All rights reserved.
  *   Copyright (c) 2019-2021 Mellanox Technologies LTD. All rights reserved.
- *   Copyright (c) 2021, 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2021-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 /*
@@ -1512,7 +1512,7 @@ nvme_rdma_build_contig_inline_request(struct nvme_rdma_qpair *rqpair,
 {
 	struct nvme_request *req = rdma_req->req;
 	struct nvme_rdma_memory_translation_ctx ctx = {
-		.addr = req->payload.contig_or_cb_arg + req->payload_offset,
+		.addr = (uint8_t *)req->payload.contig_or_cb_arg + req->payload_offset,
 		.length = req->payload_size
 	};
 	int rc;
@@ -1561,7 +1561,7 @@ nvme_rdma_build_contig_request(struct nvme_rdma_qpair *rqpair,
 {
 	struct nvme_request *req = rdma_req->req;
 	struct nvme_rdma_memory_translation_ctx ctx = {
-		.addr = req->payload.contig_or_cb_arg + req->payload_offset,
+		.addr = (uint8_t *)req->payload.contig_or_cb_arg + req->payload_offset,
 		.length = req->payload_size
 	};
 	int rc;
@@ -1928,15 +1928,13 @@ static void nvme_rdma_qpair_abort_reqs(struct spdk_nvme_qpair *qpair, uint32_t d
 static int
 nvme_rdma_qpair_disconnected(struct nvme_rdma_qpair *rqpair, int ret)
 {
-	nvme_rdma_qpair_abort_reqs(&rqpair->qpair, 0);
-
 	if (ret) {
 		SPDK_DEBUGLOG(nvme, "Target did not respond to qpair disconnect.\n");
 		goto quiet;
 	}
 
 	if (rqpair->poller == NULL) {
-		/* If poller is not used, cq is not shared or already destroyed.
+		/* If poller is not used, cq is not shared.
 		 * So complete disconnecting qpair immediately.
 		 */
 		goto quiet;
@@ -1959,6 +1957,7 @@ nvme_rdma_qpair_disconnected(struct nvme_rdma_qpair *rqpair, int ret)
 quiet:
 	rqpair->state = NVME_RDMA_QPAIR_STATE_EXITED;
 
+	nvme_rdma_qpair_abort_reqs(&rqpair->qpair, 0);
 	nvme_rdma_qpair_destroy(rqpair);
 	nvme_transport_ctrlr_disconnect_qpair_done(&rqpair->qpair);
 
@@ -1976,6 +1975,7 @@ nvme_rdma_qpair_wait_until_quiet(struct nvme_rdma_qpair *rqpair)
 
 	rqpair->state = NVME_RDMA_QPAIR_STATE_EXITED;
 
+	nvme_rdma_qpair_abort_reqs(&rqpair->qpair, 0);
 	nvme_rdma_qpair_destroy(rqpair);
 	nvme_transport_ctrlr_disconnect_qpair_done(&rqpair->qpair);
 
@@ -2055,8 +2055,11 @@ nvme_rdma_ctrlr_disconnect_qpair(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme
 	 * It is ensured that poll_group_process_completions() calls disconnected_qpair_cb
 	 * for any disconnected qpair. Hence, we do not have to check if the qpair is in
 	 * a poll group or not.
+	 * At the same time, if the qpair is being destroyed, i.e. this function is called by
+	 * spdk_nvme_ctrlr_free_io_qpair then we need to wait until qpair is disconnected, otherwise
+	 * we may leak some resources.
 	 */
-	if (qpair->async) {
+	if (qpair->async && !qpair->destroy_in_progress) {
 		return;
 	}
 
@@ -3072,18 +3075,6 @@ static int
 nvme_rdma_poll_group_remove(struct spdk_nvme_transport_poll_group *tgroup,
 			    struct spdk_nvme_qpair *qpair)
 {
-	struct nvme_rdma_qpair		*rqpair = nvme_rdma_qpair(qpair);
-	struct nvme_rdma_poll_group	*group = nvme_rdma_poll_group(tgroup);
-
-	assert(qpair->poll_group_tailq_head == &tgroup->disconnected_qpairs);
-
-	if (rqpair->poller) {
-		nvme_rdma_poll_group_put_poller(group, rqpair->poller);
-
-		rqpair->poller = NULL;
-		rqpair->cq = NULL;
-	}
-
 	return 0;
 }
 

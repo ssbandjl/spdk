@@ -24,6 +24,7 @@
 #include "spdk/likely.h"
 #include "spdk/sock.h"
 #include "spdk/zipf.h"
+#include "spdk/nvmf.h"
 
 #ifdef SPDK_CONFIG_URING
 #include <liburing.h>
@@ -156,6 +157,8 @@ struct ns_worker_ctx {
 
 	TAILQ_ENTRY(ns_worker_ctx)	link;
 
+	TAILQ_HEAD(, perf_task)		queued_tasks;
+
 	struct spdk_histogram_data	*histogram;
 };
 
@@ -172,6 +175,7 @@ struct perf_task {
 #if HAVE_LIBAIO
 	struct iocb		iocb;
 #endif
+	TAILQ_ENTRY(perf_task)	link;
 };
 
 struct worker_thread {
@@ -246,6 +250,7 @@ static bool g_mix_specified;
 static bool g_exit;
 /* Default to 10 seconds for the keep alive value. This value is arbitrary. */
 static uint32_t g_keep_alive_timeout_in_ms = 10000;
+static bool g_continue_on_error = false;
 static uint32_t g_quiet_count = 1;
 static double g_zipf_theta;
 /* Set default io_queue_size to UINT16_MAX, NVMe driver will then reduce this
@@ -335,14 +340,28 @@ perf_set_sock_opts(const char *impl_name, const char *field, uint32_t val, const
 		sock_opts.tls_version = val;
 	} else if (strcmp(field, "ktls") == 0) {
 		sock_opts.enable_ktls = val;
-	} else if (strcmp(field, "psk_key") == 0) {
+	} else if (strcmp(field, "psk_path") == 0) {
 		if (!valstr) {
 			fprintf(stderr, "No socket opts value specified\n");
 			return;
 		}
-		g_psk = strdup(valstr);
+		g_psk = calloc(1, SPDK_TLS_PSK_MAX_LEN + 1);
 		if (g_psk == NULL) {
 			fprintf(stderr, "Failed to allocate memory for psk\n");
+			return;
+		}
+		FILE *psk_file = fopen(valstr, "r");
+		if (psk_file == NULL) {
+			fprintf(stderr, "Could not open PSK file\n");
+			return;
+		}
+		if (fscanf(psk_file, "%" SPDK_STRINGIFY(SPDK_TLS_PSK_MAX_LEN) "s", g_psk) != 1) {
+			fprintf(stderr, "Could not retrieve PSK from file\n");
+			fclose(psk_file);
+			return;
+		}
+		if (fclose(psk_file)) {
+			fprintf(stderr, "Failed to close PSK file\n");
 			return;
 		}
 	} else if (strcmp(field, "zerocopy_threshold") == 0) {
@@ -827,6 +846,7 @@ nvme_submit_io(struct perf_task *task, struct ns_worker_ctx *ns_ctx,
 	uint64_t lba;
 	int rc;
 	int qp_num;
+	struct spdk_dif_ctx_init_ext_opts dif_opts;
 
 	enum dif_mode {
 		DIF_MODE_NONE = 0,
@@ -851,10 +871,12 @@ nvme_submit_io(struct perf_task *task, struct ns_worker_ctx *ns_ctx,
 	}
 
 	if (mode != DIF_MODE_NONE) {
+		dif_opts.size = SPDK_SIZEOF(&dif_opts, dif_pi_format);
+		dif_opts.dif_pi_format = SPDK_DIF_PI_FORMAT_16;
 		rc = spdk_dif_ctx_init(&task->dif_ctx, entry->block_size, entry->md_size,
 				       entry->md_interleave, entry->pi_loc,
 				       (enum spdk_dif_type)entry->pi_type, entry->io_flags,
-				       lba, 0xFFFF, (uint16_t)entry->io_size_blocks, 0, 0);
+				       lba, 0xFFFF, (uint16_t)entry->io_size_blocks, 0, 0, &dif_opts);
 		if (rc != 0) {
 			fprintf(stderr, "Initialization of DIF context failed\n");
 			exit(1);
@@ -1465,11 +1487,17 @@ submit_single_io(struct perf_task *task)
 	rc = entry->fn_table->submit_io(task, ns_ctx, entry, offset_in_ios);
 
 	if (spdk_unlikely(rc != 0)) {
-		RATELIMIT_LOG("starting I/O failed\n");
-		spdk_dma_free(task->iovs[0].iov_base);
-		free(task->iovs);
-		spdk_dma_free(task->md_iov.iov_base);
-		free(task);
+		if (g_continue_on_error) {
+			/* We can't just resubmit here or we can get in a loop that
+			 * stack overflows. */
+			TAILQ_INSERT_TAIL(&ns_ctx->queued_tasks, task, link);
+		} else {
+			RATELIMIT_LOG("starting I/O failed: %d\n", rc);
+			spdk_dma_free(task->iovs[0].iov_base);
+			free(task->iovs);
+			spdk_dma_free(task->md_iov.iov_base);
+			free(task);
+		}
 	} else {
 		ns_ctx->current_queue_depth++;
 		ns_ctx->stats.io_submitted++;
@@ -1537,7 +1565,8 @@ io_complete(void *ctx, const struct spdk_nvme_cpl *cpl)
 			RATELIMIT_LOG("Write completed with error (sct=%d, sc=%d)\n",
 				      cpl->status.sct, cpl->status.sc);
 		}
-		if (cpl->status.sct == SPDK_NVME_SCT_GENERIC &&
+		if (!g_continue_on_error &&
+		    cpl->status.sct == SPDK_NVME_SCT_GENERIC &&
 		    cpl->status.sc == SPDK_NVME_SC_INVALID_NAMESPACE_OR_FORMAT) {
 			/* The namespace was hotplugged.  Stop trying to send I/O to it. */
 			task->ns_ctx->is_draining = true;
@@ -1579,12 +1608,19 @@ submit_io(struct ns_worker_ctx *ns_ctx, int queue_depth)
 static int
 init_ns_worker_ctx(struct ns_worker_ctx *ns_ctx)
 {
+	TAILQ_INIT(&ns_ctx->queued_tasks);
 	return ns_ctx->entry->fn_table->init_ns_worker_ctx(ns_ctx);
 }
 
 static void
 cleanup_ns_worker_ctx(struct ns_worker_ctx *ns_ctx)
 {
+	struct perf_task *task, *ttask;
+
+	TAILQ_FOREACH_SAFE(task, &ns_ctx->queued_tasks, link, ttask) {
+		TAILQ_REMOVE(&ns_ctx->queued_tasks, task, link);
+		task_complete(task);
+	}
 	ns_ctx->entry->fn_table->cleanup_ns_worker_ctx(ns_ctx);
 }
 
@@ -1661,6 +1697,8 @@ work_fn(void *arg)
 	int rc;
 	int64_t check_rc;
 	uint64_t check_now;
+	TAILQ_HEAD(, perf_task)	swap;
+	struct perf_task *task;
 
 	/* Allocate queue pairs for each namespace. */
 	TAILQ_FOREACH(ns_ctx, &worker->ns_ctx, link) {
@@ -1703,6 +1741,17 @@ work_fn(void *arg)
 		 * to replace each I/O that is completed.
 		 */
 		TAILQ_FOREACH(ns_ctx, &worker->ns_ctx, link) {
+			if (g_continue_on_error) {
+				/* Submit any I/O that is queued up */
+				TAILQ_INIT(&swap);
+				TAILQ_SWAP(&swap, &ns_ctx->queued_tasks, perf_task, link);
+				while (!TAILQ_EMPTY(&swap)) {
+					task = TAILQ_FIRST(&swap);
+					TAILQ_REMOVE(&swap, task, link);
+					submit_single_io(task);
+				}
+			}
+
 			check_now = spdk_get_ticks();
 			check_rc = ns_ctx->entry->fn_table->check_io(ns_ctx);
 
@@ -1799,87 +1848,104 @@ usage(char *program_name)
 #if defined(SPDK_CONFIG_URING) || defined(HAVE_LIBAIO)
 	printf(" [Kernel device(s)]...");
 #endif
-	printf("\n");
-	printf("\t[-b, --allowed-pci-addr <addr> allowed local PCIe device address]\n");
-	printf("\t Example: -b 0000:d8:00.0 -b 0000:d9:00.0\n");
-	printf("\t[-q, --io-depth <val> io depth]\n");
-	printf("\t[-o, --io-size <val> io size in bytes]\n");
-	printf("\t[-O, --io-unit-size io unit size in bytes (4-byte aligned) for SPDK driver. default: same as io size]\n");
-	printf("\t[-P, --num-qpairs <val> number of io queues per namespace. default: 1]\n");
-	printf("\t[-U, --num-unused-qpairs <val> number of unused io queues per controller. default: 0]\n");
-	printf("\t[-w, --io-pattern <pattern> io pattern type, must be one of\n");
-	printf("\t\t(read, write, randread, randwrite, rw, randrw)]\n");
-	printf("\t[-M, --rwmixread <0-100> rwmixread (100 for reads, 0 for writes)]\n");
-	printf("\t[-F, --zipf <theta> use zipf distribution for random I/O]\n");
-	printf("\t[-L, --enable-sw-latency-tracking enable latency tracking via sw, default: disabled]\n");
-	printf("\t\t-L for latency summary, -LL for detailed histogram\n");
-	printf("\t[-l, --enable-ssd-latency-tracking enable latency tracking via ssd (if supported), default: disabled]\n");
-	printf("\t[-t, --time <sec> time in seconds]\n");
-	printf("\t[-a, --warmup-time <sec> warmup time in seconds]\n");
-	printf("\t[-c, --core-mask <mask> core mask for I/O submission/completion.]\n");
+	printf("\n\n");
+	printf("==== BASIC OPTIONS ====\n\n");
+	printf("\t-q, --io-depth <val> io depth\n");
+	printf("\t-o, --io-size <val> io size in bytes\n");
+	printf("\t-w, --io-pattern <pattern> io pattern type, must be one of\n");
+	printf("\t\t(read, write, randread, randwrite, rw, randrw)\n");
+	printf("\t-M, --rwmixread <0-100> rwmixread (100 for reads, 0 for writes)\n");
+	printf("\t-t, --time <sec> time in seconds\n");
+	printf("\t-a, --warmup-time <sec> warmup time in seconds\n");
+	printf("\t-c, --core-mask <mask> core mask for I/O submission/completion.\n");
 	printf("\t\t(default: 1)\n");
-	printf("\t[-d, --number-ios <val> number of I/O to perform per thread on each namespace. Note: this is additional exit criteria.]\n");
-	printf("\t\t(default: 0 - unlimited)\n");
-	printf("\t[-D, --disable-sq-cmb disable submission queue in controller memory buffer, default: enabled]\n");
-	printf("\t[-H, --enable-tcp-hdgst enable header digest for TCP transport, default: disabled]\n");
-	printf("\t[-I, --enable-tcp-ddgst enable data digest for TCP transport, default: disabled]\n");
-	printf("\t[-N, --no-shst-notification no shutdown notification process for controllers, default: disabled]\n");
-	printf("\t[-r, --transport <fmt> Transport ID for local PCIe NVMe or NVMeoF]\n");
-	printf("\t Format: 'key:value [key:value] ...'\n");
-	printf("\t Keys:\n");
-	printf("\t  trtype      Transport type (e.g. PCIe, RDMA)\n");
-	printf("\t  adrfam      Address family (e.g. IPv4, IPv6)\n");
-	printf("\t  traddr      Transport address (e.g. 0000:04:00.0 for PCIe or 192.168.100.8 for RDMA)\n");
-	printf("\t  trsvcid     Transport service identifier (e.g. 4420)\n");
-	printf("\t  subnqn      Subsystem NQN (default: %s)\n", SPDK_NVMF_DISCOVERY_NQN);
-	printf("\t  ns          NVMe namespace ID (all active namespaces are used by default)\n");
-	printf("\t  hostnqn     Host NQN\n");
-	printf("\t Example: -r 'trtype:PCIe traddr:0000:04:00.0' for PCIe or\n");
-	printf("\t          -r 'trtype:RDMA adrfam:IPv4 traddr:192.168.100.8 trsvcid:4420' for NVMeoF\n");
-	printf("\t Note: can be specified multiple times to test multiple disks/targets.\n");
-	printf("\t[-e, --metadata <fmt> metadata configuration]\n");
-	printf("\t Keys:\n");
-	printf("\t  PRACT      Protection Information Action bit (PRACT=1 or PRACT=0)\n");
-	printf("\t  PRCHK      Control of Protection Information Checking (PRCHK=GUARD|REFTAG|APPTAG)\n");
-	printf("\t Example: -e 'PRACT=0,PRCHK=GUARD|REFTAG|APPTAG'\n");
-	printf("\t          -e 'PRACT=1,PRCHK=GUARD'\n");
-	printf("\t[-k, --keepalive <ms> keep alive timeout period in millisecond]\n");
-	printf("\t[-s, --hugemem-size <MB> DPDK huge memory size in MB.]\n");
-	printf("\t[-g, --mem-single-seg use single file descriptor for DPDK memory segments]\n");
-	printf("\t[-C, --max-completion-per-poll <val> max completions per poll]\n");
-	printf("\t\t(default: 0 - unlimited)\n");
-	printf("\t[-i, --shmem-grp-id <id> shared memory group ID]\n");
-	printf("\t[-Q, --skip-errors log I/O errors every N times (default: 1)]\n");
-	printf("\t");
-	spdk_log_usage(stdout, "-T");
-	printf("\t[-V, --enable-vmd enable VMD enumeration]\n");
-	printf("\t[-z, --disable-zcopy <impl> disable zero copy send for the given sock implementation. Default for posix impl]\n");
-	printf("\t[-Z, --enable-zcopy <impl> enable zero copy send for the given sock implementation]\n");
-	printf("\t[-A, --buffer-alignment IO buffer alignment. Must be power of 2 and not less than cache line (%u)]\n",
+	printf("\t-r, --transport <fmt> Transport ID for local PCIe NVMe or NVMeoF\n");
+	printf("\t\t Format: 'key:value [key:value] ...'\n");
+	printf("\t\t Keys:\n");
+	printf("\t\t  trtype      Transport type (e.g. PCIe, RDMA)\n");
+	printf("\t\t  adrfam      Address family (e.g. IPv4, IPv6)\n");
+	printf("\t\t  traddr      Transport address (e.g. 0000:04:00.0 for PCIe or 192.168.100.8 for RDMA)\n");
+	printf("\t\t  trsvcid     Transport service identifier (e.g. 4420)\n");
+	printf("\t\t  subnqn      Subsystem NQN (default: %s)\n", SPDK_NVMF_DISCOVERY_NQN);
+	printf("\t\t  ns          NVMe namespace ID (all active namespaces are used by default)\n");
+	printf("\t\t  hostnqn     Host NQN\n");
+	printf("\t\t Example: -r 'trtype:PCIe traddr:0000:04:00.0' for PCIe or\n");
+	printf("\t\t          -r 'trtype:RDMA adrfam:IPv4 traddr:192.168.100.8 trsvcid:4420' for NVMeoF\n");
+	printf("\t\t Note: can be specified multiple times to test multiple disks/targets.\n");
+	printf("\n");
+
+	printf("==== ADVANCED OPTIONS ====\n\n");
+	printf("\t--use-every-core for each namespace, I/Os are submitted from all cores\n");
+	printf("\t--io-queue-size <val> size of NVMe IO queue. Default: maximum allowed by controller\n");
+	printf("\t-O, --io-unit-size io unit size in bytes (4-byte aligned) for SPDK driver. default: same as io size\n");
+	printf("\t-P, --num-qpairs <val> number of io queues per namespace. default: 1\n");
+	printf("\t-U, --num-unused-qpairs <val> number of unused io queues per controller. default: 0\n");
+	printf("\t-A, --buffer-alignment IO buffer alignment. Must be power of 2 and not less than cache line (%u)\n",
 	       SPDK_CACHE_LINE_SIZE);
-	printf("\t[-S, --default-sock-impl <impl> set the default sock impl, e.g. \"posix\"]\n");
-	printf("\t[-m, --cpu-usage display real-time overall cpu usage on used cores]\n");
+	printf("\t-s, --hugemem-size <MB> DPDK huge memory size in MB.\n");
+	printf("\t-g, --mem-single-seg use single file descriptor for DPDK memory segments\n");
+	printf("\t-C, --max-completion-per-poll <val> max completions per poll\n");
+	printf("\t\t(default: 0 - unlimited)\n");
+	printf("\t-i, --shmem-grp-id <id> shared memory group ID\n");
+	printf("\t-d, --number-ios <val> number of I/O to perform per thread on each namespace. Note: this is additional exit criteria.\n");
+	printf("\t\t(default: 0 - unlimited)\n");
+	printf("\t-e, --metadata <fmt> metadata configuration\n");
+	printf("\t\t Keys:\n");
+	printf("\t\t  PRACT      Protection Information Action bit (PRACT=1 or PRACT=0)\n");
+	printf("\t\t  PRCHK      Control of Protection Information Checking (PRCHK=GUARD|REFTAG|APPTAG)\n");
+	printf("\t\t Example: -e 'PRACT=0,PRCHK=GUARD|REFTAG|APPTAG'\n");
+	printf("\t\t          -e 'PRACT=1,PRCHK=GUARD'\n");
+	printf("\t-F, --zipf <theta> use zipf distribution for random I/O\n");
 #ifdef SPDK_CONFIG_URING
-	printf("\t[-R, --enable-uring enable using liburing to drive kernel devices (Default: libaio)]\n");
+	printf("\t-R, --enable-uring enable using liburing to drive kernel devices (Default: libaio)\n");
 #endif
+	printf("\t--iova-mode <mode> specify DPDK IOVA mode: va|pa\n");
+	printf("\n");
+
+	printf("==== PCIe OPTIONS ====\n\n");
+	printf("\t-b, --allowed-pci-addr <addr> allowed local PCIe device address\n");
+	printf("\t\t Example: -b 0000:d8:00.0 -b 0000:d9:00.0\n");
+	printf("\t-V, --enable-vmd enable VMD enumeration\n");
+	printf("\t-D, --disable-sq-cmb disable submission queue in controller memory buffer, default: enabled\n");
+	printf("\n");
+
+	printf("==== TCP OPTIONS ====\n\n");
+	printf("\t-S, --default-sock-impl <impl> set the default sock impl, e.g. \"posix\"\n");
+	printf("\t--disable-ktls disable Kernel TLS. Only valid for ssl impl. Default for ssl impl\n");
+	printf("\t--enable-ktls enable Kernel TLS. Only valid for ssl impl\n");
+	printf("\t--tls-version <val> TLS version to use. Only valid for ssl impl. Default: 0 (auto-negotiation)\n");
+	printf("\t--psk-path <val> Path to PSK file (only applies when sock_impl == ssl)\n");
+	printf("\t--psk-identity <val> Default PSK ID, e.g. psk.spdk.io (only applies when sock_impl == ssl)\n");
+	printf("\t--zerocopy-threshold <val> data is sent with MSG_ZEROCOPY if size is greater than this val. Default: 0 to disable it\n");
+	printf("\t--zerocopy-threshold-sock-impl <impl> specify the sock implementation to set zerocopy_threshold\n");
+	printf("\t-z, --disable-zcopy <impl> disable zero copy send for the given sock implementation. Default for posix impl\n");
+	printf("\t-Z, --enable-zcopy <impl> enable zero copy send for the given sock implementation\n");
+	printf("\t-k, --keepalive <ms> keep alive timeout period in millisecond\n");
+	printf("\t-H, --enable-tcp-hdgst enable header digest for TCP transport, default: disabled\n");
+	printf("\t-I, --enable-tcp-ddgst enable data digest for TCP transport, default: disabled\n");
+	printf("\n");
+
+	printf("==== RDMA OPTIONS ====\n\n");
+	printf("\t--transport-tos <val> specify the type of service for RDMA transport. Default: 0 (disabled)\n");
+	printf("\t--rdma-srq-size <val> The size of a shared rdma receive queue. Default: 0 (disabled)\n");
+	printf("\t-k, --keepalive <ms> keep alive timeout period in millisecond\n");
+	printf("\n");
+
+	printf("==== LOGGING ====\n\n");
+	printf("\t-L, --enable-sw-latency-tracking enable latency tracking via sw, default: disabled\n");
+	printf("\t\t-L for latency summary, -LL for detailed histogram\n");
+	printf("\t-l, --enable-ssd-latency-tracking enable latency tracking via ssd (if supported), default: disabled\n");
+	printf("\t-N, --no-shst-notification no shutdown notification process for controllers, default: disabled\n");
+	printf("\t-Q, --continue-on-error <val> Do not stop on error. Log I/O errors every N times (default: 1)\n");
+	spdk_log_usage(stdout, "\t-T");
+	printf("\t-m, --cpu-usage display real-time overall cpu usage on used cores\n");
 #ifdef DEBUG
-	printf("\t[-G, --enable-debug enable debug logging]\n");
+	printf("\t-G, --enable-debug enable debug logging\n");
 #else
-	printf("\t[-G, --enable-debug enable debug logging (flag disabled, must reconfigure with --enable-debug)]\n");
+	printf("\t-G, --enable-debug enable debug logging (flag disabled, must reconfigure with --enable-debug)\n");
 #endif
-	printf("\t[--transport-stats dump transport statistics]\n");
-	printf("\t[--iova-mode <mode> specify DPDK IOVA mode: va|pa]\n");
-	printf("\t[--io-queue-size <val> size of NVMe IO queue. Default: maximum allowed by controller]\n");
-	printf("\t[--disable-ktls disable Kernel TLS. Only valid for ssl impl. Default for ssl impl]\n");
-	printf("\t[--enable-ktls enable Kernel TLS. Only valid for ssl impl]\n");
-	printf("\t[--tls-version <val> TLS version to use. Only valid for ssl impl. Default: 0 (auto-negotiation)]\n");
-	printf("\t[--psk-key <val> Default PSK KEY in hexadecimal digits, e.g. 1234567890ABCDEF (only applies when sock_impl == ssl)]\n");
-	printf("\t[--psk-identity <val> Default PSK ID, e.g. psk.spdk.io (only applies when sock_impl == ssl)]\n");
-	printf("\t[--zerocopy-threshold <val> data is sent with MSG_ZEROCOPY if size is greater than this val. Default: 0 to disable it]\n");
-	printf("\t[--zerocopy-threshold-sock-impl <impl> specify the sock implementation to set zerocopy_threshold]\n");
-	printf("\t[--transport-tos <val> specify the type of service for RDMA transport. Default: 0 (disabled)]\n");
-	printf("\t[--rdma-srq-size <val> The size of a shared rdma receive queue. Default: 0 (disabled)]\n");
-	printf("\t[--use-every-core for each namespace, I/Os are submitted from all cores]\n");
+	printf("\t--transport-stats dump transport statistics\n");
+	printf("\n\n");
 }
 
 static void
@@ -2354,8 +2420,8 @@ static const struct option g_perf_cmdline_opts[] = {
 	{"io-unit-size",			required_argument,	NULL, PERF_IO_UNIT_SIZE},
 #define PERF_IO_QUEUES_PER_NS	'P'
 	{"num-qpairs", required_argument, NULL, PERF_IO_QUEUES_PER_NS},
-#define PERF_SKIP_ERRORS	'Q'
-	{"skip-errors",			required_argument,	NULL, PERF_SKIP_ERRORS},
+#define PERF_CONTINUE_ON_ERROR	'Q'
+	{"continue-on-error",			required_argument,	NULL, PERF_CONTINUE_ON_ERROR},
 #define PERF_ENABLE_URING	'R'
 	{"enable-uring", no_argument, NULL, PERF_ENABLE_URING},
 #define PERF_DEFAULT_SOCK_IMPL	'S'
@@ -2380,8 +2446,8 @@ static const struct option g_perf_cmdline_opts[] = {
 	{"enable-ktls", no_argument, NULL, PERF_ENABLE_KTLS},
 #define PERF_TLS_VERSION	262
 	{"tls-version", required_argument, NULL, PERF_TLS_VERSION},
-#define PERF_PSK_KEY		263
-	{"psk-key", required_argument, NULL, PERF_PSK_KEY},
+#define PERF_PSK_PATH		263
+	{"psk-path", required_argument, NULL, PERF_PSK_PATH},
 #define PERF_PSK_IDENTITY	264
 	{"psk-identity ", required_argument, NULL, PERF_PSK_IDENTITY},
 #define PERF_ZEROCOPY_THRESHOLD		265
@@ -2424,7 +2490,7 @@ parse_args(int argc, char **argv, struct spdk_env_opts *env_opts)
 		case PERF_TIME:
 		case PERF_RW_MIXREAD:
 		case PERF_NUM_UNUSED_IO_QPAIRS:
-		case PERF_SKIP_ERRORS:
+		case PERF_CONTINUE_ON_ERROR:
 		case PERF_IO_QUEUE_SIZE:
 		case PERF_ZEROCOPY_THRESHOLD:
 		case PERF_RDMA_SRQ_SIZE:
@@ -2468,8 +2534,9 @@ parse_args(int argc, char **argv, struct spdk_env_opts *env_opts)
 				g_rw_percentage = val;
 				g_mix_specified = true;
 				break;
-			case PERF_SKIP_ERRORS:
+			case PERF_CONTINUE_ON_ERROR:
 				g_quiet_count = val;
+				g_continue_on_error = true;
 				break;
 			case PERF_NUM_UNUSED_IO_QPAIRS:
 				g_nr_unused_io_queues = val;
@@ -2611,9 +2678,9 @@ parse_args(int argc, char **argv, struct spdk_env_opts *env_opts)
 			}
 			perf_set_sock_opts("ssl", "tls_version", val, NULL);
 			break;
-		case PERF_PSK_KEY:
+		case PERF_PSK_PATH:
 			ssl_used = true;
-			perf_set_sock_opts("ssl", "psk_key", 0, optarg);
+			perf_set_sock_opts("ssl", "psk_path", 0, optarg);
 			break;
 		case PERF_PSK_IDENTITY:
 			ssl_used = true;
@@ -2689,7 +2756,7 @@ parse_args(int argc, char **argv, struct spdk_env_opts *env_opts)
 		return 1;
 	}
 	if (!g_quiet_count) {
-		fprintf(stderr, "-Q (--skip-errors) value must be greater than 0\n");
+		fprintf(stderr, "-Q (--continue-on-error) value must be greater than 0\n");
 		usage(argv[0]);
 		return 1;
 	}
@@ -3101,6 +3168,7 @@ main(int argc, char **argv)
 	opts.pci_allowed = g_allowed_pci_addr;
 	rc = parse_args(argc, argv, &opts);
 	if (rc != 0) {
+		free(g_psk);
 		return rc;
 	}
 	/* Transport statistics are printed from each thread.
@@ -3108,12 +3176,14 @@ main(int argc, char **argv)
 	rc = pthread_mutex_init(&g_stats_mutex, NULL);
 	if (rc != 0) {
 		fprintf(stderr, "Failed to init mutex\n");
+		free(g_psk);
 		return -1;
 	}
 	if (spdk_env_init(&opts) < 0) {
 		fprintf(stderr, "Unable to initialize SPDK env\n");
 		unregister_trids();
 		pthread_mutex_destroy(&g_stats_mutex);
+		free(g_psk);
 		return -1;
 	}
 

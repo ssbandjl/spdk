@@ -21,7 +21,7 @@ function get_spdk_abi() {
 }
 
 function get_release_branch() {
-	tag=$(git describe --tags --abbrev=0 --exclude=LTS --exclude=*-pre)
+	tag=$(git describe --tags --abbrev=0 --exclude=LTS --exclude=*-pre $1)
 	branch="${tag:0:6}.x"
 	echo "$branch"
 }
@@ -101,6 +101,9 @@ function confirm_abi_deps() {
 	name = spdk_bs_opts
 [suppress_type]
 	name = spdk_app_opts
+# To be removed, comes from nvme_internal.h
+[suppress_type]
+	name = spdk_nvme_qpair
 EOF
 
 	for object in "$libdir"/libspdk_*.so; do
@@ -114,8 +117,6 @@ EOF
 
 		cmd_args=('abidiff'
 			$source_abi_dir/$release/$so_file "$libdir/$so_file"
-			'--headers-dir1' $source_abi_dir/$release/include
-			'--headers-dir2' $rootdir/include
 			'--leaf-changes-only' '--suppressions' $suppression_file)
 
 		if ! output=$("${cmd_args[@]}" --stat); then
@@ -184,8 +185,8 @@ EOF
 			fi
 
 			if [[ $so_name_changed == yes ]]; then
-				# After 23.01 LTS all SO major versions were intentionally increased. This check can be removed after SPDK 23.05 release.
-				if [[ "$release" == "v23.01.x" ]]; then
+				# All SO major versions are intentionally increased after LTS to allow SO minor changes during the supported period.
+				if [[ "$release" == "$(get_release_branch LTS)" ]]; then
 					found_abi_change=true
 				fi
 				if ! $found_abi_change; then

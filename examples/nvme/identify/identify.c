@@ -1335,7 +1335,7 @@ print_namespace(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 		printf("End-to-End Data Protection:            Supported\n");
 		printf("Protection Type:                       Type%d\n", nsdata->dps.pit);
 		printf("Protection Information Transferred as: %s\n",
-		       nsdata->dps.md_start ? "First 8 Bytes" : "Last 8 Bytes");
+		       nsdata->dps.md_start ? "First 8/16 Bytes" : "Last 8/16 Bytes");
 	}
 	format_index = spdk_nvme_ns_get_format_index(nsdata);
 	if (nsdata->lbaf[format_index].ms > 0) {
@@ -1837,7 +1837,7 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 	printf("Get LBA Status Capability:             %s\n",
 	       cdata->oacs.get_lba_status ? "Supported" : "Not Supported");
 	printf("Command & Feature Lockdown Capability: %s\n",
-	       cdata->oacs.doorbell_buffer_config ? "Supported" : "Not Supported");
+	       cdata->oacs.command_feature_lockdown ? "Supported" : "Not Supported");
 	printf("Abort Command Limit:                   %d\n", cdata->acl + 1);
 	printf("Async Event Request Limit:             %d\n", cdata->aerl + 1);
 	printf("Number of Firmware Slots:              ");
@@ -1900,6 +1900,7 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 		printf("Number of ANA Group Identifiers     : %u\n", cdata->nanagrpid);
 		printf("Max Number of Allowed Namespaces    : %u\n", cdata->mnan);
 	}
+	printf("Subsystem NQN:                         %s\n", cdata->subnqn);
 	printf("Command Effects Log Page:              %s\n",
 	       cdata->lpa.celp ? "Supported" : "Not Supported");
 	printf("Get Log Page Extended Data:            %s\n",

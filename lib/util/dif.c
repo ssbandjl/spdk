@@ -10,6 +10,31 @@
 #include "spdk/log.h"
 #include "spdk/util.h"
 
+#define APPTAG_IGNORE 0xFFFF
+#define REFTAG_MASK_16 0x00000000FFFFFFFF
+#define REFTAG_MASK_32 0xFFFFFFFFFFFFFFFF
+
+struct spdk_dif {
+	union {
+		struct {
+			uint16_t guard;
+			uint16_t app_tag;
+			uint32_t stor_ref_space;
+		} g16;
+		struct {
+			uint32_t guard;
+			uint16_t app_tag;
+			uint16_t stor_ref_space_p1;
+			/* The variable size Storage Tag and Reference Tag is not supported yet,
+			 * so the maximum size of the Reference Tag is assumed.
+			 */
+			uint64_t stor_ref_space_p2;
+		} g32;
+	};
+};
+SPDK_STATIC_ASSERT(SPDK_SIZEOF_MEMBER(struct spdk_dif, g16) == 8, "Incorrect size");
+SPDK_STATIC_ASSERT(SPDK_SIZEOF_MEMBER(struct spdk_dif, g32) == 16, "Incorrect size");
+
 /* Context to iterate or create a iovec array.
  * Each sgl is either iterated or created at a time.
  */
@@ -52,10 +77,10 @@ _dif_sgl_advance(struct _dif_sgl *s, uint32_t step)
 }
 
 static inline void
-_dif_sgl_get_buf(struct _dif_sgl *s, void **_buf, uint32_t *_buf_len)
+_dif_sgl_get_buf(struct _dif_sgl *s, uint8_t **_buf, uint32_t *_buf_len)
 {
 	if (_buf != NULL) {
-		*_buf = s->iov->iov_base + s->iov_offset;
+		*_buf = (uint8_t *)s->iov->iov_base + s->iov_offset;
 	}
 	if (_buf_len != NULL) {
 		*_buf_len = s->iov->iov_len - s->iov_offset;
@@ -86,7 +111,7 @@ _dif_sgl_append_split(struct _dif_sgl *dst, struct _dif_sgl *src, uint32_t data_
 	uint32_t buf_len;
 
 	while (data_len != 0) {
-		_dif_sgl_get_buf(src, (void *)&buf, &buf_len);
+		_dif_sgl_get_buf(src, &buf, &buf_len);
 		buf_len = spdk_min(buf_len, data_len);
 
 		if (!_dif_sgl_append(dst, buf, buf_len)) {
@@ -183,24 +208,39 @@ _dif_is_disabled(enum spdk_dif_type dif_type)
 	}
 }
 
+static inline size_t
+_dif_size(enum spdk_dif_pi_format dif_pi_format)
+{
+	uint8_t size;
+
+	if (dif_pi_format == SPDK_DIF_PI_FORMAT_16) {
+		size = SPDK_SIZEOF_MEMBER(struct spdk_dif, g16);
+	} else {
+		size = SPDK_SIZEOF_MEMBER(struct spdk_dif, g32);
+	}
+
+	return size;
+}
 
 static uint32_t
-_get_guard_interval(uint32_t block_size, uint32_t md_size, bool dif_loc, bool md_interleave)
+_get_guard_interval(uint32_t block_size, uint32_t md_size, bool dif_loc, bool md_interleave,
+		    size_t dif_size)
 {
 	if (!dif_loc) {
-		/* For metadata formats with more than 8 bytes, if the DIF is
-		 * contained in the last 8 bytes of metadata, then the CRC
-		 * covers all metadata up to but excluding these last 8 bytes.
+		/* For metadata formats with more than 8/16 bytes (depending on
+		 * the PI format), if the DIF is contained in the last 8/16 bytes
+		 * of metadata, then the CRC covers all metadata up to but excluding
+		 * these last 8/16 bytes.
 		 */
 		if (md_interleave) {
-			return block_size - sizeof(struct spdk_dif);
+			return block_size - dif_size;
 		} else {
-			return md_size - sizeof(struct spdk_dif);
+			return md_size - dif_size;
 		}
 	} else {
-		/* For metadata formats with more than 8 bytes, if the DIF is
-		 * contained in the first 8 bytes of metadata, then the CRC
-		 * does not cover any metadata.
+		/* For metadata formats with more than 8/16 bytes (depending on
+		 * the PI format), if the DIF is contained in the first 8/16 bytes
+		 * of metadata, then the CRC does not cover any metadata.
 		 */
 		if (md_interleave) {
 			return block_size - md_size;
@@ -210,15 +250,214 @@ _get_guard_interval(uint32_t block_size, uint32_t md_size, bool dif_loc, bool md
 	}
 }
 
+static inline uint8_t
+_dif_guard_size(enum spdk_dif_pi_format dif_pi_format)
+{
+	uint8_t size;
+
+	if (dif_pi_format == SPDK_DIF_PI_FORMAT_16) {
+		size = SPDK_SIZEOF_MEMBER(struct spdk_dif, g16.guard);
+	} else {
+		size = SPDK_SIZEOF_MEMBER(struct spdk_dif, g32.guard);
+	}
+
+	return size;
+}
+
+static inline void
+_dif_set_guard(struct spdk_dif *dif, uint32_t guard, enum spdk_dif_pi_format dif_pi_format)
+{
+	if (dif_pi_format == SPDK_DIF_PI_FORMAT_16) {
+		to_be16(&(dif->g16.guard), (uint16_t)guard);
+	} else {
+		to_be32(&(dif->g32.guard), guard);
+	}
+}
+
+static inline uint32_t
+_dif_get_guard(struct spdk_dif *dif, enum spdk_dif_pi_format dif_pi_format)
+{
+	uint32_t guard;
+
+	if (dif_pi_format == SPDK_DIF_PI_FORMAT_16) {
+		guard = (uint32_t)from_be16(&(dif->g16.guard));
+	} else {
+		guard = from_be32(&(dif->g32.guard));
+	}
+
+	return guard;
+}
+
+static inline uint32_t
+_dif_generate_guard(uint32_t guard_seed, void *buf, size_t buf_len,
+		    enum spdk_dif_pi_format dif_pi_format)
+{
+	uint32_t guard;
+
+	if (dif_pi_format == SPDK_DIF_PI_FORMAT_16) {
+		guard = (uint32_t)spdk_crc16_t10dif((uint16_t)guard_seed, buf, buf_len);
+	} else {
+		guard = spdk_crc32c_nvme(buf, buf_len, guard_seed);
+	}
+
+	return guard;
+}
+
+static inline uint32_t
+_dif_generate_guard_copy(uint32_t guard_seed, void *dst, void *src, size_t buf_len,
+			 enum spdk_dif_pi_format dif_pi_format)
+{
+	uint32_t guard;
+
+	if (dif_pi_format == SPDK_DIF_PI_FORMAT_16) {
+		guard = (uint32_t)spdk_crc16_t10dif_copy((uint16_t)guard_seed, dst, src, buf_len);
+	} else {
+		memcpy(dst, src, buf_len);
+		guard = spdk_crc32c_nvme(src, buf_len, guard_seed);
+	}
+
+	return guard;
+}
+
+static inline uint8_t
+_dif_apptag_offset(enum spdk_dif_pi_format dif_pi_format)
+{
+	return _dif_guard_size(dif_pi_format);
+}
+
+static inline uint8_t
+_dif_apptag_size(void)
+{
+	return SPDK_SIZEOF_MEMBER(struct spdk_dif, g16.app_tag);
+}
+
+static inline void
+_dif_set_apptag(struct spdk_dif *dif, uint16_t app_tag, enum spdk_dif_pi_format dif_pi_format)
+{
+	if (dif_pi_format == SPDK_DIF_PI_FORMAT_16) {
+		to_be16(&(dif->g16.app_tag), app_tag);
+	} else {
+		to_be16(&(dif->g32.app_tag), app_tag);
+	}
+}
+
+static inline uint16_t
+_dif_get_apptag(struct spdk_dif *dif, enum spdk_dif_pi_format dif_pi_format)
+{
+	uint16_t app_tag;
+
+	if (dif_pi_format == SPDK_DIF_PI_FORMAT_16) {
+		app_tag = from_be16(&(dif->g16.app_tag));
+	} else {
+		app_tag = from_be16(&(dif->g32.app_tag));
+	}
+
+	return app_tag;
+}
+
+static inline bool
+_dif_apptag_ignore(struct spdk_dif *dif, enum spdk_dif_pi_format dif_pi_format)
+{
+	return _dif_get_apptag(dif, dif_pi_format) == APPTAG_IGNORE;
+}
+
+static inline uint8_t
+_dif_reftag_offset(enum spdk_dif_pi_format dif_pi_format)
+{
+	uint8_t offset;
+
+	if (dif_pi_format == SPDK_DIF_PI_FORMAT_16) {
+		offset = _dif_apptag_offset(dif_pi_format) + _dif_apptag_size();
+	} else {
+		offset = _dif_apptag_offset(dif_pi_format) + _dif_apptag_size()
+			 + SPDK_SIZEOF_MEMBER(struct spdk_dif, g32.stor_ref_space_p1);
+	}
+
+	return offset;
+}
+
+static inline uint8_t
+_dif_reftag_size(enum spdk_dif_pi_format dif_pi_format)
+{
+	uint8_t size;
+
+	if (dif_pi_format == SPDK_DIF_PI_FORMAT_16) {
+		size = SPDK_SIZEOF_MEMBER(struct spdk_dif, g16.stor_ref_space);
+	} else {
+		size = SPDK_SIZEOF_MEMBER(struct spdk_dif, g32.stor_ref_space_p2);
+	}
+
+	return size;
+}
+
+static inline void
+_dif_set_reftag(struct spdk_dif *dif, uint64_t ref_tag, enum spdk_dif_pi_format dif_pi_format)
+{
+	if (dif_pi_format == SPDK_DIF_PI_FORMAT_16) {
+		to_be32(&(dif->g16.stor_ref_space), (uint32_t)ref_tag);
+	} else {
+		to_be64(&(dif->g32.stor_ref_space_p2), ref_tag);
+	}
+}
+
+static inline uint64_t
+_dif_get_reftag(struct spdk_dif *dif, enum spdk_dif_pi_format dif_pi_format)
+{
+	uint64_t ref_tag;
+
+	if (dif_pi_format == SPDK_DIF_PI_FORMAT_16) {
+		ref_tag = (uint64_t)from_be32(&(dif->g16.stor_ref_space));
+	} else {
+		ref_tag = from_be64(&(dif->g32.stor_ref_space_p2));
+	}
+
+	return ref_tag;
+}
+
+static inline bool
+_dif_reftag_match(struct spdk_dif *dif, uint64_t ref_tag,
+		  enum spdk_dif_pi_format dif_pi_format)
+{
+	uint64_t _ref_tag;
+	bool match;
+
+	_ref_tag = _dif_get_reftag(dif, dif_pi_format);
+
+	if (dif_pi_format == SPDK_DIF_PI_FORMAT_16) {
+		match = (_ref_tag == (ref_tag & REFTAG_MASK_16));
+	} else {
+		match = (_ref_tag == ref_tag);
+	}
+
+	return match;
+}
+
+static inline bool
+_dif_reftag_ignore(struct spdk_dif *dif, enum spdk_dif_pi_format dif_pi_format)
+{
+	return _dif_reftag_match(dif, REFTAG_MASK_32, dif_pi_format);
+}
+
 int
 spdk_dif_ctx_init(struct spdk_dif_ctx *ctx, uint32_t block_size, uint32_t md_size,
 		  bool md_interleave, bool dif_loc, enum spdk_dif_type dif_type, uint32_t dif_flags,
 		  uint32_t init_ref_tag, uint16_t apptag_mask, uint16_t app_tag,
-		  uint32_t data_offset, uint16_t guard_seed)
+		  uint32_t data_offset, uint32_t guard_seed, struct spdk_dif_ctx_init_ext_opts *opts)
 {
 	uint32_t data_block_size;
+	enum spdk_dif_pi_format dif_pi_format = SPDK_DIF_PI_FORMAT_16;
 
-	if (md_size < sizeof(struct spdk_dif)) {
+	if (opts != NULL) {
+		if (opts->dif_pi_format != SPDK_DIF_PI_FORMAT_16 &&
+		    opts->dif_pi_format != SPDK_DIF_PI_FORMAT_32) {
+			SPDK_ERRLOG("No valid DIF PI format provided.\n");
+			return -EINVAL;
+		}
+
+		dif_pi_format = opts->dif_pi_format;
+	}
+
+	if (md_size < _dif_size(dif_pi_format)) {
 		SPDK_ERRLOG("Metadata size is smaller than DIF size.\n");
 		return -EINVAL;
 	}
@@ -230,10 +469,18 @@ spdk_dif_ctx_init(struct spdk_dif_ctx *ctx, uint32_t block_size, uint32_t md_siz
 		}
 		data_block_size = block_size - md_size;
 	} else {
-		if (block_size == 0 || (block_size % 512) != 0) {
-			SPDK_ERRLOG("Zero block size is not allowed\n");
-			return -EINVAL;
+		if (dif_pi_format == SPDK_DIF_PI_FORMAT_16) {
+			if (block_size == 0 || (block_size % 512) != 0) {
+				SPDK_ERRLOG("Zero block size is not allowed and should be a multiple of 512B\n");
+				return -EINVAL;
+			}
+		} else {
+			if (block_size == 0 || (block_size % 4096) != 0) {
+				SPDK_ERRLOG("Zero block size is not allowed and should be a multiple of 4kB\n");
+				return -EINVAL;
+			}
 		}
+
 		data_block_size = block_size;
 	}
 
@@ -245,7 +492,9 @@ spdk_dif_ctx_init(struct spdk_dif_ctx *ctx, uint32_t block_size, uint32_t md_siz
 	ctx->block_size = block_size;
 	ctx->md_size = md_size;
 	ctx->md_interleave = md_interleave;
-	ctx->guard_interval = _get_guard_interval(block_size, md_size, dif_loc, md_interleave);
+	ctx->dif_pi_format = dif_pi_format;
+	ctx->guard_interval = _get_guard_interval(block_size, md_size, dif_loc, md_interleave,
+			      _dif_size(ctx->dif_pi_format));
 	ctx->dif_type = dif_type;
 	ctx->dif_flags = dif_flags;
 	ctx->init_ref_tag = init_ref_tag;
@@ -283,18 +532,18 @@ spdk_dif_ctx_set_remapped_init_ref_tag(struct spdk_dif_ctx *ctx,
 }
 
 static void
-_dif_generate(void *_dif, uint16_t guard, uint32_t offset_blocks,
+_dif_generate(void *_dif, uint32_t guard, uint32_t offset_blocks,
 	      const struct spdk_dif_ctx *ctx)
 {
 	struct spdk_dif *dif = _dif;
-	uint32_t ref_tag;
+	uint64_t ref_tag;
 
 	if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-		to_be16(&dif->guard, guard);
+		_dif_set_guard(dif, guard, ctx->dif_pi_format);
 	}
 
 	if (ctx->dif_flags & SPDK_DIF_FLAGS_APPTAG_CHECK) {
-		to_be16(&dif->app_tag, ctx->app_tag);
+		_dif_set_apptag(dif, ctx->app_tag, ctx->dif_pi_format);
 	}
 
 	if (ctx->dif_flags & SPDK_DIF_FLAGS_REFTAG_CHECK) {
@@ -308,7 +557,7 @@ _dif_generate(void *_dif, uint16_t guard, uint32_t offset_blocks,
 			ref_tag = ctx->init_ref_tag + ctx->ref_tag_offset;
 		}
 
-		to_be32(&dif->ref_tag, ref_tag);
+		_dif_set_reftag(dif, ref_tag, ctx->dif_pi_format);
 	}
 }
 
@@ -316,14 +565,14 @@ static void
 dif_generate(struct _dif_sgl *sgl, uint32_t num_blocks, const struct spdk_dif_ctx *ctx)
 {
 	uint32_t offset_blocks = 0;
-	void *buf;
-	uint16_t guard = 0;
+	uint8_t *buf;
+	uint32_t guard = 0;
 
 	while (offset_blocks < num_blocks) {
 		_dif_sgl_get_buf(sgl, &buf, NULL);
 
 		if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-			guard = spdk_crc16_t10dif(ctx->guard_seed, buf, ctx->guard_interval);
+			guard = _dif_generate_guard(ctx->guard_seed, buf, ctx->guard_interval, ctx->dif_pi_format);
 		}
 
 		_dif_generate(buf + ctx->guard_interval, guard, offset_blocks, ctx);
@@ -333,12 +582,12 @@ dif_generate(struct _dif_sgl *sgl, uint32_t num_blocks, const struct spdk_dif_ct
 	}
 }
 
-static uint16_t
+static uint32_t
 _dif_generate_split(struct _dif_sgl *sgl, uint32_t offset_in_block, uint32_t data_len,
-		    uint16_t guard, uint32_t offset_blocks, const struct spdk_dif_ctx *ctx)
+		    uint32_t guard, uint32_t offset_blocks, const struct spdk_dif_ctx *ctx)
 {
 	uint32_t offset_in_dif, buf_len;
-	void *buf;
+	uint8_t *buf;
 	struct spdk_dif dif = {};
 
 	assert(offset_in_block < ctx->guard_interval);
@@ -352,7 +601,7 @@ _dif_generate_split(struct _dif_sgl *sgl, uint32_t offset_in_block, uint32_t dat
 		buf_len = spdk_min(buf_len, ctx->guard_interval - offset_in_block);
 
 		if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-			guard = spdk_crc16_t10dif(guard, buf, buf_len);
+			guard = _dif_generate_guard(guard, buf, buf_len, ctx->dif_pi_format);
 		}
 
 		_dif_sgl_advance(sgl, buf_len);
@@ -375,9 +624,9 @@ _dif_generate_split(struct _dif_sgl *sgl, uint32_t offset_in_block, uint32_t dat
 	while (offset_in_block < ctx->block_size) {
 		_dif_sgl_get_buf(sgl, &buf, &buf_len);
 
-		if (offset_in_block < ctx->guard_interval + sizeof(struct spdk_dif)) {
+		if (offset_in_block < ctx->guard_interval + _dif_size(ctx->dif_pi_format)) {
 			offset_in_dif = offset_in_block - ctx->guard_interval;
-			buf_len = spdk_min(buf_len, sizeof(struct spdk_dif) - offset_in_dif);
+			buf_len = spdk_min(buf_len, _dif_size(ctx->dif_pi_format) - offset_in_dif);
 
 			memcpy(buf, ((uint8_t *)&dif) + offset_in_dif, buf_len);
 		} else {
@@ -400,7 +649,7 @@ dif_generate_split(struct _dif_sgl *sgl, uint32_t num_blocks,
 		   const struct spdk_dif_ctx *ctx)
 {
 	uint32_t offset_blocks;
-	uint16_t guard = 0;
+	uint32_t guard = 0;
 
 	if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
 		guard = ctx->guard_seed;
@@ -439,7 +688,7 @@ spdk_dif_generate(struct iovec *iovs, int iovcnt, uint32_t num_blocks,
 
 static void
 _dif_error_set(struct spdk_dif_error *err_blk, uint8_t err_type,
-	       uint32_t expected, uint32_t actual, uint32_t err_offset)
+	       uint64_t expected, uint64_t actual, uint32_t err_offset)
 {
 	if (err_blk) {
 		err_blk->err_type = err_type;
@@ -450,13 +699,13 @@ _dif_error_set(struct spdk_dif_error *err_blk, uint8_t err_type,
 }
 
 static int
-_dif_verify(void *_dif, uint16_t guard, uint32_t offset_blocks,
+_dif_verify(void *_dif, uint32_t guard, uint32_t offset_blocks,
 	    const struct spdk_dif_ctx *ctx, struct spdk_dif_error *err_blk)
 {
 	struct spdk_dif *dif = _dif;
-	uint16_t _guard;
+	uint32_t _guard;
 	uint16_t _app_tag;
-	uint32_t ref_tag, _ref_tag;
+	uint64_t ref_tag, _ref_tag;
 
 	switch (ctx->dif_type) {
 	case SPDK_DIF_TYPE1:
@@ -464,15 +713,18 @@ _dif_verify(void *_dif, uint16_t guard, uint32_t offset_blocks,
 		/* If Type 1 or 2 is used, then all DIF checks are disabled when
 		 * the Application Tag is 0xFFFF.
 		 */
-		if (dif->app_tag == 0xFFFF) {
+		if (_dif_apptag_ignore(dif, ctx->dif_pi_format)) {
 			return 0;
 		}
 		break;
 	case SPDK_DIF_TYPE3:
 		/* If Type 3 is used, then all DIF checks are disabled when the
-		 * Application Tag is 0xFFFF and the Reference Tag is 0xFFFFFFFF.
+		 * Application Tag is 0xFFFF and the Reference Tag is 0xFFFFFFFF
+		 * or 0xFFFFFFFFFFFFFFFF depending on the PI format.
 		 */
-		if (dif->app_tag == 0xFFFF && dif->ref_tag == 0xFFFFFFFF) {
+
+		if (_dif_apptag_ignore(dif, ctx->dif_pi_format) &&
+		    _dif_reftag_ignore(dif, ctx->dif_pi_format)) {
 			return 0;
 		}
 		break;
@@ -494,11 +746,11 @@ _dif_verify(void *_dif, uint16_t guard, uint32_t offset_blocks,
 		/* Compare the DIF Guard field to the CRC computed over the logical
 		 * block data.
 		 */
-		_guard = from_be16(&dif->guard);
+		_guard = _dif_get_guard(dif, ctx->dif_pi_format);
 		if (_guard != guard) {
 			_dif_error_set(err_blk, SPDK_DIF_GUARD_ERROR, _guard, guard,
 				       offset_blocks);
-			SPDK_ERRLOG("Failed to compare Guard: LBA=%" PRIu32 "," \
+			SPDK_ERRLOG("Failed to compare Guard: LBA=%" PRIu64 "," \
 				    "  Expected=%x, Actual=%x\n",
 				    ref_tag, _guard, guard);
 			return -1;
@@ -509,11 +761,11 @@ _dif_verify(void *_dif, uint16_t guard, uint32_t offset_blocks,
 		/* Compare unmasked bits in the DIF Application Tag field to the
 		 * passed Application Tag.
 		 */
-		_app_tag = from_be16(&dif->app_tag);
+		_app_tag = _dif_get_apptag(dif, ctx->dif_pi_format);
 		if ((_app_tag & ctx->apptag_mask) != ctx->app_tag) {
 			_dif_error_set(err_blk, SPDK_DIF_APPTAG_ERROR, ctx->app_tag,
 				       (_app_tag & ctx->apptag_mask), offset_blocks);
-			SPDK_ERRLOG("Failed to compare App Tag: LBA=%" PRIu32 "," \
+			SPDK_ERRLOG("Failed to compare App Tag: LBA=%" PRIu64 "," \
 				    "  Expected=%x, Actual=%x\n",
 				    ref_tag, ctx->app_tag, (_app_tag & ctx->apptag_mask));
 			return -1;
@@ -526,15 +778,16 @@ _dif_verify(void *_dif, uint16_t guard, uint32_t offset_blocks,
 		case SPDK_DIF_TYPE2:
 			/* Compare the DIF Reference Tag field to the passed Reference Tag.
 			 * The passed Reference Tag will be the least significant 4 bytes
+			 * or 8 bytes (depending on the PI format)
 			 * of the LBA when Type 1 is used, and application specific value
-			 * if Type 2 is used,
+			 * if Type 2 is used.
 			 */
-			_ref_tag = from_be32(&dif->ref_tag);
-			if (_ref_tag != ref_tag) {
+			if (!_dif_reftag_match(dif, ref_tag, ctx->dif_pi_format)) {
+				_ref_tag = _dif_get_reftag(dif, ctx->dif_pi_format);
 				_dif_error_set(err_blk, SPDK_DIF_REFTAG_ERROR, ref_tag,
 					       _ref_tag, offset_blocks);
-				SPDK_ERRLOG("Failed to compare Ref Tag: LBA=%" PRIu32 "," \
-					    " Expected=%x, Actual=%x\n",
+				SPDK_ERRLOG("Failed to compare Ref Tag: LBA=%" PRIu64 "," \
+					    " Expected=%lx, Actual=%lx\n",
 					    ref_tag, ref_tag, _ref_tag);
 				return -1;
 			}
@@ -558,14 +811,14 @@ dif_verify(struct _dif_sgl *sgl, uint32_t num_blocks,
 {
 	uint32_t offset_blocks = 0;
 	int rc;
-	void *buf;
-	uint16_t guard = 0;
+	uint8_t *buf;
+	uint32_t guard = 0;
 
 	while (offset_blocks < num_blocks) {
 		_dif_sgl_get_buf(sgl, &buf, NULL);
 
 		if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-			guard = spdk_crc16_t10dif(ctx->guard_seed, buf, ctx->guard_interval);
+			guard = _dif_generate_guard(ctx->guard_seed, buf, ctx->guard_interval, ctx->dif_pi_format);
 		}
 
 		rc = _dif_verify(buf + ctx->guard_interval, guard, offset_blocks, ctx, err_blk);
@@ -582,12 +835,12 @@ dif_verify(struct _dif_sgl *sgl, uint32_t num_blocks,
 
 static int
 _dif_verify_split(struct _dif_sgl *sgl, uint32_t offset_in_block, uint32_t data_len,
-		  uint16_t *_guard, uint32_t offset_blocks,
+		  uint32_t *_guard, uint32_t offset_blocks,
 		  const struct spdk_dif_ctx *ctx, struct spdk_dif_error *err_blk)
 {
 	uint32_t offset_in_dif, buf_len;
-	void *buf;
-	uint16_t guard;
+	uint8_t *buf;
+	uint32_t guard;
 	struct spdk_dif dif = {};
 	int rc;
 
@@ -605,7 +858,7 @@ _dif_verify_split(struct _dif_sgl *sgl, uint32_t offset_in_block, uint32_t data_
 		buf_len = spdk_min(buf_len, ctx->guard_interval - offset_in_block);
 
 		if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-			guard = spdk_crc16_t10dif(guard, buf, buf_len);
+			guard = _dif_generate_guard(guard, buf, buf_len, ctx->dif_pi_format);
 		}
 
 		_dif_sgl_advance(sgl, buf_len);
@@ -623,9 +876,9 @@ _dif_verify_split(struct _dif_sgl *sgl, uint32_t offset_in_block, uint32_t data_
 	while (offset_in_block < ctx->block_size) {
 		_dif_sgl_get_buf(sgl, &buf, &buf_len);
 
-		if (offset_in_block < ctx->guard_interval + sizeof(struct spdk_dif)) {
+		if (offset_in_block < ctx->guard_interval + _dif_size(ctx->dif_pi_format)) {
 			offset_in_dif = offset_in_block - ctx->guard_interval;
-			buf_len = spdk_min(buf_len, sizeof(struct spdk_dif) - offset_in_dif);
+			buf_len = spdk_min(buf_len, _dif_size(ctx->dif_pi_format) - offset_in_dif);
 
 			memcpy((uint8_t *)&dif + offset_in_dif, buf, buf_len);
 		} else {
@@ -653,7 +906,7 @@ dif_verify_split(struct _dif_sgl *sgl, uint32_t num_blocks,
 		 const struct spdk_dif_ctx *ctx, struct spdk_dif_error *err_blk)
 {
 	uint32_t offset_blocks;
-	uint16_t guard = 0;
+	uint32_t guard = 0;
 	int rc;
 
 	if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
@@ -700,7 +953,7 @@ dif_update_crc32c(struct _dif_sgl *sgl, uint32_t num_blocks,
 		  uint32_t crc32c,  const struct spdk_dif_ctx *ctx)
 {
 	uint32_t offset_blocks;
-	void *buf;
+	uint8_t *buf;
 
 	for (offset_blocks = 0; offset_blocks < num_blocks; offset_blocks++) {
 		_dif_sgl_get_buf(sgl, &buf, NULL);
@@ -718,7 +971,7 @@ _dif_update_crc32c_split(struct _dif_sgl *sgl, uint32_t offset_in_block, uint32_
 			 uint32_t crc32c, const struct spdk_dif_ctx *ctx)
 {
 	uint32_t data_block_size, buf_len;
-	void *buf;
+	uint8_t *buf;
 
 	data_block_size = ctx->block_size - ctx->md_size;
 
@@ -785,8 +1038,8 @@ dif_generate_copy(struct _dif_sgl *src_sgl, struct _dif_sgl *dst_sgl,
 		  uint32_t num_blocks, const struct spdk_dif_ctx *ctx)
 {
 	uint32_t offset_blocks = 0, data_block_size;
-	void *src, *dst;
-	uint16_t guard;
+	uint8_t *src, *dst;
+	uint32_t guard;
 
 	data_block_size = ctx->block_size - ctx->md_size;
 
@@ -796,9 +1049,10 @@ dif_generate_copy(struct _dif_sgl *src_sgl, struct _dif_sgl *dst_sgl,
 
 		guard = 0;
 		if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-			guard = spdk_crc16_t10dif_copy(ctx->guard_seed, dst, src, data_block_size);
-			guard = spdk_crc16_t10dif(guard, dst + data_block_size,
-						  ctx->guard_interval - data_block_size);
+			guard = _dif_generate_guard_copy(ctx->guard_seed, dst, src, data_block_size,
+							 ctx->dif_pi_format);
+			guard = _dif_generate_guard(guard, dst + data_block_size,
+						    ctx->guard_interval - data_block_size, ctx->dif_pi_format);
 		} else {
 			memcpy(dst, src, data_block_size);
 		}
@@ -816,8 +1070,8 @@ _dif_generate_copy_split(struct _dif_sgl *src_sgl, struct _dif_sgl *dst_sgl,
 			 uint32_t offset_blocks, const struct spdk_dif_ctx *ctx)
 {
 	uint32_t offset_in_block, src_len, data_block_size;
-	uint16_t guard = 0;
-	void *src, *dst;
+	uint32_t guard = 0;
+	uint8_t *src, *dst;
 
 	_dif_sgl_get_buf(dst_sgl, &dst, NULL);
 
@@ -836,8 +1090,8 @@ _dif_generate_copy_split(struct _dif_sgl *src_sgl, struct _dif_sgl *dst_sgl,
 		src_len = spdk_min(src_len, data_block_size - offset_in_block);
 
 		if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-			guard = spdk_crc16_t10dif_copy(guard, dst + offset_in_block,
-						       src, src_len);
+			guard = _dif_generate_guard_copy(guard, dst + offset_in_block,
+							 src, src_len, ctx->dif_pi_format);
 		} else {
 			memcpy(dst + offset_in_block, src, src_len);
 		}
@@ -847,8 +1101,8 @@ _dif_generate_copy_split(struct _dif_sgl *src_sgl, struct _dif_sgl *dst_sgl,
 	}
 
 	if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-		guard = spdk_crc16_t10dif(guard, dst + data_block_size,
-					  ctx->guard_interval - data_block_size);
+		guard = _dif_generate_guard(guard, dst + data_block_size,
+					    ctx->guard_interval - data_block_size, ctx->dif_pi_format);
 	}
 
 	_dif_sgl_advance(dst_sgl, ctx->block_size);
@@ -909,9 +1163,9 @@ dif_verify_copy(struct _dif_sgl *src_sgl, struct _dif_sgl *dst_sgl,
 		struct spdk_dif_error *err_blk)
 {
 	uint32_t offset_blocks = 0, data_block_size;
-	void *src, *dst;
+	uint8_t *src, *dst;
 	int rc;
-	uint16_t guard;
+	uint32_t guard;
 
 	data_block_size = ctx->block_size - ctx->md_size;
 
@@ -921,9 +1175,10 @@ dif_verify_copy(struct _dif_sgl *src_sgl, struct _dif_sgl *dst_sgl,
 
 		guard = 0;
 		if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-			guard = spdk_crc16_t10dif_copy(ctx->guard_seed, dst, src, data_block_size);
-			guard = spdk_crc16_t10dif(guard, src + data_block_size,
-						  ctx->guard_interval - data_block_size);
+			guard = _dif_generate_guard_copy(ctx->guard_seed, dst, src, data_block_size,
+							 ctx->dif_pi_format);
+			guard = _dif_generate_guard(guard, src + data_block_size,
+						    ctx->guard_interval - data_block_size, ctx->dif_pi_format);
 		} else {
 			memcpy(dst, src, data_block_size);
 		}
@@ -947,8 +1202,8 @@ _dif_verify_copy_split(struct _dif_sgl *src_sgl, struct _dif_sgl *dst_sgl,
 		       struct spdk_dif_error *err_blk)
 {
 	uint32_t offset_in_block, dst_len, data_block_size;
-	uint16_t guard = 0;
-	void *src, *dst;
+	uint32_t guard = 0;
+	uint8_t *src, *dst;
 
 	_dif_sgl_get_buf(src_sgl, &src, NULL);
 
@@ -967,8 +1222,8 @@ _dif_verify_copy_split(struct _dif_sgl *src_sgl, struct _dif_sgl *dst_sgl,
 		dst_len = spdk_min(dst_len, data_block_size - offset_in_block);
 
 		if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-			guard = spdk_crc16_t10dif_copy(guard, dst,
-						       src + offset_in_block, dst_len);
+			guard = _dif_generate_guard_copy(guard, dst, src + offset_in_block,
+							 dst_len, ctx->dif_pi_format);
 		} else {
 			memcpy(dst, src + offset_in_block, dst_len);
 		}
@@ -978,8 +1233,8 @@ _dif_verify_copy_split(struct _dif_sgl *src_sgl, struct _dif_sgl *dst_sgl,
 	}
 
 	if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-		guard = spdk_crc16_t10dif(guard, src + data_block_size,
-					  ctx->guard_interval - data_block_size);
+		guard = _dif_generate_guard(guard, src + data_block_size,
+					    ctx->guard_interval - data_block_size, ctx->dif_pi_format);
 	}
 
 	_dif_sgl_advance(src_sgl, ctx->block_size);
@@ -1058,7 +1313,7 @@ _dif_inject_error(struct _dif_sgl *sgl,
 		  uint32_t inject_offset_bits)
 {
 	uint32_t offset_in_block, buf_len;
-	void *buf;
+	uint8_t *buf;
 
 	_dif_sgl_advance(sgl, block_size * inject_offset_blocks);
 
@@ -1130,8 +1385,8 @@ spdk_dif_inject_error(struct iovec *iovs, int iovcnt, uint32_t num_blocks,
 
 	if (inject_flags & SPDK_DIF_REFTAG_ERROR) {
 		rc = dif_inject_error(&sgl, ctx->block_size, num_blocks,
-				      ctx->guard_interval + offsetof(struct spdk_dif, ref_tag),
-				      SPDK_SIZEOF_MEMBER(struct spdk_dif, ref_tag),
+				      ctx->guard_interval + _dif_reftag_offset(ctx->dif_pi_format),
+				      _dif_reftag_size(ctx->dif_pi_format),
 				      inject_offset);
 		if (rc != 0) {
 			SPDK_ERRLOG("Failed to inject error to Reference Tag.\n");
@@ -1141,8 +1396,8 @@ spdk_dif_inject_error(struct iovec *iovs, int iovcnt, uint32_t num_blocks,
 
 	if (inject_flags & SPDK_DIF_APPTAG_ERROR) {
 		rc = dif_inject_error(&sgl, ctx->block_size, num_blocks,
-				      ctx->guard_interval + offsetof(struct spdk_dif, app_tag),
-				      SPDK_SIZEOF_MEMBER(struct spdk_dif, app_tag),
+				      ctx->guard_interval + _dif_apptag_offset(ctx->dif_pi_format),
+				      _dif_apptag_size(),
 				      inject_offset);
 		if (rc != 0) {
 			SPDK_ERRLOG("Failed to inject error to Application Tag.\n");
@@ -1152,7 +1407,7 @@ spdk_dif_inject_error(struct iovec *iovs, int iovcnt, uint32_t num_blocks,
 	if (inject_flags & SPDK_DIF_GUARD_ERROR) {
 		rc = dif_inject_error(&sgl, ctx->block_size, num_blocks,
 				      ctx->guard_interval,
-				      SPDK_SIZEOF_MEMBER(struct spdk_dif, guard),
+				      _dif_guard_size(ctx->dif_pi_format),
 				      inject_offset);
 		if (rc != 0) {
 			SPDK_ERRLOG("Failed to inject error to Guard.\n");
@@ -1161,10 +1416,10 @@ spdk_dif_inject_error(struct iovec *iovs, int iovcnt, uint32_t num_blocks,
 	}
 
 	if (inject_flags & SPDK_DIF_DATA_ERROR) {
-		/* If the DIF information is contained within the last 8 bytes of
-		 * metadata, then the CRC covers all metadata bytes up to but excluding
-		 * the last 8 bytes. But error injection does not cover these metadata
-		 * because classification is not determined yet.
+		/* If the DIF information is contained within the last 8/16 bytes of
+		 * metadata (depending on the PI format), then the CRC covers all metadata
+		 * bytes up to but excluding the last 8/16 bytes. But error injection does not
+		 * cover these metadata because classification is not determined yet.
 		 *
 		 * Note: Error injection to data block is expected to be detected as
 		 * guard error.
@@ -1187,8 +1442,8 @@ dix_generate(struct _dif_sgl *data_sgl, struct _dif_sgl *md_sgl,
 	     uint32_t num_blocks, const struct spdk_dif_ctx *ctx)
 {
 	uint32_t offset_blocks = 0;
-	uint16_t guard;
-	void *data_buf, *md_buf;
+	uint32_t guard;
+	uint8_t *data_buf, *md_buf;
 
 	while (offset_blocks < num_blocks) {
 		_dif_sgl_get_buf(data_sgl, &data_buf, NULL);
@@ -1196,8 +1451,10 @@ dix_generate(struct _dif_sgl *data_sgl, struct _dif_sgl *md_sgl,
 
 		guard = 0;
 		if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-			guard = spdk_crc16_t10dif(ctx->guard_seed, data_buf, ctx->block_size);
-			guard = spdk_crc16_t10dif(guard, md_buf, ctx->guard_interval);
+			guard = _dif_generate_guard(ctx->guard_seed, data_buf, ctx->block_size,
+						    ctx->dif_pi_format);
+			guard = _dif_generate_guard(guard, md_buf, ctx->guard_interval,
+						    ctx->dif_pi_format);
 		}
 
 		_dif_generate(md_buf + ctx->guard_interval, guard, offset_blocks, ctx);
@@ -1213,8 +1470,8 @@ _dix_generate_split(struct _dif_sgl *data_sgl, struct _dif_sgl *md_sgl,
 		    uint32_t offset_blocks, const struct spdk_dif_ctx *ctx)
 {
 	uint32_t offset_in_block, data_buf_len;
-	uint16_t guard = 0;
-	void *data_buf, *md_buf;
+	uint32_t guard = 0;
+	uint8_t *data_buf, *md_buf;
 
 	_dif_sgl_get_buf(md_sgl, &md_buf, NULL);
 
@@ -1228,7 +1485,8 @@ _dix_generate_split(struct _dif_sgl *data_sgl, struct _dif_sgl *md_sgl,
 		data_buf_len = spdk_min(data_buf_len, ctx->block_size - offset_in_block);
 
 		if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-			guard = spdk_crc16_t10dif(guard, data_buf, data_buf_len);
+			guard = _dif_generate_guard(guard, data_buf, data_buf_len,
+						    ctx->dif_pi_format);
 		}
 
 		_dif_sgl_advance(data_sgl, data_buf_len);
@@ -1236,7 +1494,8 @@ _dix_generate_split(struct _dif_sgl *data_sgl, struct _dif_sgl *md_sgl,
 	}
 
 	if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-		guard = spdk_crc16_t10dif(guard, md_buf, ctx->guard_interval);
+		guard = _dif_generate_guard(guard, md_buf, ctx->guard_interval,
+					    ctx->dif_pi_format);
 	}
 
 	_dif_sgl_advance(md_sgl, ctx->md_size);
@@ -1289,8 +1548,8 @@ dix_verify(struct _dif_sgl *data_sgl, struct _dif_sgl *md_sgl,
 	   struct spdk_dif_error *err_blk)
 {
 	uint32_t offset_blocks = 0;
-	uint16_t guard;
-	void *data_buf, *md_buf;
+	uint32_t guard;
+	uint8_t *data_buf, *md_buf;
 	int rc;
 
 	while (offset_blocks < num_blocks) {
@@ -1299,8 +1558,10 @@ dix_verify(struct _dif_sgl *data_sgl, struct _dif_sgl *md_sgl,
 
 		guard = 0;
 		if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-			guard = spdk_crc16_t10dif(ctx->guard_seed, data_buf, ctx->block_size);
-			guard = spdk_crc16_t10dif(guard, md_buf, ctx->guard_interval);
+			guard = _dif_generate_guard(ctx->guard_seed, data_buf, ctx->block_size,
+						    ctx->dif_pi_format);
+			guard = _dif_generate_guard(guard, md_buf, ctx->guard_interval,
+						    ctx->dif_pi_format);
 		}
 
 		rc = _dif_verify(md_buf + ctx->guard_interval, guard, offset_blocks, ctx, err_blk);
@@ -1322,8 +1583,8 @@ _dix_verify_split(struct _dif_sgl *data_sgl, struct _dif_sgl *md_sgl,
 		  struct spdk_dif_error *err_blk)
 {
 	uint32_t offset_in_block, data_buf_len;
-	uint16_t guard = 0;
-	void *data_buf, *md_buf;
+	uint32_t guard = 0;
+	uint8_t *data_buf, *md_buf;
 
 	_dif_sgl_get_buf(md_sgl, &md_buf, NULL);
 
@@ -1337,7 +1598,8 @@ _dix_verify_split(struct _dif_sgl *data_sgl, struct _dif_sgl *md_sgl,
 		data_buf_len = spdk_min(data_buf_len, ctx->block_size - offset_in_block);
 
 		if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-			guard = spdk_crc16_t10dif(guard, data_buf, data_buf_len);
+			guard = _dif_generate_guard(guard, data_buf, data_buf_len,
+						    ctx->dif_pi_format);
 		}
 
 		_dif_sgl_advance(data_sgl, data_buf_len);
@@ -1345,7 +1607,8 @@ _dix_verify_split(struct _dif_sgl *data_sgl, struct _dif_sgl *md_sgl,
 	}
 
 	if (ctx->dif_flags & SPDK_DIF_FLAGS_GUARD_CHECK) {
-		guard = spdk_crc16_t10dif(guard, md_buf, ctx->guard_interval);
+		guard = _dif_generate_guard(guard, md_buf, ctx->guard_interval,
+					    ctx->dif_pi_format);
 	}
 
 	_dif_sgl_advance(md_sgl, ctx->md_size);
@@ -1422,8 +1685,8 @@ spdk_dix_inject_error(struct iovec *iovs, int iovcnt, struct iovec *md_iov,
 
 	if (inject_flags & SPDK_DIF_REFTAG_ERROR) {
 		rc = dif_inject_error(&md_sgl, ctx->md_size, num_blocks,
-				      ctx->guard_interval + offsetof(struct spdk_dif, ref_tag),
-				      SPDK_SIZEOF_MEMBER(struct spdk_dif, ref_tag),
+				      ctx->guard_interval + _dif_reftag_offset(ctx->dif_pi_format),
+				      _dif_reftag_size(ctx->dif_pi_format),
 				      inject_offset);
 		if (rc != 0) {
 			SPDK_ERRLOG("Failed to inject error to Reference Tag.\n");
@@ -1433,8 +1696,8 @@ spdk_dix_inject_error(struct iovec *iovs, int iovcnt, struct iovec *md_iov,
 
 	if (inject_flags & SPDK_DIF_APPTAG_ERROR) {
 		rc = dif_inject_error(&md_sgl, ctx->md_size, num_blocks,
-				      ctx->guard_interval + offsetof(struct spdk_dif, app_tag),
-				      SPDK_SIZEOF_MEMBER(struct spdk_dif, app_tag),
+				      ctx->guard_interval + _dif_apptag_offset(ctx->dif_pi_format),
+				      _dif_apptag_size(),
 				      inject_offset);
 		if (rc != 0) {
 			SPDK_ERRLOG("Failed to inject error to Application Tag.\n");
@@ -1445,7 +1708,7 @@ spdk_dix_inject_error(struct iovec *iovs, int iovcnt, struct iovec *md_iov,
 	if (inject_flags & SPDK_DIF_GUARD_ERROR) {
 		rc = dif_inject_error(&md_sgl, ctx->md_size, num_blocks,
 				      ctx->guard_interval,
-				      SPDK_SIZEOF_MEMBER(struct spdk_dif, guard),
+				      _dif_guard_size(ctx->dif_pi_format),
 				      inject_offset);
 		if (rc != 0) {
 			SPDK_ERRLOG("Failed to inject error to Guard.\n");
@@ -1578,7 +1841,7 @@ spdk_dif_generate_stream(struct iovec *iovs, int iovcnt,
 {
 	uint32_t buf_len = 0, buf_offset = 0;
 	uint32_t len, offset_in_block, offset_blocks;
-	uint16_t guard = 0;
+	uint32_t guard = 0;
 	struct _dif_sgl sgl;
 	int rc;
 
@@ -1623,7 +1886,7 @@ spdk_dif_verify_stream(struct iovec *iovs, int iovcnt,
 {
 	uint32_t buf_len = 0, buf_offset = 0;
 	uint32_t len, offset_in_block, offset_blocks;
-	uint16_t guard = 0;
+	uint32_t guard = 0;
 	struct _dif_sgl sgl;
 	int rc = 0;
 
@@ -1748,8 +2011,9 @@ static int
 _dif_remap_ref_tag(struct _dif_sgl *sgl, uint32_t offset_blocks,
 		   const struct spdk_dif_ctx *ctx, struct spdk_dif_error *err_blk)
 {
-	uint32_t offset, buf_len, expected = 0, _actual, remapped;
-	void *buf;
+	uint32_t offset, buf_len;
+	uint64_t expected = 0, _actual, remapped;
+	uint8_t *buf;
 	struct _dif_sgl tmp_sgl;
 	struct spdk_dif dif;
 
@@ -1759,9 +2023,9 @@ _dif_remap_ref_tag(struct _dif_sgl *sgl, uint32_t offset_blocks,
 
 	/* Copy the split DIF field to the temporary DIF buffer */
 	offset = 0;
-	while (offset < sizeof(struct spdk_dif)) {
+	while (offset < _dif_size(ctx->dif_pi_format)) {
 		_dif_sgl_get_buf(sgl, &buf, &buf_len);
-		buf_len = spdk_min(buf_len, sizeof(struct spdk_dif) - offset);
+		buf_len = spdk_min(buf_len, _dif_size(ctx->dif_pi_format) - offset);
 
 		memcpy((uint8_t *)&dif + offset, buf, buf_len);
 
@@ -1775,15 +2039,17 @@ _dif_remap_ref_tag(struct _dif_sgl *sgl, uint32_t offset_blocks,
 		/* If Type 1 or 2 is used, then all DIF checks are disabled when
 		 * the Application Tag is 0xFFFF.
 		 */
-		if (dif.app_tag == 0xFFFF) {
+		if (_dif_apptag_ignore(&dif, ctx->dif_pi_format)) {
 			goto end;
 		}
 		break;
 	case SPDK_DIF_TYPE3:
 		/* If Type 3 is used, then all DIF checks are disabled when the
-		 * Application Tag is 0xFFFF and the Reference Tag is 0xFFFFFFFF.
+		 * Application Tag is 0xFFFF and the Reference Tag is 0xFFFFFFFF
+		 * or 0xFFFFFFFFFFFFFFFF depending on the PI format.
 		 */
-		if (dif.app_tag == 0xFFFF && dif.ref_tag == 0xFFFFFFFF) {
+		if (_dif_apptag_ignore(&dif, ctx->dif_pi_format) &&
+		    _dif_reftag_ignore(&dif, ctx->dif_pi_format)) {
 			goto end;
 		}
 		break;
@@ -1806,17 +2072,18 @@ _dif_remap_ref_tag(struct _dif_sgl *sgl, uint32_t offset_blocks,
 	switch (ctx->dif_type) {
 	case SPDK_DIF_TYPE1:
 	case SPDK_DIF_TYPE2:
-		/* Compare the DIF Reference Tag field to the computed Reference Tag.
-		 * The computed Reference Tag will be the least significant 4 bytes
+		/* Compare the DIF Reference Tag field to the passed Reference Tag.
+		 * The passed Reference Tag will be the least significant 4 bytes
+		 * or 8 bytes (depending on the PI format)
 		 * of the LBA when Type 1 is used, and application specific value
 		 * if Type 2 is used.
 		 */
-		_actual = from_be32(&dif.ref_tag);
-		if (_actual != expected) {
+		if (!_dif_reftag_match(&dif, expected, ctx->dif_pi_format)) {
+			_actual = _dif_get_reftag(&dif, ctx->dif_pi_format);
 			_dif_error_set(err_blk, SPDK_DIF_REFTAG_ERROR, expected,
 				       _actual, offset_blocks);
-			SPDK_ERRLOG("Failed to compare Ref Tag: LBA=%" PRIu32 "," \
-				    " Expected=%x, Actual=%x\n",
+			SPDK_ERRLOG("Failed to compare Ref Tag: LBA=%" PRIu64 "," \
+				    " Expected=%lx, Actual=%lx\n",
 				    expected, expected, _actual);
 			return -1;
 		}
@@ -1831,12 +2098,12 @@ _dif_remap_ref_tag(struct _dif_sgl *sgl, uint32_t offset_blocks,
 	}
 
 	/* Update the stored Reference Tag to the remapped one. */
-	to_be32(&dif.ref_tag, remapped);
+	_dif_set_reftag(&dif, remapped, ctx->dif_pi_format);
 
 	offset = 0;
-	while (offset < sizeof(struct spdk_dif)) {
+	while (offset < _dif_size(ctx->dif_pi_format)) {
 		_dif_sgl_get_buf(&tmp_sgl, &buf, &buf_len);
-		buf_len = spdk_min(buf_len, sizeof(struct spdk_dif) - offset);
+		buf_len = spdk_min(buf_len, _dif_size(ctx->dif_pi_format) - offset);
 
 		memcpy(buf, (uint8_t *)&dif + offset, buf_len);
 
@@ -1845,7 +2112,7 @@ _dif_remap_ref_tag(struct _dif_sgl *sgl, uint32_t offset_blocks,
 	}
 
 end:
-	_dif_sgl_advance(sgl, ctx->block_size - ctx->guard_interval - sizeof(struct spdk_dif));
+	_dif_sgl_advance(sgl, ctx->block_size - ctx->guard_interval - _dif_size(ctx->dif_pi_format));
 
 	return 0;
 }
@@ -1887,11 +2154,11 @@ static int
 _dix_remap_ref_tag(struct _dif_sgl *md_sgl, uint32_t offset_blocks,
 		   const struct spdk_dif_ctx *ctx, struct spdk_dif_error *err_blk)
 {
-	uint32_t expected = 0, _actual, remapped;
+	uint64_t expected = 0, _actual, remapped;
 	uint8_t *md_buf;
 	struct spdk_dif *dif;
 
-	_dif_sgl_get_buf(md_sgl, (void *)&md_buf, NULL);
+	_dif_sgl_get_buf(md_sgl, &md_buf, NULL);
 
 	dif = (struct spdk_dif *)(md_buf + ctx->guard_interval);
 
@@ -1901,15 +2168,17 @@ _dix_remap_ref_tag(struct _dif_sgl *md_sgl, uint32_t offset_blocks,
 		/* If Type 1 or 2 is used, then all DIF checks are disabled when
 		 * the Application Tag is 0xFFFF.
 		 */
-		if (dif->app_tag == 0xFFFF) {
+		if (_dif_apptag_ignore(dif, ctx->dif_pi_format)) {
 			goto end;
 		}
 		break;
 	case SPDK_DIF_TYPE3:
 		/* If Type 3 is used, then all DIF checks are disabled when the
-		 * Application Tag is 0xFFFF and the Reference Tag is 0xFFFFFFFF.
+		 * Application Tag is 0xFFFF and the Reference Tag is 0xFFFFFFFF
+		 * or 0xFFFFFFFFFFFFFFFF depending on the PI format.
 		 */
-		if (dif->app_tag == 0xFFFF && dif->ref_tag == 0xFFFFFFFF) {
+		if (_dif_apptag_ignore(dif, ctx->dif_pi_format) &&
+		    _dif_reftag_ignore(dif, ctx->dif_pi_format)) {
 			goto end;
 		}
 		break;
@@ -1932,17 +2201,18 @@ _dix_remap_ref_tag(struct _dif_sgl *md_sgl, uint32_t offset_blocks,
 	switch (ctx->dif_type) {
 	case SPDK_DIF_TYPE1:
 	case SPDK_DIF_TYPE2:
-		/* Compare the DIF Reference Tag field to the computed Reference Tag.
-		 * The computed Reference Tag will be the least significant 4 bytes
+		/* Compare the DIF Reference Tag field to the passed Reference Tag.
+		 * The passed Reference Tag will be the least significant 4 bytes
+		 * or 8 bytes (depending on the PI format)
 		 * of the LBA when Type 1 is used, and application specific value
 		 * if Type 2 is used.
 		 */
-		_actual = from_be32(&dif->ref_tag);
-		if (_actual != expected) {
+		if (!_dif_reftag_match(dif, expected, ctx->dif_pi_format)) {
+			_actual = _dif_get_reftag(dif, ctx->dif_pi_format);
 			_dif_error_set(err_blk, SPDK_DIF_REFTAG_ERROR, expected,
 				       _actual, offset_blocks);
-			SPDK_ERRLOG("Failed to compare Ref Tag: LBA=%" PRIu32 "," \
-				    " Expected=%x, Actual=%x\n",
+			SPDK_ERRLOG("Failed to compare Ref Tag: LBA=%" PRIu64 "," \
+				    " Expected=%lx, Actual=%lx\n",
 				    expected, expected, _actual);
 			return -1;
 		}
@@ -1957,7 +2227,7 @@ _dix_remap_ref_tag(struct _dif_sgl *md_sgl, uint32_t offset_blocks,
 	}
 
 	/* Update the stored Reference Tag to the remapped one. */
-	to_be32(&dif->ref_tag, remapped);
+	_dif_set_reftag(dif, remapped, ctx->dif_pi_format);
 
 end:
 	_dif_sgl_advance(md_sgl, ctx->md_size);

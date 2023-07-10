@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2015 Intel Corporation. All rights reserved.
  *   Copyright (c) 2019-2021 Mellanox Technologies LTD. All rights reserved.
- *   Copyright (c) 2021, 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2021-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #include "spdk/stdinc.h"
@@ -596,6 +596,8 @@ spdk_nvme_ctrlr_free_io_qpair(struct spdk_nvme_qpair *qpair)
 		return 0;
 	}
 
+	qpair->destroy_in_progress = 1;
+
 	nvme_transport_ctrlr_disconnect_qpair(ctrlr, qpair);
 
 	if (qpair->poll_group && (qpair->active_proc == nvme_ctrlr_get_current_process(ctrlr))) {
@@ -1112,6 +1114,13 @@ nvme_ctrlr_shutdown_async(struct spdk_nvme_ctrlr *ctrlr,
 	int rc;
 
 	if (ctrlr->is_removed) {
+		ctx->shutdown_complete = true;
+		return;
+	}
+
+	if (ctrlr->adminq == NULL ||
+	    ctrlr->adminq->transport_failure_reason != SPDK_NVME_QPAIR_FAILURE_NONE) {
+		NVME_CTRLR_INFOLOG(ctrlr, "Adminq is not connected.\n");
 		ctx->shutdown_complete = true;
 		return;
 	}
@@ -2975,6 +2984,7 @@ nvme_ctrlr_update_namespaces(struct spdk_nvme_ctrlr *ctrlr)
 	for (nsid = spdk_nvme_ctrlr_get_first_active_ns(ctrlr);
 	     nsid != 0; nsid = spdk_nvme_ctrlr_get_next_active_ns(ctrlr, nsid)) {
 		ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
+		nvme_ns_destruct(ns);
 		nvme_ns_construct(ns, nsid, ctrlr);
 	}
 }
@@ -4775,7 +4785,7 @@ spdk_nvme_ctrlr_update_firmware(struct spdk_nvme_ctrlr *ctrlr, void *payload, ui
 	unsigned int				size_remaining;
 	unsigned int				offset;
 	unsigned int				transfer;
-	void					*p;
+	uint8_t					*p;
 
 	if (!completion_status) {
 		return -EINVAL;
@@ -5071,7 +5081,7 @@ nvme_write_boot_partition_cb(void *arg, const struct spdk_nvme_cpl *cpl)
 
 	if (ctrlr->bp_ws == SPDK_NVME_BP_WS_DOWNLOADING) {
 		NVME_CTRLR_DEBUGLOG(ctrlr, "Boot Partition Downloading at Offset %d Success\n", ctrlr->fw_offset);
-		ctrlr->fw_payload += ctrlr->fw_transfer_size;
+		ctrlr->fw_payload = (uint8_t *)ctrlr->fw_payload + ctrlr->fw_transfer_size;
 		ctrlr->fw_offset += ctrlr->fw_transfer_size;
 		ctrlr->fw_size_remaining -= ctrlr->fw_transfer_size;
 		ctrlr->fw_transfer_size = spdk_min(ctrlr->fw_size_remaining, ctrlr->min_page_size);

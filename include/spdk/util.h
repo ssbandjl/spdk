@@ -28,6 +28,9 @@ extern "C" {
 
 #define SPDK_CONTAINEROF(ptr, type, member) ((type *)((uintptr_t)ptr - offsetof(type, member)))
 
+/** Returns size of an object pointer by ptr up to and including member */
+#define SPDK_SIZEOF(ptr, member) (offsetof(__typeof__(*(ptr)), member) + sizeof((ptr)->member))
+
 /**
  * Get the size of a member of a struct.
  */
@@ -104,23 +107,30 @@ spdk_divide_round_up(uint64_t num, uint64_t divisor)
 	return (num + divisor - 1) / divisor;
 }
 
+struct spdk_single_ioviter {
+	struct iovec	*iov;
+	size_t		iovcnt;
+	size_t		idx;
+	size_t		iov_len;
+	uint8_t		*iov_base;
+};
+
 /**
- * An iovec iterator. Can be allocated on the stack.
+ * An N-way iovec iterator. Calculate the size, given N, using
+ * SPDK_IOVITER_SIZE. For backward compatibility, the structure
+ * has a default size of 2 iovecs.
  */
 struct spdk_ioviter {
-	struct iovec	*siov;
-	size_t		siovcnt;
+	uint32_t	count;
 
-	struct iovec	*diov;
-	size_t		diovcnt;
-
-	size_t		sidx;
-	size_t		didx;
-	int		siov_len;
-	uint8_t		*siov_base;
-	int		diov_len;
-	uint8_t		*diov_base;
+	union {
+		struct spdk_single_ioviter iters_compat[2];
+		struct spdk_single_ioviter iters[0];
+	};
 };
+
+/* count must be greater than or equal to 2 */
+#define SPDK_IOVITER_SIZE(count) (sizeof(struct spdk_single_ioviter) * (count - 2) + sizeof(struct spdk_ioviter))
 
 /**
  * Initialize and move to the first common segment of the two given
@@ -130,6 +140,16 @@ size_t spdk_ioviter_first(struct spdk_ioviter *iter,
 			  struct iovec *siov, size_t siovcnt,
 			  struct iovec *diov, size_t diovcnt,
 			  void **src, void **dst);
+
+/**
+ * Initialize and move to the first common segment of the N given
+ * iovecs. See spdk_ioviter_nextv().
+ */
+size_t spdk_ioviter_firstv(struct spdk_ioviter *iter,
+			   uint32_t count,
+			   struct iovec **iov,
+			   size_t *iovcnt,
+			   void **out);
 
 /**
  * Move to the next segment in the iterator.
@@ -142,6 +162,18 @@ size_t spdk_ioviter_first(struct spdk_ioviter *iter,
  * the iteration is complete on the fifth call.
  */
 size_t spdk_ioviter_next(struct spdk_ioviter *iter, void **src, void **dst);
+
+/**
+ * Move to the next segment in the iterator.
+ *
+ * This will iterate through the segments of the iovecs in the iterator
+ * and return the individual segments, one by one. For example, if the
+ * set consists one iovec of one element of length 4k and another iovec
+ * of 4 elements each of length 1k, this function will return
+ * 4 1k pairs of buffers, and then return 0 bytes to indicate
+ * the iteration is complete on the fifth call.
+ */
+size_t spdk_ioviter_nextv(struct spdk_ioviter *iter, void **out);
 
 /**
  * Operate like memset across an iovec.

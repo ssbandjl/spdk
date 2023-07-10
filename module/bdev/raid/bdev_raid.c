@@ -83,12 +83,17 @@ raid_bdev_create_cb(void *io_device, void *ctx_buf)
 		SPDK_ERRLOG("Unable to allocate base bdevs io channel\n");
 		return -ENOMEM;
 	}
+
+	spdk_spin_lock(&raid_bdev->base_bdev_lock);
 	for (i = 0; i < raid_ch->num_channels; i++) {
 		/*
 		 * Get the spdk_io_channel for all the base bdevs. This is used during
 		 * split logic to send the respective child bdev ios to respective base
 		 * bdev io channel.
 		 */
+		if (raid_bdev->base_bdev_info[i].desc == NULL) {
+			continue;
+		}
 		raid_ch->base_channel[i] = spdk_bdev_get_io_channel(
 						   raid_bdev->base_bdev_info[i].desc);
 		if (!raid_ch->base_channel[i]) {
@@ -97,6 +102,7 @@ raid_bdev_create_cb(void *io_device, void *ctx_buf)
 			break;
 		}
 	}
+	spdk_spin_unlock(&raid_bdev->base_bdev_lock);
 
 	if (!ret && raid_bdev->module->get_io_channel) {
 		raid_ch->module_channel = raid_bdev->module->get_io_channel(raid_bdev);
@@ -107,10 +113,10 @@ raid_bdev_create_cb(void *io_device, void *ctx_buf)
 	}
 
 	if (ret) {
-		uint8_t j;
-
-		for (j = 0; j < i; j++) {
-			spdk_put_io_channel(raid_ch->base_channel[j]);
+		for (i = 0; i < raid_ch->num_channels; i++) {
+			if (raid_ch->base_channel[i] != NULL) {
+				spdk_put_io_channel(raid_ch->base_channel[i]);
+			}
 		}
 		free(raid_ch->base_channel);
 		raid_ch->base_channel = NULL;
@@ -145,8 +151,9 @@ raid_bdev_destroy_cb(void *io_device, void *ctx_buf)
 
 	for (i = 0; i < raid_ch->num_channels; i++) {
 		/* Free base bdev channels */
-		assert(raid_ch->base_channel[i] != NULL);
-		spdk_put_io_channel(raid_ch->base_channel[i]);
+		if (raid_ch->base_channel[i] != NULL) {
+			spdk_put_io_channel(raid_ch->base_channel[i]);
+		}
 	}
 	free(raid_ch->base_channel);
 	raid_ch->base_channel = NULL;
@@ -172,7 +179,6 @@ raid_bdev_cleanup(struct raid_bdev *raid_bdev)
 	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-		assert(base_info->bdev == NULL);
 		assert(base_info->desc == NULL);
 		free(base_info->name);
 	}
@@ -184,6 +190,7 @@ raid_bdev_cleanup(struct raid_bdev *raid_bdev)
 static void
 raid_bdev_free(struct raid_bdev *raid_bdev)
 {
+	spdk_spin_destroy(&raid_bdev->base_bdev_lock);
 	free(raid_bdev->bdev.name);
 	free(raid_bdev);
 }
@@ -199,30 +206,28 @@ raid_bdev_cleanup_and_free(struct raid_bdev *raid_bdev)
  * brief:
  * free resource of base bdev for raid bdev
  * params:
- * raid_bdev - pointer to raid bdev
  * base_info - raid base bdev info
  * returns:
  * 0 - success
  * non zero - failure
  */
 static void
-raid_bdev_free_base_bdev_resource(struct raid_bdev *raid_bdev,
-				  struct raid_base_bdev_info *base_info)
+raid_bdev_free_base_bdev_resource(struct raid_base_bdev_info *base_info)
 {
+	struct raid_bdev *raid_bdev = base_info->raid_bdev;
+
 	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 
 	free(base_info->name);
 	base_info->name = NULL;
 
-	if (base_info->bdev == NULL) {
+	if (base_info->desc == NULL) {
 		return;
 	}
 
-	assert(base_info->desc);
-	spdk_bdev_module_release_bdev(base_info->bdev);
+	spdk_bdev_module_release_bdev(spdk_bdev_desc_get_bdev(base_info->desc));
 	spdk_bdev_close(base_info->desc);
 	base_info->desc = NULL;
-	base_info->bdev = NULL;
 
 	assert(raid_bdev->num_base_bdevs_discovered);
 	raid_bdev->num_base_bdevs_discovered--;
@@ -266,7 +271,7 @@ _raid_bdev_destruct(void *ctxt)
 		 * layers.  Also close the descriptors if we have started shutdown.
 		 */
 		if (g_shutdown_started || base_info->remove_scheduled == true) {
-			raid_bdev_free_base_bdev_resource(raid_bdev, base_info);
+			raid_bdev_free_base_bdev_resource(base_info);
 		}
 	}
 
@@ -404,17 +409,21 @@ raid_bdev_submit_reset_request(struct raid_bdev_io *raid_io)
 		raid_io->base_bdev_io_remaining = raid_bdev->num_base_bdevs;
 	}
 
-	while (raid_io->base_bdev_io_submitted < raid_bdev->num_base_bdevs) {
-		i = raid_io->base_bdev_io_submitted;
+	for (i = raid_io->base_bdev_io_submitted; i < raid_bdev->num_base_bdevs; i++) {
 		base_info = &raid_bdev->base_bdev_info[i];
 		base_ch = raid_io->raid_ch->base_channel[i];
+		if (base_ch == NULL) {
+			raid_io->base_bdev_io_submitted++;
+			raid_bdev_io_complete_part(raid_io, 1, SPDK_BDEV_IO_STATUS_SUCCESS);
+			continue;
+		}
 		ret = spdk_bdev_reset(base_info->desc, base_ch,
 				      raid_base_bdev_reset_complete, raid_io);
 		if (ret == 0) {
 			raid_io->base_bdev_io_submitted++;
 		} else if (ret == -ENOMEM) {
-			raid_bdev_queue_io_wait(raid_io, base_info->bdev, base_ch,
-						_raid_bdev_submit_reset_request);
+			raid_bdev_queue_io_wait(raid_io, spdk_bdev_desc_get_bdev(base_info->desc),
+						base_ch, _raid_bdev_submit_reset_request);
 			return;
 		} else {
 			SPDK_ERRLOG("bdev io submit error not due to ENOMEM, it should not happen\n");
@@ -522,12 +531,11 @@ _raid_bdev_io_type_supported(struct raid_bdev *raid_bdev, enum spdk_bdev_io_type
 	}
 
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-		if (base_info->bdev == NULL) {
-			assert(false);
+		if (base_info->desc == NULL) {
 			continue;
 		}
 
-		if (spdk_bdev_io_type_supported(base_info->bdev, io_type) == false) {
+		if (spdk_bdev_io_type_supported(spdk_bdev_desc_get_bdev(base_info->desc), io_type) == false) {
 			return false;
 		}
 	}
@@ -600,8 +608,8 @@ raid_bdev_write_info_json(struct raid_bdev *raid_bdev, struct spdk_json_write_ct
 	spdk_json_write_name(w, "base_bdevs_list");
 	spdk_json_write_array_begin(w);
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-		if (base_info->bdev) {
-			spdk_json_write_string(w, base_info->bdev->name);
+		if (base_info->desc) {
+			spdk_json_write_string(w, spdk_bdev_desc_get_bdev(base_info->desc)->name);
 		} else {
 			spdk_json_write_null(w);
 		}
@@ -662,8 +670,8 @@ raid_bdev_write_config_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx *
 
 	spdk_json_write_named_array_begin(w, "base_bdevs");
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-		if (base_info->bdev) {
-			spdk_json_write_string(w, base_info->bdev->name);
+		if (base_info->desc) {
+			spdk_json_write_string(w, spdk_bdev_desc_get_bdev(base_info->desc)->name);
 		}
 	}
 	spdk_json_write_array_end(w);
@@ -676,36 +684,47 @@ static int
 raid_bdev_get_memory_domains(void *ctx, struct spdk_memory_domain **domains, int array_size)
 {
 	struct raid_bdev *raid_bdev = ctx;
-	struct spdk_bdev *base_bdev;
-	uint32_t i;
-	int domains_count = 0, rc;
+	struct raid_base_bdev_info *base_info;
+	int domains_count = 0, rc = 0;
 
 	if (raid_bdev->module->memory_domains_supported == false) {
 		return 0;
 	}
 
+	spdk_spin_lock(&raid_bdev->base_bdev_lock);
+
 	/* First loop to get the number of memory domains */
-	for (i = 0; i < raid_bdev->num_base_bdevs; i++) {
-		base_bdev = raid_bdev->base_bdev_info[i].bdev;
-		rc = spdk_bdev_get_memory_domains(base_bdev, NULL, 0);
+	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+		if (base_info->desc == NULL) {
+			continue;
+		}
+		rc = spdk_bdev_get_memory_domains(spdk_bdev_desc_get_bdev(base_info->desc), NULL, 0);
 		if (rc < 0) {
-			return rc;
+			goto out;
 		}
 		domains_count += rc;
 	}
 
 	if (!domains || array_size < domains_count) {
-		return domains_count;
+		goto out;
 	}
 
-	for (i = 0; i < raid_bdev->num_base_bdevs; i++) {
-		base_bdev = raid_bdev->base_bdev_info[i].bdev;
-		rc = spdk_bdev_get_memory_domains(base_bdev, domains, array_size);
+	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+		if (base_info->desc == NULL) {
+			continue;
+		}
+		rc = spdk_bdev_get_memory_domains(spdk_bdev_desc_get_bdev(base_info->desc), domains, array_size);
 		if (rc < 0) {
-			return rc;
+			goto out;
 		}
 		domains += rc;
 		array_size -= rc;
+	}
+out:
+	spdk_spin_unlock(&raid_bdev->base_bdev_lock);
+
+	if (rc < 0) {
+		return rc;
 	}
 
 	return domains_count;
@@ -924,6 +943,7 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 	struct raid_bdev *raid_bdev;
 	struct spdk_bdev *raid_bdev_gen;
 	struct raid_bdev_module *module;
+	struct raid_base_bdev_info *base_info;
 	uint8_t min_operational;
 
 	if (raid_bdev_find_by_name(name) != NULL) {
@@ -999,6 +1019,10 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 		return -ENOMEM;
 	}
 
+	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+		base_info->raid_bdev = raid_bdev;
+	}
+
 	/* strip_size_kb is from the rpc param.  strip_size is in blocks and used
 	 * internally and set later.
 	 */
@@ -1017,6 +1041,8 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 		free(raid_bdev);
 		return -ENOMEM;
 	}
+
+	spdk_spin_init(&raid_bdev->base_bdev_lock);
 
 	raid_bdev_gen->product_name = "Raid Volume";
 	raid_bdev_gen->ctxt = raid_bdev;
@@ -1052,7 +1078,7 @@ raid_bdev_configure_md(struct raid_bdev *raid_bdev)
 	uint8_t i;
 
 	for (i = 0; i < raid_bdev->num_base_bdevs; i++) {
-		base_bdev = raid_bdev->base_bdev_info[i].bdev;
+		base_bdev = spdk_bdev_desc_get_bdev(raid_bdev->base_bdev_info[i].desc);
 
 		if (i == 0) {
 			raid_bdev->bdev.md_len = spdk_bdev_get_md_size(base_bdev);
@@ -1093,17 +1119,19 @@ raid_bdev_configure(struct raid_bdev *raid_bdev)
 	uint32_t blocklen = 0;
 	struct spdk_bdev *raid_bdev_gen;
 	struct raid_base_bdev_info *base_info;
+	struct spdk_bdev *base_bdev;
 	int rc = 0;
 
 	assert(raid_bdev->state == RAID_BDEV_STATE_CONFIGURING);
 	assert(raid_bdev->num_base_bdevs_discovered == raid_bdev->num_base_bdevs);
 
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-		assert(base_info->bdev != NULL);
+		assert(base_info->desc != NULL);
+		base_bdev = spdk_bdev_desc_get_bdev(base_info->desc);
 		/* Check blocklen for all base bdevs that it should be same */
 		if (blocklen == 0) {
-			blocklen = base_info->bdev->blocklen;
-		} else if (blocklen != base_info->bdev->blocklen) {
+			blocklen = base_bdev->blocklen;
+		} else if (blocklen != base_bdev->blocklen) {
 			/*
 			 * Assumption is that all the base bdevs for any raid bdev should
 			 * have same blocklen
@@ -1186,7 +1214,6 @@ raid_bdev_deconfigure(struct raid_bdev *raid_bdev, raid_bdev_destruct_cb cb_fn,
 		return;
 	}
 
-	assert(raid_bdev->num_base_bdevs == raid_bdev->num_base_bdevs_discovered);
 	raid_bdev->state = RAID_BDEV_STATE_OFFLINE;
 	assert(raid_bdev->num_base_bdevs_discovered);
 	SPDK_DEBUGLOG(bdev_raid, "raid bdev state changing from online to offline\n");
@@ -1196,34 +1223,99 @@ raid_bdev_deconfigure(struct raid_bdev *raid_bdev, raid_bdev_destruct_cb cb_fn,
 
 /*
  * brief:
- * raid_bdev_find_by_base_bdev function finds the raid bdev which has
- *  claimed the base bdev.
+ * raid_bdev_find_base_info_by_bdev function finds the base bdev info by bdev.
  * params:
- * base_bdev - pointer to base bdev pointer
- * _raid_bdev - Reference to pointer to raid bdev
- * _base_info - Reference to the raid base bdev info.
+ * base_bdev - pointer to base bdev
  * returns:
- * true - if the raid bdev is found.
- * false - if the raid bdev is not found.
+ * base bdev info if found, otherwise NULL.
  */
-static bool
-raid_bdev_find_by_base_bdev(struct spdk_bdev *base_bdev, struct raid_bdev **_raid_bdev,
-			    struct raid_base_bdev_info **_base_info)
+static struct raid_base_bdev_info *
+raid_bdev_find_base_info_by_bdev(struct spdk_bdev *base_bdev)
 {
 	struct raid_bdev *raid_bdev;
 	struct raid_base_bdev_info *base_info;
 
 	TAILQ_FOREACH(raid_bdev, &g_raid_bdev_list, global_link) {
 		RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-			if (base_info->bdev == base_bdev) {
-				*_raid_bdev = raid_bdev;
-				*_base_info = base_info;
-				return true;
+			if (base_info->desc != NULL &&
+			    spdk_bdev_desc_get_bdev(base_info->desc) == base_bdev) {
+				return base_info;
 			}
 		}
 	}
 
-	return false;
+	return NULL;
+}
+
+static void
+raid_bdev_remove_base_bdev_on_unquiesced(void *ctx, int status)
+{
+	struct raid_base_bdev_info *base_info = ctx;
+	struct raid_bdev *raid_bdev = base_info->raid_bdev;
+
+	base_info->remove_scheduled = false;
+
+	if (status != 0) {
+		SPDK_ERRLOG("Failed to unquiesce raid bdev %s: %s\n",
+			    raid_bdev->bdev.name, spdk_strerror(-status));
+		goto out;
+	}
+
+	spdk_spin_lock(&raid_bdev->base_bdev_lock);
+	raid_bdev_free_base_bdev_resource(base_info);
+	spdk_spin_unlock(&raid_bdev->base_bdev_lock);
+out:
+	if (base_info->remove_cb != NULL) {
+		base_info->remove_cb(base_info->remove_cb_ctx, status);
+	}
+}
+
+static void
+raid_bdev_channel_remove_base_bdev(struct spdk_io_channel_iter *i)
+{
+	struct raid_base_bdev_info *base_info = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
+	struct raid_bdev_io_channel *raid_ch = spdk_io_channel_get_ctx(ch);
+	uint8_t idx = base_info - base_info->raid_bdev->base_bdev_info;
+
+	SPDK_DEBUGLOG(bdev_raid, "slot: %u raid_ch: %p\n", idx, raid_ch);
+
+	if (raid_ch->base_channel[idx] != NULL) {
+		spdk_put_io_channel(raid_ch->base_channel[idx]);
+		raid_ch->base_channel[idx] = NULL;
+	}
+
+	spdk_for_each_channel_continue(i, 0);
+}
+
+static void
+raid_bdev_channels_remove_base_bdev_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct raid_base_bdev_info *base_info = spdk_io_channel_iter_get_ctx(i);
+	struct raid_bdev *raid_bdev = base_info->raid_bdev;
+
+	spdk_bdev_unquiesce(&raid_bdev->bdev, &g_raid_if, raid_bdev_remove_base_bdev_on_unquiesced,
+			    base_info);
+}
+
+static void
+raid_bdev_remove_base_bdev_on_quiesced(void *ctx, int status)
+{
+	struct raid_base_bdev_info *base_info = ctx;
+	struct raid_bdev *raid_bdev = base_info->raid_bdev;
+
+	if (status != 0) {
+		SPDK_ERRLOG("Failed to quiesce raid bdev %s: %s\n",
+			    raid_bdev->bdev.name, spdk_strerror(-status));
+		base_info->remove_scheduled = false;
+		if (base_info->remove_cb != NULL) {
+			base_info->remove_cb(base_info->remove_cb_ctx, status);
+		}
+		return;
+	}
+
+	spdk_for_each_channel(raid_bdev, raid_bdev_channel_remove_base_bdev, base_info,
+			      raid_bdev_channels_remove_base_bdev_done);
 }
 
 /*
@@ -1233,42 +1325,67 @@ raid_bdev_find_by_base_bdev(struct spdk_bdev *base_bdev, struct raid_bdev **_rai
  * or not. If yes, it takes necessary action on that particular raid bdev.
  * params:
  * base_bdev - pointer to base bdev which got removed
+ * cb_fn - callback function
+ * cb_arg - argument to callback function
  * returns:
- * none
+ * 0 - success
+ * non zero - failure
  */
-static void
-raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev)
+int
+raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev, raid_bdev_remove_base_bdev_cb cb_fn,
+			   void *cb_ctx)
 {
-	struct raid_bdev	*raid_bdev = NULL;
+	struct raid_bdev *raid_bdev;
 	struct raid_base_bdev_info *base_info;
 
-	SPDK_DEBUGLOG(bdev_raid, "raid_bdev_remove_base_bdev\n");
+	SPDK_DEBUGLOG(bdev_raid, "%s\n", base_bdev->name);
 
 	/* Find the raid_bdev which has claimed this base_bdev */
-	if (!raid_bdev_find_by_base_bdev(base_bdev, &raid_bdev, &base_info)) {
+	base_info = raid_bdev_find_base_info_by_bdev(base_bdev);
+	if (!base_info) {
 		SPDK_ERRLOG("bdev to remove '%s' not found\n", base_bdev->name);
-		return;
+		return -ENODEV;
 	}
+	raid_bdev = base_info->raid_bdev;
 
 	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 
+	if (base_info->remove_scheduled) {
+		return 0;
+	}
+
 	assert(base_info->desc);
 	base_info->remove_scheduled = true;
+	base_info->remove_cb = cb_fn;
+	base_info->remove_cb_ctx = cb_ctx;
 
 	if (raid_bdev->state != RAID_BDEV_STATE_ONLINE) {
 		/*
 		 * As raid bdev is not registered yet or already unregistered,
 		 * so cleanup should be done here itself.
 		 */
-		raid_bdev_free_base_bdev_resource(raid_bdev, base_info);
+		raid_bdev_free_base_bdev_resource(base_info);
 		if (raid_bdev->num_base_bdevs_discovered == 0) {
 			/* There is no base bdev for this raid, so free the raid device. */
 			raid_bdev_cleanup_and_free(raid_bdev);
-			return;
+		}
+	} else if (raid_bdev->num_base_bdevs_discovered == raid_bdev->min_base_bdevs_operational) {
+		/*
+		 * After this base bdev is removed there will not be enough base bdevs
+		 * to keep the raid bdev operational.
+		 */
+		raid_bdev_deconfigure(raid_bdev, cb_fn, cb_ctx);
+	} else {
+		int ret;
+
+		ret = spdk_bdev_quiesce(&raid_bdev->bdev, &g_raid_if,
+					raid_bdev_remove_base_bdev_on_quiesced, base_info);
+		if (ret != 0) {
+			base_info->remove_scheduled = false;
 		}
 	}
 
-	raid_bdev_deconfigure(raid_bdev, NULL, NULL);
+	return 0;
 }
 
 /*
@@ -1284,16 +1401,19 @@ raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev)
 static void
 raid_bdev_resize_base_bdev(struct spdk_bdev *base_bdev)
 {
-	struct raid_bdev	*raid_bdev = NULL;
+	struct raid_bdev *raid_bdev;
 	struct raid_base_bdev_info *base_info;
 
 	SPDK_DEBUGLOG(bdev_raid, "raid_bdev_resize_base_bdev\n");
 
+	base_info = raid_bdev_find_base_info_by_bdev(base_bdev);
+
 	/* Find the raid_bdev which has claimed this base_bdev */
-	if (!raid_bdev_find_by_base_bdev(base_bdev, &raid_bdev, &base_info)) {
+	if (!base_info) {
 		SPDK_ERRLOG("raid_bdev whose base_bdev '%s' not found\n", base_bdev->name);
 		return;
 	}
+	raid_bdev = base_info->raid_bdev;
 
 	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 
@@ -1320,9 +1440,15 @@ static void
 raid_bdev_event_base_bdev(enum spdk_bdev_event_type type, struct spdk_bdev *bdev,
 			  void *event_ctx)
 {
+	int rc;
+
 	switch (type) {
 	case SPDK_BDEV_EVENT_REMOVE:
-		raid_bdev_remove_base_bdev(bdev);
+		rc = raid_bdev_remove_base_bdev(bdev, NULL, NULL);
+		if (rc != 0) {
+			SPDK_ERRLOG("Failed to remove base bdev %s: %s\n",
+				    spdk_bdev_get_name(bdev), spdk_strerror(-rc));
+		}
 		break;
 	case SPDK_BDEV_EVENT_RESIZE:
 		raid_bdev_resize_base_bdev(bdev);
@@ -1367,7 +1493,7 @@ raid_bdev_delete(struct raid_bdev *raid_bdev, raid_bdev_destruct_cb cb_fn, void 
 			 * As raid bdev is not registered yet or already unregistered,
 			 * so cleanup should be done here itself.
 			 */
-			raid_bdev_free_base_bdev_resource(raid_bdev, base_info);
+			raid_bdev_free_base_bdev_resource(base_info);
 		}
 	}
 
@@ -1383,15 +1509,16 @@ raid_bdev_delete(struct raid_bdev *raid_bdev, raid_bdev_destruct_cb cb_fn, void 
 }
 
 static int
-raid_bdev_configure_base_bdev(struct raid_bdev *raid_bdev, struct raid_base_bdev_info *base_info)
+raid_bdev_configure_base_bdev(struct raid_base_bdev_info *base_info)
 {
+	struct raid_bdev *raid_bdev = base_info->raid_bdev;
 	struct spdk_bdev_desc *desc;
 	struct spdk_bdev *bdev;
 	int rc;
 
 	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 	assert(base_info->name != NULL);
-	assert(base_info->bdev == NULL);
+	assert(base_info->desc == NULL);
 
 	rc = spdk_bdev_open_ext(base_info->name, true, raid_bdev_event_base_bdev, NULL, &desc);
 	if (rc != 0) {
@@ -1414,7 +1541,6 @@ raid_bdev_configure_base_bdev(struct raid_bdev *raid_bdev, struct raid_base_bdev
 
 	assert(raid_bdev->state != RAID_BDEV_STATE_ONLINE);
 
-	base_info->bdev = bdev;
 	base_info->desc = desc;
 	base_info->blockcnt = bdev->blockcnt;
 	raid_bdev->num_base_bdevs_discovered++;
@@ -1467,7 +1593,7 @@ raid_bdev_add_base_device(struct raid_bdev *raid_bdev, const char *name, uint8_t
 		return -ENOMEM;
 	}
 
-	rc = raid_bdev_configure_base_bdev(raid_bdev, base_info);
+	rc = raid_bdev_configure_base_bdev(base_info);
 	if (rc != 0) {
 		if (rc != -ENODEV) {
 			SPDK_ERRLOG("Failed to allocate resource for bdev '%s'\n", name);
@@ -1496,8 +1622,9 @@ raid_bdev_examine(struct spdk_bdev *bdev)
 
 	TAILQ_FOREACH(raid_bdev, &g_raid_bdev_list, global_link) {
 		RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-			if (base_info->bdev == NULL && strcmp(bdev->name, base_info->name) == 0) {
-				raid_bdev_configure_base_bdev(raid_bdev, base_info);
+			if (base_info->desc == NULL && base_info->name != NULL &&
+			    strcmp(bdev->name, base_info->name) == 0) {
+				raid_bdev_configure_base_bdev(base_info);
 				break;
 			}
 		}

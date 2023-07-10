@@ -49,6 +49,7 @@ struct nvme_tcp_ctrlr {
 	char					psk_identity[NVMF_PSK_IDENTITY_LEN];
 	uint8_t					psk[SPDK_TLS_PSK_MAX_LEN];
 	int					psk_size;
+	char					*tls_cipher_suite;
 };
 
 struct nvme_tcp_poll_group {
@@ -514,7 +515,9 @@ nvme_tcp_build_contig_request(struct nvme_tcp_qpair *tqpair, struct nvme_tcp_req
 {
 	struct nvme_request *req = tcp_req->req;
 
-	tcp_req->iov[0].iov_base = req->payload.contig_or_cb_arg + req->payload_offset;
+	/* ubsan complains about applying zero offset to null pointer if contig_or_cb_arg is NULL,
+	 * so just double cast it to make it go away */
+	tcp_req->iov[0].iov_base = (void *)((uintptr_t)req->payload.contig_or_cb_arg + req->payload_offset);
 	tcp_req->iov[0].iov_len = req->payload_size;
 	tcp_req->iovcnt = 1;
 
@@ -1941,11 +1944,11 @@ nvme_tcp_qpair_connect_sock(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_qpai
 
 	if (sock_impl_name) {
 		spdk_sock_impl_get_opts(sock_impl_name, &impl_opts, &impl_opts_size);
-		impl_opts.enable_ktls = false;
 		impl_opts.tls_version = SPDK_TLS_VERSION_1_3;
 		impl_opts.psk_identity = tcp_ctrlr->psk_identity;
 		impl_opts.psk_key = tcp_ctrlr->psk;
 		impl_opts.psk_key_size = tcp_ctrlr->psk_size;
+		impl_opts.tls_cipher_suites = tcp_ctrlr->tls_cipher_suite;
 	}
 	opts.opts_size = sizeof(opts);
 	spdk_sock_get_default_opts(&opts);
@@ -2148,25 +2151,73 @@ static int
 nvme_tcp_generate_tls_credentials(struct nvme_tcp_ctrlr *tctrlr)
 {
 	int rc;
+	uint8_t psk_retained[SPDK_TLS_PSK_MAX_LEN] = {};
+	uint8_t psk_configured[SPDK_TLS_PSK_MAX_LEN] = {};
+	uint8_t tls_cipher_suite;
+	uint8_t psk_retained_hash;
+	uint64_t psk_configured_size;
 
 	assert(tctrlr != NULL);
 
+	rc = nvme_tcp_parse_interchange_psk(tctrlr->ctrlr.opts.psk, psk_configured, sizeof(psk_configured),
+					    &psk_configured_size, &psk_retained_hash);
+	if (rc < 0) {
+		SPDK_ERRLOG("Failed to parse PSK interchange!\n");
+		goto finish;
+	}
+
+	/* The Base64 string encodes the configured PSK (32 or 48 bytes binary).
+	 * This check also ensures that psk_configured_size is smaller than
+	 * psk_retained buffer size. */
+	if (psk_configured_size == SHA256_DIGEST_LENGTH) {
+		tls_cipher_suite = NVME_TCP_CIPHER_AES_128_GCM_SHA256;
+		tctrlr->tls_cipher_suite = "TLS_AES_128_GCM_SHA256";
+	} else if (psk_configured_size == SHA384_DIGEST_LENGTH) {
+		tls_cipher_suite = NVME_TCP_CIPHER_AES_256_GCM_SHA384;
+		tctrlr->tls_cipher_suite = "TLS_AES_256_GCM_SHA384";
+	} else {
+		SPDK_ERRLOG("Unrecognized cipher suite!\n");
+		rc = -ENOTSUP;
+		goto finish;
+	}
+
 	rc = nvme_tcp_generate_psk_identity(tctrlr->psk_identity, sizeof(tctrlr->psk_identity),
-					    tctrlr->ctrlr.opts.hostnqn, tctrlr->ctrlr.trid.subnqn);
+					    tctrlr->ctrlr.opts.hostnqn, tctrlr->ctrlr.trid.subnqn,
+					    tls_cipher_suite);
 	if (rc) {
 		SPDK_ERRLOG("could not generate PSK identity\n");
-		return -EINVAL;
+		goto finish;
 	}
 
-	rc = nvme_tcp_derive_retained_psk(tctrlr->ctrlr.opts.psk, tctrlr->ctrlr.opts.hostnqn, tctrlr->psk,
-					  sizeof(tctrlr->psk));
+	/* No hash indicates that Configured PSK must be used as Retained PSK. */
+	if (psk_retained_hash == NVME_TCP_HASH_ALGORITHM_NONE) {
+		assert(psk_configured_size < sizeof(psk_retained));
+		memcpy(psk_retained, psk_configured, psk_configured_size);
+		rc = psk_configured_size;
+	} else {
+		/* Derive retained PSK. */
+		rc = nvme_tcp_derive_retained_psk(psk_configured, psk_configured_size, tctrlr->ctrlr.opts.hostnqn,
+						  psk_retained, sizeof(psk_retained), psk_retained_hash);
+		if (rc < 0) {
+			SPDK_ERRLOG("Unable to derive retained PSK!\n");
+			goto finish;
+		}
+	}
+
+	rc = nvme_tcp_derive_tls_psk(psk_retained, rc, tctrlr->psk_identity, tctrlr->psk,
+				     sizeof(tctrlr->psk), tls_cipher_suite);
 	if (rc < 0) {
-		SPDK_ERRLOG("Unable to derive retained PSK!\n");
-		return -EINVAL;
+		SPDK_ERRLOG("Could not generate TLS PSK!\n");
+		return rc;
 	}
-	tctrlr->psk_size = rc;
 
-	return 0;
+	tctrlr->psk_size = rc;
+	rc = 0;
+
+finish:
+	spdk_memset_s(psk_configured, sizeof(psk_configured), 0, sizeof(psk_configured));
+
+	return rc;
 }
 
 static spdk_nvme_ctrlr_t *

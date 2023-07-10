@@ -1102,6 +1102,10 @@ if echo -e '#include <uuid/uuid.h>\nint main(void) { uuid_generate_sha1(NULL, NU
 	CONFIG[HAVE_UUID_GENERATE_SHA1]="y"
 fi
 
+if echo -e '#include <execinfo.h>' | "${BUILD_CMD[@]}" -c - 2> /dev/null; then
+	CONFIG[HAVE_EXECINFO_H]=y
+fi
+
 if [[ "${CONFIG[OCF]}" = "y" ]]; then
 	# If OCF_PATH is a file, assume it is a library and use it to compile with
 	if [ -f ${CONFIG[OCF_PATH]} ]; then
@@ -1183,7 +1187,7 @@ if [[ $arch == x86_64* ]] || [[ $arch == aarch64* ]]; then
 	fi
 	# check gas version on aarch64
 	if [[ $arch == aarch64* ]]; then
-		ver=$(as --version 2> /dev/null | awk 'NR==1{print $7}')
+		ver=$(as --version 2> /dev/null | awk '/GNU assembler/{print $NF}')
 		if lt "$ver" 2.24; then
 			# ISA-L, compression & crypto require gas version 2.24 or newer.
 			CONFIG[ISAL]=n

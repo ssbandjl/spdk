@@ -70,10 +70,10 @@ function tgt_check_notifications() {
 	local events_to_check
 	local recorded_events
 
-	events_to_check=("$@")
-	recorded_events=($(get_notifications))
+	# Seems like notifications don't necessarily have to come in order, so make sure they are sorted
+	events_to_check=($(printf '%s\n' "$@" | sort))
+	recorded_events=($(get_notifications | sort))
 
-	# These should be in order hence compare entire arrays
 	if [[ ${events_to_check[*]} != "${recorded_events[*]}" ]]; then
 		cat <<- ERROR
 			Expected events did not match.
@@ -189,12 +189,10 @@ function create_bdev_subsystem_config() {
 			bdev_register:Malloc1
 		)
 
-		if [[ $(uname -s) = Linux ]]; then
-			# This AIO bdev must be large enough to be used as LVOL store
-			dd if=/dev/zero of="$SPDK_TEST_STORAGE/sample_aio" bs=1024 count=102400
-			tgt_rpc bdev_aio_create "$SPDK_TEST_STORAGE/sample_aio" aio_disk 1024
-			expected_notifications+=(bdev_register:aio_disk)
-		fi
+		# This AIO bdev must be large enough to be used as LVOL store
+		dd if=/dev/zero of="$SPDK_TEST_STORAGE/sample_aio" bs=1024 count=102400
+		tgt_rpc bdev_aio_create "$SPDK_TEST_STORAGE/sample_aio" aio_disk 1024
+		expected_notifications+=(bdev_register:aio_disk)
 
 		# For LVOLs use split to check for proper order of initialization.
 		# If LVOLs configuration will be reordered (eg moved before splits or AIO/NVMe)

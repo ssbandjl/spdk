@@ -23,6 +23,17 @@
 
 static int bdev_rbd_count = 0;
 
+struct bdev_rbd_pool_ctx {
+	rados_t *cluster_p;
+	char *name;
+	rados_ioctx_t io_ctx;
+	uint32_t ref;
+	STAILQ_ENTRY(bdev_rbd_pool_ctx) link;
+};
+
+static STAILQ_HEAD(, bdev_rbd_pool_ctx) g_map_bdev_rbd_pool_ctx = STAILQ_HEAD_INITIALIZER(
+			g_map_bdev_rbd_pool_ctx);
+
 struct bdev_rbd {
 	struct spdk_bdev disk;
 	char *rbd_name;
@@ -34,11 +45,14 @@ struct bdev_rbd {
 	rados_t *cluster_p;
 	char *cluster_name;
 
-	rados_ioctx_t io_ctx;
+	union rbd_ctx {
+		rados_ioctx_t io_ctx;
+		struct bdev_rbd_pool_ctx *ctx;
+	} rados_ctx;
+
 	rbd_image_t image;
 
 	rbd_image_info_t info;
-	struct spdk_thread *main_td;
 	struct spdk_thread *destruct_td;
 
 	TAILQ_ENTRY(bdev_rbd) tailq;
@@ -118,6 +132,22 @@ bdev_rbd_put_cluster(rados_t **cluster)
 }
 
 static void
+bdev_rbd_put_pool_ctx(struct bdev_rbd_pool_ctx *entry)
+{
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
+
+	assert(entry != NULL);
+	assert(entry->ref > 0);
+	entry->ref--;
+	if (entry->ref == 0) {
+		STAILQ_REMOVE(&g_map_bdev_rbd_pool_ctx, entry, bdev_rbd_pool_ctx, link);
+		rados_ioctx_destroy(entry->io_ctx);
+		free(entry->name);
+		free(entry);
+	}
+}
+
+static void
 bdev_rbd_free(struct bdev_rbd *rbd)
 {
 	if (!rbd) {
@@ -135,14 +165,21 @@ bdev_rbd_free(struct bdev_rbd *rbd)
 	free(rbd->pool_name);
 	bdev_rbd_free_config(rbd->config);
 
-	if (rbd->io_ctx) {
-		rados_ioctx_destroy(rbd->io_ctx);
-	}
-
 	if (rbd->cluster_name) {
+		/* When rbd is destructed by bdev_rbd_destruct, it will not enter here
+		 * because the ctx will already freed by bdev_rbd_free_cb in async manner.
+		 * This path only happens during the rbd initialization procedure of rbd */
+		if (rbd->rados_ctx.ctx) {
+			bdev_rbd_put_pool_ctx(rbd->rados_ctx.ctx);
+			rbd->rados_ctx.ctx = NULL;
+		}
+
 		bdev_rbd_put_cluster(&rbd->cluster_p);
 		free(rbd->cluster_name);
 	} else if (rbd->cluster) {
+		if (rbd->rados_ctx.io_ctx) {
+			rados_ioctx_destroy(rbd->rados_ctx.io_ctx);
+		}
 		rados_shutdown(rbd->cluster);
 	}
 
@@ -286,18 +323,80 @@ bdev_rbd_cluster_handle(void *arg)
 	return ret;
 }
 
+static int
+bdev_rbd_get_pool_ctx(rados_t *cluster_p, const char *name,  struct bdev_rbd_pool_ctx **ctx)
+{
+	struct bdev_rbd_pool_ctx *entry;
+
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
+
+	if (name == NULL || ctx == NULL) {
+		return -1;
+	}
+
+	STAILQ_FOREACH(entry, &g_map_bdev_rbd_pool_ctx, link) {
+		if (strcmp(name, entry->name) == 0 && cluster_p == entry->cluster_p) {
+			entry->ref++;
+			*ctx = entry;
+			return 0;
+		}
+	}
+
+	entry = calloc(1, sizeof(*entry));
+	if (!entry) {
+		SPDK_ERRLOG("Cannot allocate an entry for name=%s\n", name);
+		return -1;
+	}
+
+	entry->name = strdup(name);
+	if (entry->name == NULL) {
+		SPDK_ERRLOG("Failed to allocate the name =%s space on entry =%p\n", name, entry);
+		goto err_handle;
+	}
+
+	if (rados_ioctx_create(*cluster_p, name, &entry->io_ctx) < 0) {
+		goto err_handle1;
+	}
+
+	entry->cluster_p = cluster_p;
+	entry->ref = 1;
+	*ctx = entry;
+	STAILQ_INSERT_TAIL(&g_map_bdev_rbd_pool_ctx, entry, link);
+
+	return 0;
+
+err_handle1:
+	free(entry->name);
+err_handle:
+	free(entry);
+
+	return -1;
+}
+
 static void *
 bdev_rbd_init_context(void *arg)
 {
 	struct bdev_rbd *rbd = arg;
 	int rc;
+	rados_ioctx_t *io_ctx = NULL;
 
-	if (rados_ioctx_create(*(rbd->cluster_p), rbd->pool_name, &rbd->io_ctx) < 0) {
-		SPDK_ERRLOG("Failed to create ioctx on rbd=%p\n", rbd);
-		return NULL;
+	if (rbd->cluster_name) {
+		if (bdev_rbd_get_pool_ctx(rbd->cluster_p, rbd->pool_name, &rbd->rados_ctx.ctx) < 0) {
+			SPDK_ERRLOG("Failed to create ioctx on rbd=%p with cluster_name=%s\n",
+				    rbd, rbd->cluster_name);
+			return NULL;
+		}
+		io_ctx = &rbd->rados_ctx.ctx->io_ctx;
+	} else {
+		if (rados_ioctx_create(*(rbd->cluster_p), rbd->pool_name, &rbd->rados_ctx.io_ctx) < 0) {
+			SPDK_ERRLOG("Failed to create ioctx on rbd=%p\n", rbd);
+			return NULL;
+		}
+		io_ctx = &rbd->rados_ctx.io_ctx;
 	}
 
-	rc = rbd_open(rbd->io_ctx, rbd->rbd_name, &rbd->image, NULL);
+	assert(io_ctx != NULL);
+	rc = rbd_open(*io_ctx, rbd->rbd_name, &rbd->image, NULL);
 	if (rc < 0) {
 		SPDK_ERRLOG("Failed to open specified rbd device\n");
 		return NULL;
@@ -338,8 +437,6 @@ bdev_rbd_init(struct bdev_rbd *rbd)
 		SPDK_ERRLOG("Cannot init rbd context for rbd=%p\n", rbd);
 		return -1;
 	}
-
-	rbd->main_td = spdk_get_thread();
 
 	return ret;
 }
@@ -568,6 +665,14 @@ bdev_rbd_free_cb(void *io_device)
 {
 	struct bdev_rbd *rbd = io_device;
 
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
+
+	/* free the ctx */
+	if (rbd->cluster_name && rbd->rados_ctx.ctx) {
+		bdev_rbd_put_pool_ctx(rbd->rados_ctx.ctx);
+		rbd->rados_ctx.ctx = NULL;
+	}
+
 	/* The io device has been unregistered.  Send a message back to the
 	 * original thread that started the destruct operation, so that the
 	 * bdev unregister callback is invoked on the same thread that started
@@ -588,13 +693,6 @@ static int
 bdev_rbd_destruct(void *ctx)
 {
 	struct bdev_rbd *rbd = ctx;
-	struct spdk_thread *td;
-
-	if (rbd->main_td == NULL) {
-		td = spdk_get_thread();
-	} else {
-		td = rbd->main_td;
-	}
 
 	/* Start the destruct operation on the rbd bdev's
 	 * main thread.  This guarantees it will only start
@@ -605,8 +703,8 @@ bdev_rbd_destruct(void *ctx)
 	 * channel delete messages in flight to this thread.
 	 */
 	assert(rbd->destruct_td == NULL);
-	rbd->destruct_td = td;
-	spdk_thread_send_msg(td, _bdev_rbd_destruct, rbd);
+	rbd->destruct_td = spdk_get_thread();
+	spdk_thread_send_msg(spdk_thread_get_app_thread(), _bdev_rbd_destruct, rbd);
 
 	/* Return 1 to indicate the destruct path is asynchronous. */
 	return 1;
@@ -629,7 +727,6 @@ bdev_rbd_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io
 {
 	struct spdk_thread *submit_td = spdk_io_channel_get_thread(ch);
 	struct bdev_rbd_io *rbd_io = (struct bdev_rbd_io *)bdev_io->driver_ctx;
-	struct bdev_rbd *disk = (struct bdev_rbd *)bdev_io->bdev->ctxt;
 
 	rbd_io->submit_td = submit_td;
 	switch (bdev_io->type) {
@@ -649,7 +746,7 @@ bdev_rbd_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io
 		break;
 
 	case SPDK_BDEV_IO_TYPE_RESET:
-		spdk_thread_exec_msg(disk->main_td, bdev_rbd_reset, bdev_io);
+		spdk_thread_exec_msg(spdk_thread_get_app_thread(), bdev_rbd_reset, bdev_io);
 		break;
 
 	default:

@@ -284,7 +284,7 @@ app_setup_signal_handlers(struct spdk_app_opts *opts)
 static void
 app_start_application(void)
 {
-	assert(spdk_get_thread() == spdk_thread_get_app_thread());
+	assert(spdk_thread_is_app_thread(NULL));
 
 	g_start_fn(g_start_arg);
 }
@@ -923,12 +923,10 @@ usage(void (*app_usage)(void))
 	printf(" -u, --no-pci              disable PCI access\n");
 	printf("     --wait-for-rpc        wait for RPCs to initialize subsystems\n");
 	printf("     --max-delay <num>     maximum reactor delay (in microseconds)\n");
-	printf(" -B, --pci-blocked <bdf>\n");
-	printf("                           pci addr to block (can be used more than once)\n");
+	printf(" -B, --pci-blocked <bdf>   pci addr to block (can be used more than once)\n");
+	printf(" -A, --pci-allowed <bdf>   pci addr to allow (-B and -A cannot be used at the same time)\n");
 	printf(" -R, --huge-unlink         unlink huge files after initialization\n");
 	printf(" -v, --version             print SPDK version\n");
-	printf(" -A, --pci-allowed <bdf>\n");
-	printf("                           pci addr to allow (-B and -A cannot be used at the same time)\n");
 	printf("     --huge-dir <path>     use a specific hugetlbfs mount to reserve memory from\n");
 	printf("     --iova-mode <pa/va>   set IOVA mode ('pa' for IOVA_PA and 'va' for IOVA_VA)\n");
 	printf("     --base-virtaddr <addr>      the base virtual address for DPDK (default: 0x200000000000)\n");
@@ -1276,7 +1274,7 @@ rpc_framework_start_init_cpl(int rc, void *arg1)
 {
 	struct spdk_jsonrpc_request *request = arg1;
 
-	assert(spdk_get_thread() == spdk_thread_get_app_thread());
+	assert(spdk_thread_is_app_thread(NULL));
 
 	if (rc) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,

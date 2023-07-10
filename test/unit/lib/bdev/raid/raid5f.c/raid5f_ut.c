@@ -426,7 +426,7 @@ spdk_bdev_writev_blocks_with_md(struct spdk_bdev_desc *desc, struct spdk_io_chan
 	uint64_t data_offset;
 	void *dest_buf, *dest_md_buf;
 
-	SPDK_CU_ASSERT_FATAL(cb == raid5f_chunk_write_complete_bdev_io);
+	SPDK_CU_ASSERT_FATAL(cb == raid5f_chunk_complete_bdev_io);
 	SPDK_CU_ASSERT_FATAL(iovcnt == 1);
 
 	stripe_req = raid5f_chunk_stripe_req(chunk);
@@ -821,7 +821,7 @@ __test_raid5f_stripe_request_map_iovecs(struct raid_bdev *raid_bdev,
 	bdev_io->u.bdev.iovs = iovs;
 	bdev_io->u.bdev.iovcnt = iovcnt;
 
-	stripe_req = raid5f_stripe_request_alloc(r5ch);
+	stripe_req = raid5f_stripe_request_alloc(r5ch, STRIPE_REQ_WRITE);
 	SPDK_CU_ASSERT_FATAL(stripe_req != NULL);
 
 	stripe_req->parity_chunk = &stripe_req->chunks[raid5f_stripe_data_chunks_num(raid_bdev)];
@@ -901,7 +901,7 @@ __test_raid5f_chunk_write_error(struct raid_bdev *raid_bdev, struct raid_bdev_io
 					     stripe_index * r5f_info->stripe_blocks, r5f_info->stripe_blocks);
 
 				io_info.error.type = error_type;
-				io_info.error.bdev = base_bdev_info->bdev;
+				io_info.error.bdev = base_bdev_info->desc->bdev;
 
 				test_raid5f_write_request(&io_info);
 
@@ -961,11 +961,11 @@ __test_raid5f_chunk_write_error_with_enomem(struct raid_bdev *raid_bdev,
 					     stripe_index * r5f_info->stripe_blocks, r5f_info->stripe_blocks);
 
 				io_info.error.type = TEST_BDEV_ERROR_NOMEM;
-				io_info.error.bdev = base_bdev_info->bdev;
+				io_info.error.bdev = base_bdev_info->desc->bdev;
 				io_info.error.on_enomem_cb = chunk_write_error_with_enomem_cb;
 				io_info.error.on_enomem_cb_ctx = &on_enomem_cb_ctx;
 				on_enomem_cb_ctx.error_type = error_type;
-				on_enomem_cb_ctx.bdev = base_bdev_info_last->bdev;
+				on_enomem_cb_ctx.bdev = base_bdev_info_last->desc->bdev;
 
 				test_raid5f_write_request(&io_info);
 

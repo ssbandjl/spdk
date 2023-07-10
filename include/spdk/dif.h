@@ -30,12 +30,18 @@ enum spdk_dif_check_type {
 	SPDK_DIF_CHECK_TYPE_GUARD = 3,
 };
 
-struct spdk_dif {
-	uint16_t guard;
-	uint16_t app_tag;
-	uint32_t ref_tag;
+enum spdk_dif_pi_format {
+	SPDK_DIF_PI_FORMAT_16 = 1,
+	SPDK_DIF_PI_FORMAT_32 = 2
 };
-SPDK_STATIC_ASSERT(sizeof(struct spdk_dif) == 8, "Incorrect size");
+
+struct spdk_dif_ctx_init_ext_opts {
+	/** Size of this structure in bytes, use SPDK_SIZEOF() to calculate it */
+	size_t size;
+
+	uint32_t dif_pi_format;
+};
+SPDK_STATIC_ASSERT(sizeof(struct spdk_dif_ctx_init_ext_opts) == 16, "Incorrect size");
 
 /** DIF context information */
 struct spdk_dif_ctx {
@@ -54,11 +60,14 @@ struct spdk_dif_ctx {
 	/** DIF type */
 	enum spdk_dif_type	dif_type;
 
+	/** DIF Protection Information format */
+	enum spdk_dif_pi_format dif_pi_format;
+
 	/* Flags to specify the DIF action */
 	uint32_t		dif_flags;
 
 	/* Initial reference tag */
-	uint32_t		init_ref_tag;
+	uint64_t		init_ref_tag;
 
 	/** Application tag */
 	uint16_t		app_tag;
@@ -77,10 +86,10 @@ struct spdk_dif_ctx {
 	 * Interim guard value is set if the last data block is partial, or
 	 * seed value is set otherwise.
 	 */
-	uint16_t		last_guard;
+	uint32_t		last_guard;
 
 	/* Seed value for guard computation */
-	uint16_t		guard_seed;
+	uint32_t		guard_seed;
 
 	/* Remapped initial reference tag. */
 	uint32_t		remapped_init_ref_tag;
@@ -92,10 +101,10 @@ struct spdk_dif_error {
 	uint8_t		err_type;
 
 	/** Expected value */
-	uint32_t	expected;
+	uint64_t	expected;
 
 	/** Actual value */
-	uint32_t	actual;
+	uint64_t	actual;
 
 	/** Offset the error occurred at, block based */
 	uint32_t	err_offset;
@@ -109,8 +118,8 @@ struct spdk_dif_error {
  * \param md_size Metadata size in a block.
  * \param md_interleave If true, metadata is interleaved with block data.
  * If false, metadata is separated with block data.
- * \param dif_loc DIF location. If true, DIF is set in the first 8 bytes of metadata.
- * If false, DIF is in the last 8 bytes of metadata.
+ * \param dif_loc DIF location. If true, DIF is set in the first 8/16 bytes of metadata.
+ * If false, DIF is in the last 8/16 bytes of metadata.
  * \param dif_type Type of DIF.
  * \param dif_flags Flag to specify the DIF action.
  * \param init_ref_tag Initial reference tag. For type 1, this is the
@@ -119,13 +128,14 @@ struct spdk_dif_error {
  * \param app_tag Application tag.
  * \param data_offset Byte offset from the start of the whole data buffer.
  * \param guard_seed Seed value for guard computation.
+ * \param opts Extended options for DIF context.
  *
  * \return 0 on success and negated errno otherwise.
  */
 int spdk_dif_ctx_init(struct spdk_dif_ctx *ctx, uint32_t block_size, uint32_t md_size,
 		      bool md_interleave, bool dif_loc, enum spdk_dif_type dif_type, uint32_t dif_flags,
 		      uint32_t init_ref_tag, uint16_t apptag_mask, uint16_t app_tag,
-		      uint32_t data_offset, uint16_t guard_seed);
+		      uint32_t data_offset, uint32_t guard_seed, struct spdk_dif_ctx_init_ext_opts *opts);
 
 /**
  * Update date offset of DIF context.

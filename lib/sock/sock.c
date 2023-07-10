@@ -229,6 +229,12 @@ spdk_sock_getaddr(struct spdk_sock *sock, char *saddr, int slen, uint16_t *sport
 	return sock->net_impl->getaddr(sock, saddr, slen, sport, caddr, clen, cport);
 }
 
+const char *
+spdk_sock_get_impl_name(struct spdk_sock *sock)
+{
+	return sock->net_impl->name;
+}
+
 void
 spdk_sock_get_default_opts(struct spdk_sock_opts *opts)
 {
@@ -467,25 +473,6 @@ spdk_sock_readv(struct spdk_sock *sock, struct iovec *iov, int iovcnt)
 	}
 
 	return sock->net_impl->readv(sock, iov, iovcnt);
-}
-
-void
-spdk_sock_readv_async(struct spdk_sock *sock, struct spdk_sock_request *req)
-{
-	assert(req->cb_fn != NULL);
-
-	if (spdk_unlikely(sock == NULL || sock->flags.closed)) {
-		req->cb_fn(req->cb_arg, -EBADF);
-		return;
-	}
-
-	/* The socket needs to be part of a poll group */
-	if (spdk_unlikely(sock->group_impl == NULL)) {
-		req->cb_fn(req->cb_arg, -EPERM);
-		return;
-	}
-
-	sock->net_impl->readv_async(sock, req);
 }
 
 ssize_t
@@ -971,6 +958,23 @@ spdk_sock_set_default_impl(const char *impl_name)
 	g_default_impl = impl;
 
 	return 0;
+}
+
+const char *
+spdk_sock_get_default_impl(void)
+{
+	struct spdk_net_impl *impl = NULL;
+
+	if (g_default_impl) {
+		return g_default_impl->name;
+	}
+
+	impl = STAILQ_FIRST(&g_net_impls);
+	if (impl) {
+		return impl->name;
+	}
+
+	return NULL;
 }
 
 SPDK_LOG_REGISTER_COMPONENT(sock)

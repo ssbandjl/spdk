@@ -6,7 +6,7 @@
 SPDK_ROOT_DIR := $(abspath $(CURDIR)/../..)
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 
-SO_VER := 6
+SO_VER := 7
 SO_MINOR := 0
 
 C_SRCS = base64.c bit_array.c cpuset.c crc16.c crc32.c crc32c.c crc32_ieee.c \
@@ -25,6 +25,8 @@ endif
 ifeq ($(CONFIG_HAVE_UUID_GENERATE_SHA1), n)
 LOCAL_SYS_LIBS += -lssl
 endif
+
+CFLAGS += -Wpointer-arith
 
 SPDK_MAP_FILE = $(abspath $(CURDIR)/spdk_util.map)
 

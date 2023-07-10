@@ -93,10 +93,10 @@ struct nvme_path_id {
 	struct spdk_nvme_transport_id		trid;
 	struct spdk_nvme_host_id		hostid;
 	TAILQ_ENTRY(nvme_path_id)		link;
-	bool					is_failed;
+	uint64_t				last_failed_tsc;
 };
 
-typedef void (*bdev_nvme_reset_cb)(void *cb_arg, bool success);
+typedef void (*bdev_nvme_ctrlr_op_cb)(void *cb_arg, int rc);
 typedef void (*nvme_ctrlr_disconnected_cb)(struct nvme_ctrlr *nvme_ctrlr);
 
 struct nvme_ctrlr {
@@ -111,11 +111,14 @@ struct nvme_ctrlr {
 
 	uint32_t				resetting : 1;
 	uint32_t				reconnect_is_delayed : 1;
+	uint32_t				in_failover : 1;
+	uint32_t				pending_failover : 1;
 	uint32_t				fast_io_fail_timedout : 1;
 	uint32_t				destruct : 1;
 	uint32_t				ana_log_page_updating : 1;
 	uint32_t				io_path_cache_clearing : 1;
 	uint32_t				dont_retry : 1;
+	uint32_t				disabled : 1;
 
 	struct nvme_ctrlr_opts			opts;
 
@@ -126,8 +129,8 @@ struct nvme_ctrlr {
 	struct spdk_poller			*adminq_timer_poller;
 	struct spdk_thread			*thread;
 
-	bdev_nvme_reset_cb			reset_cb_fn;
-	void					*reset_cb_arg;
+	bdev_nvme_ctrlr_op_cb			ctrlr_op_cb_fn;
+	void					*ctrlr_op_cb_arg;
 	/* Poller used to check for reset/detach completion */
 	struct spdk_poller			*reset_detach_poller;
 	struct spdk_nvme_detach_ctx		*detach_ctx;
@@ -196,6 +199,7 @@ struct nvme_ctrlr_channel {
 	TAILQ_HEAD(, spdk_bdev_io)	pending_resets;
 
 	struct spdk_io_channel_iter	*reset_iter;
+	struct spdk_poller		*connect_poller;
 };
 
 struct nvme_io_path {
@@ -236,6 +240,9 @@ struct nvme_poll_group {
 void nvme_io_path_info_json(struct spdk_json_write_ctx *w, struct nvme_io_path *io_path);
 
 struct nvme_ctrlr *nvme_ctrlr_get_by_name(const char *name);
+
+struct nvme_ctrlr *nvme_bdev_ctrlr_get_ctrlr_by_id(struct nvme_bdev_ctrlr *nbdev_ctrlr,
+		uint16_t cntlid);
 
 struct nvme_bdev_ctrlr *nvme_bdev_ctrlr_get_by_name(const char *name);
 
@@ -333,17 +340,39 @@ struct spdk_nvme_ctrlr *bdev_nvme_get_ctrlr(struct spdk_bdev *bdev);
  */
 int bdev_nvme_delete(const char *name, const struct nvme_path_id *path_id);
 
+enum nvme_ctrlr_op {
+	NVME_CTRLR_OP_RESET = 1,
+	NVME_CTRLR_OP_ENABLE,
+	NVME_CTRLR_OP_DISABLE,
+};
+
 /**
- * Reset NVMe controller.
+ * Perform specified operation on an NVMe controller.
  *
- * \param nvme_ctrlr The specified NVMe controller to reset
- * \param cb_fn Function to be called back after reset completes
+ * NOTE: The callback function is always called after this function returns except for
+ * out of memory cases.
+ *
+ * \param nvme_ctrlr The specified NVMe controller to operate
+ * \param op Operation code
+ * \param cb_fn Function to be called back after operation completes
  * \param cb_arg Argument for callback function
- * \return zero on success. Negated errno on the following error conditions:
- * -ENXIO: controller is being destroyed.
- * -EBUSY: controller is already being reset.
  */
-int bdev_nvme_reset_rpc(struct nvme_ctrlr *nvme_ctrlr, bdev_nvme_reset_cb cb_fn, void *cb_arg);
+void nvme_ctrlr_op_rpc(struct nvme_ctrlr *nvme_ctrlr, enum nvme_ctrlr_op op,
+		       bdev_nvme_ctrlr_op_cb cb_fn, void *cb_arg);
+
+/**
+ * Perform specified operation on all NVMe controllers in an NVMe bdev controller.
+ *
+ * NOTE: The callback function is always called after this function returns except for
+ * out of memory cases.
+ *
+ * \param nbdev_ctrlr The specified NVMe bdev controller to operate
+ * \param op Operation code
+ * \param cb_fn Function to be called back after operation completes
+ * \param cb_arg Argument for callback function
+ */
+void nvme_bdev_ctrlr_op_rpc(struct nvme_bdev_ctrlr *nbdev_ctrlr, enum nvme_ctrlr_op op,
+			    bdev_nvme_ctrlr_op_cb cb_fn, void *cb_arg);
 
 typedef void (*bdev_nvme_set_preferred_path_cb)(void *cb_arg, int rc);
 
