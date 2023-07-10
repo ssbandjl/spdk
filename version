@@ -1,2 +1,8 @@
 v23.05-pre
 https://github.com/spdk/spdk/releases
+
+master
+
+
+release:
+https://github.com/spdk/spdk/releases/tag/v23.05
