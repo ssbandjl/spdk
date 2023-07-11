@@ -1026,6 +1026,15 @@ nvmf_rdma_qpair_initialize(struct spdk_nvmf_qpair *qpair)
 	if (!rqpair->rdma_qp) {
 		goto error;
 	}
+	
+	#if 0
+	// 查询队列对属性, 重试次数, 超时时间, RNR重试次数
+	struct ibv_qp_attr qp_attr;
+	struct ibv_qp_init_attr init_attr;
+	ibv_query_qp(rqpair->rdma_qp->qp, &qp_attr, IBV_QP_STATE, &init_attr);
+	SPDK_ERRLOG("SSSS init qp timeout:%d, retry_cnt:%d, rnr_retry:%d\n",  qp_attr.timeout, qp_attr.retry_cnt, qp_attr.rnr_retry);
+	#endif
+
 
 	rqpair->qp_num = rqpair->rdma_qp->qp->qp_num;
 
@@ -1333,7 +1342,7 @@ nvmf_rdma_connect(struct spdk_nvmf_transport *transport, struct rdma_cm_event *e
 	   qid will be set to the appropriate value when the controller is created */
 	rqpair->qpair.qid = private_data->qid;
 
-	event->id->context = &rqpair->qpair;
+	event->id->context = &rqpair->qpair;  //rqpair->id
 
 	spdk_nvmf_tgt_new_qpair(transport->tgt, &rqpair->qpair);
 
@@ -3483,6 +3492,12 @@ nvmf_process_cm_event(struct spdk_nvmf_transport *transport)
 	int				rc;
 	bool				event_acked;
 
+	#if 0
+	// 查询队列对属性
+	struct ibv_qp_attr qp_attr;
+	struct ibv_qp_init_attr init_attr;
+	#endif
+
 	rtransport = SPDK_CONTAINEROF(transport, struct spdk_nvmf_rdma_transport, transport);
 
 	if (rtransport->event_channel == NULL) {
@@ -3529,6 +3544,15 @@ nvmf_process_cm_event(struct spdk_nvmf_transport *transport)
 			break;
 		case RDMA_CM_EVENT_ESTABLISHED:
 			/* TODO: Should we be waiting for this event anywhere? */
+			
+
+			#if 0
+			// 查询队列对属性
+			ibv_query_qp(event->id->qp, &qp_attr, IBV_QP_STATE, &init_attr);
+			SPDK_ERRLOG("SSSS conn established qp timeout:%d, retry_cnt:%d, rnr_retry:%d\n",  qp_attr.timeout, qp_attr.retry_cnt, qp_attr.rnr_retry);
+			#endif
+
+
 			break;
 		case RDMA_CM_EVENT_DISCONNECTED:
 			rc = nvmf_rdma_disconnect(event);
@@ -4615,6 +4639,32 @@ nvmf_rdma_poller_poll(struct spdk_nvmf_rdma_transport *rtransport,
 			SPDK_ERRLOG("Received an unknown opcode on the CQ: %d\n", wc[i].opcode);
 			continue;
 		}
+
+
+		#if 0
+		// 主动断开QP
+		char *file_name = "/tmp/control";
+		FILE *fp = NULL;
+		char control_str[1024] = {'\0'};
+
+		if (access(file_name, F_OK) == 0) {
+			fp = fopen(file_name, "r");
+			if (fp) {
+				if(fgets(control_str, 1024, fp)) {
+					SPDK_ERRLOG("SSSS content:%s\n", control_str);
+					if (strncmp(control_str, "1", 1) == 0) {
+						SPDK_ERRLOG("SSSS disconnect qp opcode:%d\n", wc[i].opcode);
+						spdk_nvmf_qpair_disconnect(&rqpair->qpair, NULL, NULL);
+						continue;
+					}
+				};
+			};
+		};
+		if(fp)
+			fclose(fp);
+		#endif
+
+
 
 		/* Handle error conditions */
 		if (wc[i].status) {
