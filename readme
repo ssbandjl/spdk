@@ -4,6 +4,7 @@ initiator_spdk_tgt, spdk-nvmf指南: https://blog.csdn.net/zxpoiu/article/detail
 使用SPDK lib搭建自己的NVMe-oF Target应用: https://blog.csdn.net/weixin_60043341/article/details/126505064
 SPDK线程模型解析: https://blog.csdn.net/weixin_37097605/article/details/101488760
 spdk api文档: https://spdk.io/doc/jsonrpc.html
+log日志, SPDK Trace Log用法简介: https://zhuanlan.zhihu.com/p/556631633
 
 
 
@@ -1106,3 +1107,127 @@ rdma_connect
 
 nvmf_rdma_handle_cm_event_addr_change
 nvmf_rdma_listen
+
+
+
+tgt绑核: 将 CPU 核心分配给 NVMe over Fabrics 目标，SPDK 使用 DPDK 环境抽象层来访问硬件资源，例如大内存页面和 CPU 核心。 DPDK EAL 提供了将线程分配给特定内核的函数。 为确保 SPDK NVMe-oF 目标具有最佳性能，请将 NIC 和 NVMe 设备配置为位于同一 NUMA 节点上。-m core mask 选项指定允许 SPDK 执行工作项的 CPU 内核的位掩码。 例如，允许 SPDK 使用核心 24、25、26 和 27：
+build/bin/nvmf_tgt -m 0xF000000
+
+
+
+生成配置文件: ./scripts/gen_nvme.sh
+
+
+
+nvmf_tgt_create_poll_group
+group->poller = SPDK_POLLER_REGISTER(nvmf_poll_group_poll, group, 0);
+poll_group_poll
+nvmf_rdma_poll_group_poll
+nvmf_rdma_poll_group_add | nvmf_rdma_poller_poll
+  reaped = ibv_poll_cq(rpoller->cq, 32, wc)
+  spdk_nvmf_qpair_disconnect
+nvmf_rdma_update_ibv_state
+  ibv_query_qp
+
+
+
+
+SPDK 加速框架介绍: https://www.sdnlab.com/25328.html
+static struct accel_mlx5_module g_accel_mlx5 = {
+	.module = {
+		.module_init		= accel_mlx5_init,
+accel_mlx5_init
+spdk_io_device_register(&g_accel_mlx5, accel_mlx5_create_cb, accel_mlx5_destroy_cb,
+accel_mlx5_create_cb
+accel_mlx5_qp_create
+mlx5_qp_init_2_rts
+
+
+
+
+
+
+struct ibv_qp_attr
+	uint8_t			timeout;
+	uint8_t			retry_cnt;
+	uint8_t			rnr_retry;
+
+
+poll_group_add
+nvmf_rdma_poll_group_add
+nvmf_rdma_qpair_initialize
+spdk_rdma_qp_create
+rdma_create_qp
+
+
+
+(gdb) bt
+#0  0x00007ffff7533820 in ibv_modify_qp () from /lib64/libibverbs.so.1
+#1  0x00007ffff7309307 in ucma_init_conn_qp () from /lib64/librdmacm.so.1
+#2  0x00007ffff7309bcc in rdma_create_qp_ex () from /lib64/librdmacm.so.1
+#3  0x00007ffff7309d3e in rdma_create_qp () from /lib64/librdmacm.so.1
+#4  0x0000000000559c61 in spdk_rdma_qp_create (cm_id=0xd9ad20, qp_attr=0x7fffffffdd60) at rdma_verbs.c:47
+#5  0x0000000000507ebd in nvmf_rdma_qpair_initialize (qpair=0xdc4280) at rdma.c:1025
+#6  0x0000000000510afb in nvmf_rdma_poll_group_add (group=0xda5da0, qpair=0xdc4280) at rdma.c:4168
+#7  0x00000000004f4b3e in nvmf_transport_poll_group_add (group=0xda5da0, qpair=0xdc4280) at transport.c:692
+#8  0x00000000004e8ed1 in spdk_nvmf_poll_group_add (group=0xd2a060, qpair=0xdc4280) at nvmf.c:1066
+#9  0x00000000004e8bb3 in _nvmf_poll_group_add (_ctx=0xd9af80) at nvmf.c:982
+#10 0x000000000059cc53 in msg_queue_run_batch (thread=0xd83a90, max_msgs=8) at thread.c:841
+#11 0x000000000059d5a6 in thread_poll (thread=0xd83a90, max_msgs=0, now=202236035489009) at thread.c:1063
+#12 0x000000000059d8a6 in spdk_thread_poll (thread=0xd83a90, max_msgs=0, now=202236035489009) at thread.c:1156
+#13 0x000000000055f629 in _reactor_run (reactor=0xd2a140) at reactor.c:914
+#14 0x000000000055f718 in reactor_run (arg=0xd2a140) at reactor.c:952
+#15 0x000000000055fb96 in spdk_reactors_start () at reactor.c:1068
+#16 0x000000000055c055 in spdk_app_start (opts_user=0x7fffffffe3f0, start_fn=0x407ba5 <nvmf_tgt_started>, arg1=0x0) at app.c:808
+#17 0x0000000000407cad in main (argc=3, argv=0x7fffffffe5b8) at nvmf_main.c:47
+
+scp root@qcentos:/root/project/stor/spdk/spdk/build/bin/nvmf_tgt .
+scp nvmf_tgt root@s63:/root/pkg/
+gdb --args ./nvmf_tgt -L all
+[2023-07-11 11:06:07.627500] reactor.c: 620:get_rusage: *INFO*: Reactor 0: 0 voluntary context switches and 7 involuntary context switches in the last second.
+[2023-07-11 11:06:07.740754] rdma.c:2594:nvmf_rdma_create: *INFO*: *** RDMA Transport Init ***
+  Transport opts:  max_ioq_depth=128, max_io_size=131072,
+  max_io_qpairs_per_ctrlr=127, io_unit_size=8192,
+  in_capsule_data_size=4096, max_aq_depth=128,
+  num_shared_buffers=4095, num_cqe=4096, max_srq_depth=4096, no_srq=0,  acceptor_backlog=100, no_wr_batching=0 abort_timeout_sec=1
+
+
+
+	struct ibv_qp_attr qp_attr;
+	struct ibv_qp_init_attr init_attr;
+	ibv_query_qp(rqpair->rdma_qp->qp, &qp_attr, IBV_QP_STATE, &init_attr);
+	SPDK_ERRLOG("SSSS qp timeout:%d, retry_cnt:%d, rnr_retry:%d\n",  qp_attr.timeout, qp_attr.retry_cnt, qp_attr.rnr_retry);
+
+
+[2023-07-11 17:10:21.941507] nvme_qpair.c: 220:nvme_admin_qpair_print_command: *NOTICE*: FABRIC CONNECT qid:63 cid:12288 SGL DATA BLOCK OFFSET 0x0 len:0x400
+[2023-07-11 17:10:21.941515] ctrlr.c: 745:_nvmf_ctrlr_connect: *DEBUG*: recfmt 0x0 qid 63 sqsize 127
+
+
+// 主动断开QP
+char *file_name = "/tmp/control";
+FILE *fp = NULL;
+char control_str[1024] = {'\0'};
+
+if (access(file_name, F_OK) == 0) {
+  fp = fopen(file_name, "r");
+  if (fp) {
+    if(fgets(control_str, 1024, fp)) {
+      SPDK_ERRLOG("SSSS content:%s\n", control_str);
+      if (strncmp(control_str, "1", 1) == 0) {
+        SPDK_ERRLOG("SSSS disconnect qp opcode:%d\n", wc[i].opcode);
+        spdk_nvmf_qpair_disconnect(&rqpair->qpair, NULL, NULL);
+        continue;
+      }
+    };
+  };
+};
+if(fp)
+  fclose(fp);
+
+[root@s63 ~]# date;echo 1 > /tmp/control
+[root@s63 ~]# date;echo 0 > /tmp/control
+
+
+
+git tag|sort -n
+
