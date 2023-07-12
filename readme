@@ -25,6 +25,7 @@ cd spdk
 git submodule update --init
 yum install -y vim git
 
+# 安装依赖
 sudo scripts/pkgdep.sh
 sudo scripts/pkgdep.sh --all
 
@@ -1077,6 +1078,14 @@ nvme_rdma_poll_group
 spdk_nvmf_request_exec_fabrics
 spdk_nvmf_request_exec
   nvmf_ctrlr_process_fabrics_cmd
+    nvmf_ctrlr_cmd_connect
+      spdk_nvmf_tgt_find_subsystem
+      ...
+      nvmf_ctrlr_create
+    status = SPDK_NVMF_REQUEST_EXEC_STATUS_ASYNCHRONOUS
+    _nvmf_request_complete -> 不执行
+      nvmf_qpair_request_cleanup
+
 
 spdkh
 rpc_nvmf_put_blockservice2transport
@@ -1230,4 +1239,255 @@ if(fp)
 
 
 git tag|sort -n
+dpdk build error, gcc9.4 编译 dpdk20.11.3 avx512 flag引发的编译错误: https://blog.csdn.net/bostonrayalen/article/details/127771812
+acl_avx512_on
+net_crc_sse42_cpu_support
+net_crc_sse42_cc_support
 
+
+FAILED: lib/librte_hash.a.p/hash_rte_thash.c.o 
+gcc 版本不宜过高
+rm -rf /bin/gcc
+cp /bin/gcc_bak /bin/gcc
+gcc version 4.8.5 20150623 (Red Hat 4.8.5-44) (GCC) 
+
+
+
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/h3c/lib
+#echo 4096 >/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages; cat /proc/meminfo|grep -i huge
+cd /root/pkg/tgt/sbin
+./tgtd -L all
+ps aux|grep tgt
+
+/opt/h3c/script/tgt
+rsync -rlpva tgt root@s62:/opt/h3c/script/
+
+
+spdk常用命令, 创建rdma传输层
+/opt/h3c/script/tgt/rpc.py nvmf_create_transport -t RDMA -u 1048576 -m 8 -c 4096 -i 1048576 -r; /opt/h3c/script/tgt/rpc.py nvmf_get_transports
+
+# 从大页内存创建bdev
+/opt/h3c/script/tgt/rpc.py bdev_malloc_create -b Malloc0 512 2048; /opt/h3c/script/tgt/rpc.py bdev_get_bdevs
+
+# 创建子系统
+/opt/h3c/script/tgt/rpc.py nvmf_create_subsystem nqn.2022-06.io.spdk:cnode216 -m 512 -r -a -s SPDK00000000000001 -d SPDK_Controll; /opt/h3c/script/tgt/rpc.py nvmf_get_subsystems
+
+# 将ns添加到subsystem: 命名空间 -> NVME子系统
+/opt/h3c/script/tgt/rpc.py nvmf_subsystem_add_ns nqn.2022-06.io.spdk:cnode216 Malloc0; /opt/h3c/script/tgt/rpc.py nvmf_get_subsystems
+
+# 为nvme子系统添加监听地址
+/opt/h3c/script/tgt/rpc.py nvmf_subsystem_add_listener nqn.2022-06.io.spdk:cnode216 -t rdma -a 172.17.29.64  -s 4420; /opt/h3c/script/tgt/rpc.py nvmf_subsystem_get_listeners 'nqn.2022-06.io.spdk:cnode216'
+
+# 查询nvme子系统状态(详情)
+/opt/h3c/script/tgt/rpc.py nvmf_get_stats
+
+
+# 放行块服务网段
+/opt/h3c/script/tgt/rpc.py nvmf_put_blockservice2transport -t rdma -b 172.17.29.0/24
+
+
+rpm -qli nvme_xxx.rpm
+# host -> tgt, 发现tgt
+nvme discover -t rdma -a 172.17.29.64 -s 4420
+
+# 连接tgt
+nvme connect -t rdma -n "nqn.2022-06.io.spdk:cnode216" -a  172.17.29.64 -s 4420
+
+# 断开
+nvme disconnect-all
+# 两种disconnect的方式，一种是指定盘符，一种是指定subnqn
+nvme disconnect  -d /dev/nvme0
+nvme disconnect -n "nqn.2022-06.io.spdk:cnode216"
+
+
+
+
+/opt/h3c/script/tgt/rpc.py nvmf_create_subsystem nqn.2022-06.io.spdk:cnode216 -m 512 -r -a -s SPDK00000000000001 -d SPDK_Controll  # /opt/h3c/script/tgt/rpc.py nvmf_subsystem_add_ns nqn.2022-06.io.spdk:cnode216 Malloc0
+/opt/h3c/script/tgt/rpc.py nvmf_subsystem_add_listener nqn.2022-06.io.spdk:cnode216 -t rdma -a 0.0.0.0 -s 4420 # /opt/h3c/script/tgt/rpc.py nvmf_subsystem_add_listener nqn.2022-06.io.spdk:cnode216 -t rdma -a 172.17.29.217  -s 4420
+/opt/h3c/script/tgt/rpc.py bdev_dbd_create pool lun_test1 512 -u 497a9e48-9663-4382-aada-4df94cbc1289 --name test # 创建内存盘: /opt/h3c/script/tgt/rpc.py bdev_malloc_create -b Malloc0 512 2048          # bdev_malloc_delete
+/opt/h3c/script/tgt/rpc.py nvmf_subsystem_add_ns nqn.2022-06.io.spdk:cnode216 test
+/opt/h3c/script/tgt/rpc.py nvmf_put_blockservice2transport -t rdma -b 172.17.29.0/24
+
+查询传输层: /opt/bk_h3c/script/tgt/rpc.py nvmf_get_transports
+查询子系统: /opt/bk_h3c/script/tgt/rpc.py nvmf_get_subsystems
+查询子系统状态: /opt/bk_h3c/script/tgt/rpc.py nvmf_get_stats|jq .
+查询监听: /opt/bk_h3c/script/tgt/rpc.py nvmf_subsystem_get_listeners 'nqn.2014-08.org.nvmexpress.discovery'
+查看bdev: /opt/bk_h3c/script/tgt/rpc.py bdev_get_bdevs
+
+
+nvme:
+nvme discover -t rdma -a 172.17.29.217 -s 4420
+
+
+nvme_of_target: https://github.com/spdk/spdk/issues/2082, 
+# 创建一个大小是64M，每个块大小是512的malloc bdev，命名为Malloc0
+scripts/rpc.py construct_malloc_bdev -b Malloc0 64 512
+
+#创建一个TCP transport
+scripts/rpc.py nvmf_create_transport -t TCP -p 4
+
+#创建一个 NVMe-oF subsystem
+scripts/rpc.py nvmf_subsystem_create nqn.2016-06.io.spdk:cnode1 -a -s SPDK00000000000001
+
+#在这个subsystem的中添加Malloc0，作为相应的subsystem
+scripts/rpc.py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 Malloc0
+
+#在命名为nqn.2016-06.io.spdk:cnode1的subsystem 上创建一个监听socket，其中IP 地址是192.168.0.128 IP，TCP端口是4420
+scripts/rpc.py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 -t tcp -a 192.168.0.128 -s 4420
+
+host:
+modprobe nvme_tcp
+nvme connect -t tcp -n "nqn.2016-06.io.spdk:cnode1" -a 192.168.0.128 -s 4420
+
+
+创建内存测试盘
+scripts/rpc.py bdev_malloc_create -b Malloc0 512 2048 #1GB
+
+#scripts/rpc.py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1 -a -s SPDK00000000000001 -d SPDK_Controller1
+# scripts/rpc.py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 Malloc0
+# scripts/rpc.py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 -t rdma -a 192.168.80.100 -s 4420
+
+创建nvme盘
+
+# scripts/rpc.py bdev_nvme_attach_controller -b Nvme0 -t PCIe -a 0000:01:00.0
+# scripts/rpc.py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode2 -a -s SPDK00000000000002 -d SPDK_Controller1
+# scripts/rpc.py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode2 Nvme0n1
+# scripts/rpc.py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode2 -t rdma -a 192.168.80.100 -s 4420
+
+rdma驱动:
+[root@localhost MLNX_OFED_LINUX-5.7-1.0.2.0-rhel7.9-x86_64]# ./mlnxofedinstall --without-depcheck --add-kernel-support --kmp --force
+
+
+/opt/h3c/etc/tgt/tgt_skip_recovery.flag 
+/home/lh/perf/debug 
+
+
+
+
+
+
+/opt/h3c/script/tgt/rpc.py nvmf_create_transport -t RDMA -u 1048576 -m 8 -c 4096 -i 1048576 -r; /opt/h3c/script/tgt/rpc.py nvmf_get_transports
+/opt/h3c/script/tgt/rpc.py bdev_malloc_create -b Malloc0 400 512 -u 41a7f127-38ea-4390-b5c6-ab0fed80f5d3; /opt/h3c/script/tgt/rpc.py bdev_get_bdevs
+/opt/h3c/script/tgt/rpc.py nvmf_create_subsystem nqn.2022-06.io.spdk:cnode216 -m 512 -r -a -s SPDK00000000000001 -d SPDK_Controll; /opt/h3c/script/tgt/rpc.py nvmf_get_subsystems
+/opt/h3c/script/tgt/rpc.py nvmf_subsystem_add_ns nqn.2022-06.io.spdk:cnode216 Malloc0; /opt/h3c/script/tgt/rpc.py nvmf_get_subsystems
+/opt/h3c/script/tgt/rpc.py nvmf_subsystem_add_listener nqn.2022-06.io.spdk:cnode216 -t rdma -a 0.0.0.0  -s 4420; /opt/h3c/script/tgt/rpc.py nvmf_subsystem_get_listeners 'nqn.2022-06.io.spdk:cnode216'
+/opt/h3c/script/tgt/rpc.py nvmf_put_blockservice2transport -t rdma -b 172.17.29.0/24
+
+# 创建内存块 总大小(M),每块大小(字节)
+/opt/h3c/script/tgt/rpc.py nvmf_create_transport -t RDMA --no-srq; /opt/h3c/script/tgt/rpc.py nvmf_get_transports
+/opt/h3c/script/tgt/rpc.py bdev_malloc_create -b Malloc0 total_size 1024 512 -u 41a7f127-38ea-4390-b5c6-ab0fed80f5d3; /opt/h3c/script/tgt/rpc.py bdev_get_bdevs
+/opt/h3c/script/tgt/rpc.py nvmf_create_subsystem nqn.2022-06.io.spdk:cnode216 -m 512 -r -a -s SPDK00000000000001 -d SPDK_Controll; /opt/h3c/script/tgt/rpc.py nvmf_get_subsystems
+/opt/h3c/script/tgt/rpc.py nvmf_subsystem_add_ns nqn.2022-06.io.spdk:cnode216 Malloc0; /opt/h3c/script/tgt/rpc.py nvmf_get_subsystems
+/opt/h3c/script/tgt/rpc.py nvmf_subsystem_add_listener nqn.2022-06.io.spdk:cnode216 -t rdma -a 172.17.29.63 -s 4420; /opt/h3c/script/tgt/rpc.py nvmf_subsystem_get_listeners 'nqn.2022-06.io.spdk:cnode216'
+
+
+常用命令:
+nvme list-subsys
+nvme connect -t rdma -n "nqn.2022-06.io.spdk:cnode216" -a  172.17.29.66 -s 4420 -c2 -k3
+cat /sys/module/nvme_core/parameters/multipath
+modprobe nvme-rdma nvme-fabrics nvme nvme-core
+modprobe nvme-core multipath=N
+ln -s /opt/h3c/script/tgt/rpc.py /usr/bin/tgtmgr
+
+ipmitool lan print 1
+
+nvmf_tgt依赖动态库:
+[root@s63 spdk]# ldd ./build/bin/nvmf_tgt 
+        linux-vdso.so.1 =>  (0x00007ffce09f9000)
+        libssl.so.1.1 => /lib64/libssl.so.1.1 (0x00007f8529515000)
+        libnuma.so.1 => /lib64/libnuma.so.1 (0x00007f8529309000)
+        libdl.so.2 => /lib64/libdl.so.2 (0x00007f8529105000)
+        libibverbs.so.1 => /lib64/libibverbs.so.1 (0x00007f8528ee6000)
+        librdmacm.so.1 => /lib64/librdmacm.so.1 (0x00007f8528ccc000)
+        librt.so.1 => /lib64/librt.so.1 (0x00007f8528ac4000)
+        libuuid.so.1 => /lib64/libuuid.so.1 (0x00007f85288bf000)
+        libcrypto.so.1.1 => /lib64/libcrypto.so.1.1 (0x00007f85283db000)
+        libm.so.6 => /lib64/libm.so.6 (0x00007f85280d9000)
+        libaio.so.1 => /lib64/libaio.so.1 (0x00007f8527ed7000)
+        libpthread.so.0 => /lib64/libpthread.so.0 (0x00007f8527cbb000)
+        libc.so.6 => /lib64/libc.so.6 (0x00007f85278ed000)
+        /lib64/ld-linux-x86-64.so.2 (0x00007f85297a5000)
+        libz.so.1 => /lib64/libz.so.1 (0x00007f85276d7000)
+        libgcc_s.so.1 => /lib64/libgcc_s.so.1 (0x00007f85274c1000)
+        libnl-route-3.so.200 => /lib64/libnl-route-3.so.200 (0x00007f8527254000)
+        libnl-3.so.200 => /lib64/libnl-3.so.200 (0x00007f8527033000)
+
+
+spdk_nvme_print_command
+nvme_admin_qpair_print_command
+  case SPDK_NVME_OPC_FABRIC
+  SPDK_NOTICELOG("%s %s qid:%d cid:%d %s
+
+
+
+nvmf_ctrlr_cmd_connect
+nvmf_qpair_access_allowed
+spdk_nvmf_subsystem_listener_allowed
+
+
+#0  nvme_admin_qpair_print_command (qid=0, cmd=0x2000070df000) at nvme_qpair.c:202
+#1  0x00000000005333b8 in spdk_nvme_print_command (qid=0, cmd=0x2000070df000) at nvme_qpair.c:267
+#2  0x00000000004d52be in spdk_nvmf_request_exec (req=0x2000070d4000) at ctrlr.c:4556
+#3  0x000000000050b800 in nvmf_rdma_request_process (rtransport=0xd9a440, rdma_req=0x2000070d4000) at rdma.c:2239
+#4  0x0000000000511f29 in nvmf_rdma_poller_poll (rtransport=0xd9a440, rpoller=0xda4e70) at rdma.c:4623
+#5  0x0000000000512333 in nvmf_rdma_poll_group_poll (group=0xda4da0) at rdma.c:4767
+#6  0x00000000004f4d04 in nvmf_transport_poll_group_poll (group=0xda4da0) at transport.c:715
+#7  0x00000000004e6a93 in nvmf_poll_group_poll (ctx=0xd29060) at nvmf.c:70
+#8  0x000000000059d238 in thread_execute_poller (thread=0xd82a90, poller=0xd82e20) at thread.c:946
+#9  0x000000000059d7bb in thread_poll (thread=0xd82a90, max_msgs=0, now=496007760725265) at thread.c:1072
+#10 0x000000000059da5b in spdk_thread_poll (thread=0xd82a90, max_msgs=0, now=496007760725265) at thread.c:1156
+#11 0x000000000055f7de in _reactor_run (reactor=0xd29140) at reactor.c:914
+#12 0x000000000055f8cd in reactor_run (arg=0xd29140) at reactor.c:952
+#13 0x000000000055fd4b in spdk_reactors_start () at reactor.c:1068
+#14 0x000000000055c20a in spdk_app_start (opts_user=0x7fffffffde70, start_fn=0x407c15 <nvmf_tgt_started>, arg1=0x0) at app.c:808
+#15 0x0000000000407d1d in main (argc=3, argv=0x7fffffffe038) at nvmf_main.c:47
+
+
+
+nvmf_rdma_qpair_process_pending
+  STAILQ_FOREACH_SAFE nvmf_rdma_request_process
+    spdk_nvmf_request_exec
+      nvmf_ctrlr_process_admin_cmd
+        case SPDK_NVME_OPC_GET_LOG_PAGE
+        nvmf_ctrlr_get_log_page
+          spdk_nvmf_qpair_get_listen_trid
+          	.qpair_get_listen_trid = nvmf_rdma_qpair_get_listen_trid
+              spdk_nvme_trid_populate_transport
+          nvmf_get_discovery_log_page
+            nvmf_generate_discovery_log
+              spdk_nvmf_subsystem_get_first
+              spdk_nvmf_subsystem_get_next
+                RB_NEXT(subsystem_tree, &tgt->subsystems, subsystem) -> nvmf：使用 RB 树来跟踪 tgt 子系统 目前我们使用数组，这对于许多子系统来说计算成本很高，因为查找需要对子系统 nqns 进行 O(n) 字符串比较。 它的容量并不昂贵，因为它只是一个指针数组。 因此，将其从指针数组切换为 RB_HEAD，这样我们就可以将查找次数减少到 O(log n) 字符串比较。 请注意，我们仍然会为每个传输轮询组分配 spdk_nvmf_subsystem_poll_groups 数组，因为我们不想在 IO 路径中产生 RB_FIND 的额外成本
+              nvmf_transport_listener_discover
+                nvmf_rdma_discover
+                  entry->trtype = SPDK_NVMF_TRTYPE_RDMA
+                  ...
+                  entry->tsas.rdma.rdma_qptype = SPDK_NVMF_RDMA_QPTYPE_RELIABLE_CONNECTED
+                  entry->tsas.rdma.rdma_cms = SPDK_NVMF_RDMA_CMS_RDMA_CM
+
+
+
+
+
+#0  nvmf_ctrlr_get_log_page (req=0x2000070d4560) at ctrlr.c:2517
+#1  0x00000000004d2dbc in nvmf_ctrlr_process_admin_cmd (req=0x2000070d4560) at ctrlr.c:3592
+#2  0x00000000004d5365 in spdk_nvmf_request_exec (req=0x2000070d4560) at ctrlr.c:4566
+#3  0x000000000050b800 in nvmf_rdma_request_process (rtransport=0xd9a440, rdma_req=0x2000070d4560) at rdma.c:2239
+#4  0x000000000050ea12 in nvmf_rdma_qpair_process_pending (rtransport=0xd9a440, rqpair=0xda5ec0, drain=false) at rdma.c:3276
+#5  0x00000000005120ab in nvmf_rdma_poller_poll (rtransport=0xd9a440, rpoller=0xda4e70) at rdma.c:4685
+#6  0x0000000000512333 in nvmf_rdma_poll_group_poll (group=0xda4da0) at rdma.c:4767
+#7  0x00000000004f4d04 in nvmf_transport_poll_group_poll (group=0xda4da0) at transport.c:715
+#8  0x00000000004e6a93 in nvmf_poll_group_poll (ctx=0xd29060) at nvmf.c:70
+#9  0x000000000059d238 in thread_execute_poller (thread=0xd82a90, poller=0xd82e20) at thread.c:946
+#10 0x000000000059d7bb in thread_poll (thread=0xd82a90, max_msgs=0, now=514611841303047) at thread.c:1072
+#11 0x000000000059da5b in spdk_thread_poll (thread=0xd82a90, max_msgs=0, now=514611841303047) at thread.c:1156
+#12 0x000000000055f7de in _reactor_run (reactor=0xd29140) at reactor.c:914
+#13 0x000000000055f8cd in reactor_run (arg=0xd29140) at reactor.c:952
+#14 0x000000000055fd4b in spdk_reactors_start () at reactor.c:1068
+#15 0x000000000055c20a in spdk_app_start (opts_user=0x7fffffffde70, start_fn=0x407c15 <nvmf_tgt_started>, arg1=0x0) at app.c:808
+#16 0x0000000000407d1d in main (argc=3, argv=0x7fffffffe038) at nvmf_main.c:47
+
+
+
+spdk_nvmf_subsystem_create
+  RB_INSERT(subsystem_tree, &tgt->subsystems, subsystem)
