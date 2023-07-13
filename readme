@@ -1375,7 +1375,7 @@ rdma驱动:
 
 # 创建内存块 总大小(M),每块大小(字节)
 /opt/h3c/script/tgt/rpc.py nvmf_create_transport -t RDMA --no-srq; /opt/h3c/script/tgt/rpc.py nvmf_get_transports
-/opt/h3c/script/tgt/rpc.py bdev_malloc_create -b Malloc0 total_size 1024 512 -u 41a7f127-38ea-4390-b5c6-ab0fed80f5d3; /opt/h3c/script/tgt/rpc.py bdev_get_bdevs
+/opt/h3c/script/tgt/rpc.py bdev_malloc_create -b Malloc0 1024 512 -u 41a7f127-38ea-4390-b5c6-ab0fed80f5d3; /opt/h3c/script/tgt/rpc.py bdev_get_bdevs
 /opt/h3c/script/tgt/rpc.py nvmf_create_subsystem nqn.2022-06.io.spdk:cnode216 -m 512 -r -a -s SPDK00000000000001 -d SPDK_Controll; /opt/h3c/script/tgt/rpc.py nvmf_get_subsystems
 /opt/h3c/script/tgt/rpc.py nvmf_subsystem_add_ns nqn.2022-06.io.spdk:cnode216 Malloc0; /opt/h3c/script/tgt/rpc.py nvmf_get_subsystems
 /opt/h3c/script/tgt/rpc.py nvmf_subsystem_add_listener nqn.2022-06.io.spdk:cnode216 -t rdma -a 172.17.29.63 -s 4420; /opt/h3c/script/tgt/rpc.py nvmf_subsystem_get_listeners 'nqn.2022-06.io.spdk:cnode216'
@@ -1457,7 +1457,7 @@ nvmf_rdma_qpair_process_pending
             nvmf_generate_discovery_log
               spdk_nvmf_subsystem_get_first
               spdk_nvmf_subsystem_get_next
-                RB_NEXT(subsystem_tree, &tgt->subsystems, subsystem) -> nvmf：使用 RB 树来跟踪 tgt 子系统 目前我们使用数组，这对于许多子系统来说计算成本很高，因为查找需要对子系统 nqns 进行 O(n) 字符串比较。 它的容量并不昂贵，因为它只是一个指针数组。 因此，将其从指针数组切换为 RB_HEAD，这样我们就可以将查找次数减少到 O(log n) 字符串比较。 请注意，我们仍然会为每个传输轮询组分配 spdk_nvmf_subsystem_poll_groups 数组，因为我们不想在 IO 路径中产生 RB_FIND 的额外成本
+                RB_NEXT(subsystem_tree, &tgt->subsystems, subsystem) -> 创建subsystem的时候将数据插入红黑树: RB_INSERT -> nvmf：使用 RB 树来跟踪 tgt 子系统 目前我们使用数组，这对于许多子系统来说计算成本很高，因为查找需要对子系统 nqns 进行 O(n) 字符串比较。 它的容量并不昂贵，因为它只是一个指针数组。 因此，将其从指针数组切换为 RB_HEAD，这样我们就可以将查找次数减少到 O(log n) 字符串比较。 请注意，我们仍然会为每个传输轮询组分配 spdk_nvmf_subsystem_poll_groups 数组，因为我们不想在 IO 路径中产生 RB_FIND 的额外成本
               nvmf_transport_listener_discover
                 nvmf_rdma_discover
                   entry->trtype = SPDK_NVMF_TRTYPE_RDMA
