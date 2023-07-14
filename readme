@@ -1029,11 +1029,10 @@ spdk, nvme, 接口, 函数, nvme命令
 include/spdk/nvme.h
 
 
-
-(gdb) bt
+tgt启动堆栈:
 #0  spdk_nvmf_tgt_create (opts=0x7fffffffd4d0) at nvmf.c:269
-#1  0x00000000004c45b4 in nvmf_tgt_create_target () at nvmf_tgt.c:311
-#2  0x00000000004c495b in nvmf_tgt_advance_state () at nvmf_tgt.c:418
+#1  0x00000000004c45b4 in nvmf_tgt_create_target () at nvmf_tgt.c:311  -> 创建tgt
+#2  0x00000000004c495b in nvmf_tgt_advance_state () at nvmf_tgt.c:418 -> NVMF_TGT_INIT_CREATE_TARGET
 #3  0x00000000004c4b34 in nvmf_subsystem_init () at nvmf_tgt.c:492
 #4  0x00000000005915b6 in spdk_subsystem_init_next (rc=0) at subsystem.c:166
 #5  0x0000000000561da2 in bdev_initialize_complete (cb_arg=0x0, rc=0) at bdev.c:18
@@ -1091,7 +1090,7 @@ spdkh
 rpc_nvmf_put_blockservice2transport
   spdk_nvmf_get_tgt
   nvmf_transport_set_bs_network
-    spdk_nvmf_transport_bs_state
+    spdk_nvmf_transport_bs_state -> spdk_nvmf_transport
 
 
 nvme connect 
@@ -1491,3 +1490,12 @@ nvmf_rdma_qpair_process_pending
 
 spdk_nvmf_subsystem_create
   RB_INSERT(subsystem_tree, &tgt->subsystems, subsystem)
+
+
+
+spdk_nvme_async_event_completion
+
+
+pip3 install configshell_fb
+查看存储配置: ./scripts/spdkcli.py ls
+
