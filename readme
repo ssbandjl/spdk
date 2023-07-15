@@ -7,7 +7,7 @@ spdk api文档: https://spdk.io/doc/jsonrpc.html
 log日志, SPDK Trace Log用法简介: https://zhuanlan.zhihu.com/p/556631633
 
 
-
+spdk_tgt, 及 SPDK Vhost target提供了VM中virtio-blk/scsi半虚拟化IO请求的加速器，相比较原来的QEMU virtio-blk方案以及kernel vhost-scsi方案极大的提高了性能，VM内置的内核半虚拟化驱动即可使用
 
 spdk
 
@@ -768,8 +768,8 @@ nvme discover -t rdma -a 175.17.53.73 -s 4420
 nvmf_rdma_create
 lib/nvmf/rdma.c -> create_ib_device
 
-gdb调试spdk_nvme_tgt
-nvmf_main.c:47
+gdb调试 spdk_nvme_tgt
+app/nvmf_tgt/nvmf_main.c:47
 spdk_app_opts_init -> opts=0x7fffffffdee0, opts_size=224
   #define SET_FIELD(field, value) -> 临时定义宏
   SET_FIELD(enable_coredump, true) -> 设置默认选项
