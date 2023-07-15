@@ -713,15 +713,15 @@ nvmf_create_transport -> lib/nvmf/nvmf_rpc.c -> rpc_nvmf_create_transport(struct
       spdk_iobuf_get_opts
       spdk_min
       ctx->cb_fn = cb_fn -> 设置完成回调 -> nvmf_rpc_create_transport_done
-      spdk_thread_send_msg(spdk_get_thread(), _nvmf_transport_create_done, ctx) -> msg->fn = fn -> tls_thread
+      spdk_thread_send_msg(spdk_get_thread(), _nvmf_transport_create_done, ctx) -> msg->fn = fn -> tls_thread -> 优先执行同步创建
         msg = spdk_mempool_get(g_spdk_msg_mempool)
           rte_mempool_get -> 从内存池中获取一个对象。 该函数调用多消费者或单消费者版本，具体取决于创建内存池时指定的默认行为（请参阅标志）。 如果启用缓存，则将首先从缓存中检索对象，然后从公共池中检索对象。 请注意，当本地缓存和公共池为空时，即使其他 lcore 的缓存已满，它也会返回 -ENOENT, 放回去: spdk_mempool_put
-        spdk_ring_enqueue
+        spdk_ring_enqueue -> spdk_ring_dequeue -> msg->fn(msg->arg)
           rte_ring_enqueue_bulk
             rte_ring_enqueue_bulk_elem
-              
         thread_send_msg_notification(thread)
-      ctx->ops->create_async(&ctx->opts, nvmf_transport_create_async_done, ctx) -> 异步
+      return 0
+      ctx->ops->create_async(&ctx->opts, nvmf_transport_create_async_done, ctx) -> 其次才是异步
 
 export C_INCLUDE_PATH=$C_INCLUDE_PATH:/usr/include/openssl11
 cp /usr/include/openssl11/openssl/kdf.h /usr/include/openssl/
@@ -1498,4 +1498,16 @@ spdk_nvme_async_event_completion
 
 pip3 install configshell_fb
 查看存储配置: ./scripts/spdkcli.py ls
+
+
+#0  nvmf_rdma_create (opts=0xd26ee8) at rdma.c:2553
+#1  0x00000000004f3ad9 in _nvmf_transport_create_done (ctx=0xd26ee0) at transport.c:220
+#2  0x000000000059ce08 in msg_queue_run_batch (thread=0xd296d0, max_msgs=8) at thread.c:841
+#3  0x000000000059d75b in thread_poll (thread=0xd296d0, max_msgs=0, now=1082734976806585) at thread.c:1063
+#4  0x000000000059da5b in spdk_thread_poll (thread=0xd296d0, max_msgs=0, now=1082734976806585) at thread.c:1156
+#5  0x000000000055f7de in _reactor_run (reactor=0xd29140) at reactor.c:914
+#6  0x000000000055f8cd in reactor_run (arg=0xd29140) at reactor.c:952
+#7  0x000000000055fd4b in spdk_reactors_start () at reactor.c:1068
+#8  0x000000000055c20a in spdk_app_start (opts_user=0x7fffffffde70, start_fn=0x407c15 <nvmf_tgt_started>, arg1=0x0) at app.c:808
+#9  0x0000000000407d1d in main (argc=3, argv=0x7fffffffe038) at nvmf_main.c:47
 
