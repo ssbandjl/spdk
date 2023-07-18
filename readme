@@ -697,7 +697,7 @@ scripts/rpc.py nvmf_create_transport -t TCP -u 16384 -m 8 -c 8192
 #define SPDK_DEFAULT_RPC_ADDR "/var/tmp/spdk.sock"
 ./scripts/rpc.py nvmf_create_transport -t RDMA -u 8192 -p 4 -c 0
 sudo ./scripts/rpc.py nvmf_create_transport -t TCP -u 2097152 -i 2097152
-nvmf_create_transport -> lib/nvmf/nvmf_rpc.c -> rpc_nvmf_create_transport(struct spdk_jsonrpc_request *request
+nvmf_create_transport -> lib/nvmf/nvmf_rpc.c -> rpc_nvmf_create_transport(struct spdk_jsonrpc_request *request -> 创建传输层
   spdk_nvmf_get_tgt(ctx->tgt_name) -> tgt_name ?
     TAILQ_FOREACH(tgt, &g_nvmf_tgts, link)
   spdk_nvmf_transport_opts_init
@@ -839,18 +839,29 @@ spdk_app_start(&opts, nvmf_tgt_started, NULL) -> spdk_app_start(struct spdk_app_
           msg_queue_run_batch -> msg->fn(msg->arg) -> bootstrap_fn
           _nvmf_transport_create_done -> ctx->cb_fn -> _ctx->ops->create -> .create = nvmf_rdma_create,
           nvmf_rdma_create
+            TAILQ_INIT(&rtransport->devices);
+            TAILQ_INIT(&rtransport->ports);
+            TAILQ_INIT(&rtransport->poll_groups);
+            TAILQ_INIT(&rtransport->retry_ports);
+            ...
+            rtransport->rdma_opts.num_cqe = DEFAULT_NVMF_RDMA_CQ_SIZE -> rdma参数
+            ...
+            SPDK_INFOLOG(rdma, "*** RDMA Transport Init ***\n" -> 打印参数
             rtransport->event_channel = rdma_create_event_channel()
+            fcntl(rtransport->event_channel->fd, F_SETFL, flag | O_NONBLOCK)
             rtransport->data_wr_pool = spdk_mempool_create
+              spdk_zmalloc
+              spdk_mem_map_alloc
             rdma_get_devices
             create_ib_device
               ibv_query_device
               nvmf_rdma_is_rxe_device
               TAILQ_INSERT_TAIL(&rtransport->devices, device, link)
               ibv_alloc_pd
-              spdk_rdma_create_mem_map
+              device->map = spdk_rdma_create_mem_map
               "Create IB device xxx"
             rc = generate_poll_fds(rtransport);
-            nvmf_rdma_accept
+            SPDK_POLLER_REGISTER nvmf_rdma_accept -> thread_execute_timed_poller -> poller->fn(poller->arg)
     spdk_env_thread_wait_all()
 
 
@@ -1096,14 +1107,40 @@ rpc_nvmf_put_blockservice2transport
 nvme connect 
 
 
-
+ nvmf_rdma_accept (ctx=0xd9a440) at rdma.c:3780
+#1  0x000000000059d531 in thread_execute_timed_poller (thread=0xd296d0, poller=0xda4bb0, now=1663292075260985) at thread.c:1007
+#2  0x000000000059d848 in thread_poll (thread=0xd296d0, max_msgs=0, now=1663292075260985) at thread.c:1097
+#3  0x000000000059da5b in spdk_thread_poll (thread=0xd296d0, max_msgs=0, now=1663292075260985) at thread.c:1156
+#4  0x000000000055f7de in _reactor_run (reactor=0xd29140) at reactor.c:914
+#5  0x000000000055f8cd in reactor_run (arg=0xd29140) at reactor.c:952
+#6  0x000000000055fd4b in spdk_reactors_start () at reactor.c:1068
+#7  0x000000000055c20a in spdk_app_start (opts_user=0x7fffffffde70, start_fn=0x407c15 <nvmf_tgt_started>, arg1=0x0) at app.c:808
+#8  0x0000000000407d1d in main (argc=3, argv=0x7fffffffe038) at nvmf_main.c:47
 .create = nvmf_rdma_create
 nvmf_rdma_create(struct spdk_nvmf_transport_opts *opts)
 nvmf_rdma_accept
+  nvmf_rdma_retry_listen_port -> nvmf/rdma：IB设备热插拔后重新创建资源和监听器，在修改bonding、IB设备的从属设备时，IB设备可能会被拔出和热插拔。 此补丁将在 IB 设备恢复后尝试重新创建 ibv 设备上下文、轮询器和侦听器
+    nvmf_rdma_rescan_devices
+      ibv_get_device_list
+      ibv_open_device
+      nvmf_rdma_find_ib_device
+      rdma_get_devices
+      nvmf_rdma_check_devices_context
+      generate_poll_fds
+    nvmf_rdma_listen
+      rdma_create_id
+      rdma_bind_addr
+      rdma_listen
+  count = nfds = poll(rtransport->poll_fds, rtransport->npoll_fds, 0)
   nvmf_process_cm_event
-  case RDMA_CM_EVENT_CONNECT_REQUEST
-  nvmf_rdma_connect(struct spdk_nvmf_transport *transport, struct rdma_cm_event *event)
-    spdk_nvmf_tgt_new_qpair(transport->tgt, &rqpair->qpair)
+    while (1)
+    rdma_get_cm_event
+    ...
+    case RDMA_CM_EVENT_CONNECT_REQUEST
+      nvmf_rdma_connect(struct spdk_nvmf_transport *transport, struct rdma_cm_event *event)
+        spdk_nvmf_tgt_new_qpair(transport->tgt, &rqpair->qpair)
+    ...
+  nvmf_process_ib_events -> 随后的事件是ib异步事件
 
 
 json, api: def nvmf_create_transport(args)
@@ -1510,4 +1547,67 @@ pip3 install configshell_fb
 #7  0x000000000055fd4b in spdk_reactors_start () at reactor.c:1068
 #8  0x000000000055c20a in spdk_app_start (opts_user=0x7fffffffde70, start_fn=0x407c15 <nvmf_tgt_started>, arg1=0x0) at app.c:808
 #9  0x0000000000407d1d in main (argc=3, argv=0x7fffffffe038) at nvmf_main.c:47
+
+
+
+创建内存块设备 -> bdev_malloc_create -> rpc_bdev_malloc_create
+create_malloc_disk -> dev/malloc：使用 options 结构体创建 malloc bdev 定义一个 options 结构体 malloc_bdev_opts，并直接将其用于 bdev_malloc_create RPC。 为此，bdev_malloc.h 包含 bdev_module.h 而不是 bdev.h 来定义 struct spdk_uuid，并且 struct malloc_bdev_opts 具有 struct spdk_uuid 的实例。 一起清理文件包含。 此外，使用 spdk_uuid_copy() 将 uuid 从 malloc_bdev_opts 复制到 malloc 磁盘而不是 = 运算符，并删除重复的大小检查。 这些有助于添加更多参数进行创建
+  mdisk = calloc(1, sizeof(*mdisk)) -> 使用env库执行之前直接调用DPDK的所有内存分配
+  mdisk->malloc_buf = spdk_zmalloc -> bdev/malloc：支持交错和分离元数据 malloc bdev 模块在此补丁中支持交错和分离元数据。 与 NULL bdev 模块不同，opts->block_size 是数据块大小，如果 opts->md_interleave 为 true，则块大小在内部计算为 opts->block_size 和 opts->md_size 之和，否则为 opts->block_size 。 这样会更直观。 此外，opts->md_size 仅接受 0、8、16、32、64 或 128 中的一个。以下补丁将支持保护信息 (T10 DIF/DIX)。
+  spdk_bdev_register(&mdisk->disk)
+  TAILQ_INSERT_TAIL(&g_malloc_disks, mdisk, link)
+
+
+
+
+#0  rpc_nvmf_create_subsystem (request=0xd16cb0, params=0xdab250) at nvmf_rpc.c:385
+#1  0x00000000005a647c in jsonrpc_handler (request=0xd16cb0, method=0xdab210, params=0xdab250) at rpc.c:124
+#2  0x00000000005a8598 in jsonrpc_server_handle_request (request=0xd16cb0, method=0xdab210, params=0xdab250) at jsonrpc_server_tcp.c:222
+#3  0x00000000005a7028 in parse_single_request (request=0xd16cb0, values=0xdab1d0) at jsonrpc_server.c:75
+#4  0x00000000005a760f in jsonrpc_parse_request (conn=0x7ffff3e62040, json=0x7ffff3e62058, size=339) at jsonrpc_server.c:205
+#5  0x00000000005a87b8 in jsonrpc_server_conn_recv (conn=0x7ffff3e62040) at jsonrpc_server_tcp.c:284
+#6  0x00000000005a8b8a in spdk_jsonrpc_server_poll (server=0x7ffff3e62010) at jsonrpc_server_tcp.c:402
+#7  0x00000000005a6775 in spdk_rpc_accept () at rpc.c:213
+#8  0x0000000000596788 in rpc_subsystem_poll (arg=0x0) at rpc.c:21
+创建nvme子系统: nvmf_create_subsystem -> rpc_nvmf_create_subsystem
+tgt = spdk_nvmf_get_tgt(req->tgt_name)
+subsystem = spdk_nvmf_subsystem_create
+  spdk_nvmf_tgt_find_subsystem
+  nvmf_valid_nqn
+  NVMF_SUBSYSTEM_DEFAULT_NAMESPACES 32
+  spdk_bit_array_find_first_clear
+  subsystem = calloc
+  subsystem->used_listener_ids = spdk_bit_array_create
+  RB_INSERT(subsystem_tree, &tgt->subsystems, subsystem)
+spdk_nvmf_subsystem_set_sn ?
+spdk_nvmf_subsystem_set_mn SPDK_Controll
+spdk_nvmf_subsystem_set_allow_any_host
+spdk_nvmf_subsystem_set_ana_reporting
+nvmf_subsystem_set_cntlid_range
+spdk_nvmf_subsystem_start rpc_nvmf_subsystem_started
+  nvmf_subsystem_state_change -> nvmf：子系统暂停仅暂停管理队列此外，用户可以指定一个命名空间以在操作期间也暂停。 这允许在发生对其他命名空间的 I/O 时管理主机、侦听器以及添加命名空间。 暂停特定命名空间还允许删除该命名空间，而不会影响子系统中其他命名空间的 I/O
+    nvmf_subsystem_get_intermediate_state
+    nvmf_subsystem_set_state
+    spdk_for_each_channel  subsystem_state_change_on_pg
+      spdk_io_channel_iter_get_ctx
+      spdk_io_channel_iter_get_channel
+      spdk_io_channel_get_ctx
+      SPDK_NVMF_SUBSYSTEM_ACTIVE nvmf_poll_group_add_subsystem subsystem_state_change_continue
+        spdk_for_each_channel_continue
+          thread_get_io_channel
+          spdk_thread_send_msg(thread, _call_channel, i)
+          spdk_thread_send_msg(i->orig_thread, _call_completion, i)
+        poll_group_update_subsystem
+
+
+
+绑定命名空间: nvmf_subsystem_add_ns -> rpc_nvmf_subsystem_add_ns
+spdk_nvmf_tgt_find_subsystem
+spdk_nvmf_subsystem_pause nvmf_rpc_ns_paused 将 NVMe-oF 子系统从活动状态转换为暂停状态。 在暂停状态下，整个子系统的所有管理队列都被冻结。 如果提供了命名空间 ID，则该命名空间的所有命令都会停止，并且该命名空间的传入命令将排队，直到子系统恢复
+
+
+
+
+
+
 
