@@ -1603,10 +1603,105 @@ spdk_nvmf_subsystem_start rpc_nvmf_subsystem_started
 
 绑定命名空间: nvmf_subsystem_add_ns -> rpc_nvmf_subsystem_add_ns
 spdk_nvmf_tgt_find_subsystem
-spdk_nvmf_subsystem_pause nvmf_rpc_ns_paused 将 NVMe-oF 子系统从活动状态转换为暂停状态。 在暂停状态下，整个子系统的所有管理队列都被冻结。 如果提供了命名空间 ID，则该命名空间的所有命令都会停止，并且该命名空间的传入命令将排队，直到子系统恢复
+spdk_nvmf_subsystem_pause nvmf_rpc_ns_paused <- subsystem_state_change_done 将 NVMe-oF 子系统从活动状态转换为暂停状态。 在暂停状态下，整个子系统的所有管理队列都被冻结。 如果提供了命名空间 ID，则该命名空间的所有命令都会停止，并且该命名空间的传入命令将排队，直到子系统恢复
+  spdk_for_each_channel subsystem_state_change_on_pg
+  ...
+  ns_opts.anagrpid = ctx->ns_params.anagrpid -> nvmf：通过 RPC 将 ns 添加到子系统时使 anagrpid 可配置
+  spdk_nvmf_subsystem_add_ns_ext
+    spdk_nvmf_ns_opts_get_defaults
+    _nvmf_subsystem_get_ns
+    ns = calloc(1, sizeof(*ns))
+    spdk_bdev_open_ext(bdev_name, true, nvmf_ns_event, ns, &ns->desc)
+      bdev_get_by_name
+        RB_FIND(bdev_name_tree, &g_bdev_mgr.bdev_names, &find) -> 去红黑树上找块设备
+      bdev_desc_alloc
+        spdk_bdev_get_memory_domains
+        desc->callback.event_fn = event_cb -> nvmf_ns_event
+      bdev_open
+        bdev_start_qos -> no qos
+    spdk_bdev_desc_get_bdev
+    spdk_bdev_get_md_size
+    spdk_bdev_module_claim_bdev
+    spdk_bdev_io_type_supported
+      bdev_io_type_supported io_type=SPDK_BDEV_IO_TYPE_ZCOPY
+    spdk_mem_all_zero
+    spdk_bdev_is_zoned
+    spdk_bdev_io_type_supported
+    spdk_bdev_get_max_zone_append_size
+    _nvmf_subsystem_get_first_zoned_ns
+    nvmf_subsystem_ns_changed
+      nvmf_ctrlr_ns_changed
+    spdk_nvmf_subsystem_resume(subsystem, nvmf_rpc_ns_resumed, ctx)
+      
 
 
 
+接收initiator的io
+nvmf_rdma_qpair_process_pending
+nvmf_rdma_request_parse_sgl
+  nvme_io_qpair_print_command
+    RDMA_REQUEST_STATE_READY_TO_EXECUTE
+    nvme_io_qpair_print_command
+    case SPDK_NVME_OPC_WRITE
+    bdev_malloc_writev
+      SPDK_DEBUGLOG(bdev_malloc, "wrote %zu bytes to offset %#" PRIx64 ", iovcnt=%d\n"
+
+nvmf_rdma_request_fill_iovs
+
+#0  bdev_malloc_writev (mdisk=0xd9a1b0, ch=0xdab470, task=0x200013aa0b60, bdev_io=0x200013aa0780) at bdev_malloc.c:290
+#1  0x0000000000408d32 in _bdev_malloc_submit_request (mch=0xdab440, bdev_io=0x200013aa0780) at bdev_malloc.c:407
+#2  0x0000000000408f53 in bdev_malloc_submit_request (ch=0xdab3e0, bdev_io=0x200013aa0780) at bdev_malloc.c:462
+#3  0x000000000056a705 in bdev_submit_request (bdev=0xd9a1b0, ioch=0xdab3e0, bdev_io=0x200013aa0780) at bdev.c:1415 -> .submit_request			= bdev_malloc_submit_request,
+#4  0x000000000056d238 in bdev_io_do_submit (bdev_ch=0xdab330, bdev_io=0x200013aa0780) at bdev.c:2636
+#5  0x000000000056ed36 in _bdev_io_submit (ctx=0x200013aa0780) at bdev.c:3333
+#6  0x000000000056f2ec in bdev_io_submit (bdev_io=0x200013aa0780) at bdev.c:3453
+#7  0x000000000056f460 in _bdev_io_submit_ext (desc=0xdab010, bdev_io=0x200013aa0780) at bdev.c:3505
+#8  0x0000000000573a29 in bdev_writev_blocks_with_md (desc=0xdab010, ch=0xdab2d0, iov=0x20005a47b040, iovcnt=7, md_buf=0x0, offset_blocks=20, num_blocks=101, domain=0x0, domain_ctx=0x0, seq=0x0, cb=0x4d9715 <nvmf_bdev_ctrlr_complete_cmd>, cb_arg=0x20005a47b000)
+    at bdev.c:5438
+---Type <return> to continue, or q <return> to quit---
+#9  0x0000000000573b2c in spdk_bdev_writev_blocks (desc=0xdab010, ch=0xdab2d0, iov=0x20005a47b040, iovcnt=7, offset_blocks=20, num_blocks=101, cb=0x4d9715 <nvmf_bdev_ctrlr_complete_cmd>, cb_arg=0x20005a47b000) at bdev.c:5465  -> 向给定通道上的 bdev 提交写入请求。 这与 spdk_bdev_write 的不同之处在于允许在分散收集列表中描述数据缓冲区。 某些物理设备对数据提出内存对齐要求，并且可能无法直接从提供的缓冲区中传输出去。 在这种情况下，请求可能会失败
+#10 0x00000000004da249 in nvmf_bdev_ctrlr_write_cmd (bdev=0xd9a1b0, desc=0xdab010, ch=0xdab2d0, req=0x20005a47b000) at ctrlr_bdev.c:345
+#11 0x00000000004d44a3 in nvmf_ctrlr_process_io_cmd (req=0x20005a47b000) at ctrlr.c:4261
+#12 0x00000000004d5376 in spdk_nvmf_request_exec (req=0x20005a47b000) at ctrlr.c:4568
+#13 0x000000000050b800 in nvmf_rdma_request_process (rtransport=0xd9a440, rdma_req=0x20005a47b000) at rdma.c:2239
+
+
+.submit_request	bdev_daos_submit_request | bdev_nvme_submit_request
+
+bdev_nvme_submit_request
+  spdk_io_channel_get_ctx
+  nbdev_io->io_path = bdev_nvme_find_io_path(nbdev_ch)
+  _bdev_nvme_submit_request
+    bdev_nvme_writev
+      spdk_nvme_ns_cmd_write_with_md
+        _nvme_ns_cmd_rw
+          nvme_allocate_request
+          _nvme_ns_cmd_split_request_sgl
+          ... _nvme_qpair_submit_request
+            nvme_transport_qpair_submit_request
+              qpair_submit_request -> nvme_rdma_qpair_submit_request
+                nvme_rdma_qpair
+                nvme_rdma_req_get
+                spdk_rdma_qp_queue_send_wrs
+                  ibv_wr_set_sge_list
+
+
+参考io流程: https://zhuanlan.zhihu.com/p/587842815
+nvme_transport_qpair_submit_request
+   spdk_nvme_transport->ops.qpair_submit_request
+   nvme_rdma_qpair_submit_request
+       nvme_rdma_req_init
+           nvme_rdma_build_sgl_request
+       nvme_rdma_qpair_queue_send_wr
+           spdk_rdma_qp_queue_send_wrs
+               ibv_wr_send
+               ibv_wr_send_inv
+               ibv_wr_rdma_read
+               ibv_wr_rdma_write
+               ibv_wr_set_sge_list
+           nvme_rdma_qpair_submit_sends
+               spdk_rdma_qp_flush_send_wrs
+                   ibv_wr_complete
 
 
 
