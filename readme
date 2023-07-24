@@ -5,6 +5,7 @@ initiator_spdk_tgt, spdk-nvmf指南: https://blog.csdn.net/zxpoiu/article/detail
 SPDK线程模型解析: https://blog.csdn.net/weixin_37097605/article/details/101488760
 spdk api文档: https://spdk.io/doc/jsonrpc.html
 log日志, SPDK Trace Log用法简介: https://zhuanlan.zhihu.com/p/556631633
+提交io到nvme设备: https://mp.weixin.qq.com/s/HnrBHknlKtGpLprCmJQxIw
 
 
 spdk_tgt, 及 SPDK Vhost target提供了VM中virtio-blk/scsi半虚拟化IO请求的加速器，相比较原来的QEMU virtio-blk方案以及kernel vhost-scsi方案极大的提高了性能，VM内置的内核半虚拟化驱动即可使用
@@ -836,7 +837,7 @@ spdk_app_start(&opts, nvmf_tgt_started, NULL) -> spdk_app_start(struct spdk_app_
            event->fn(event->arg1, event->arg2) -> _schedule_thread(void *arg1, void *arg2)
 
         spdk_thread_poll -> thread_poll
-          msg_queue_run_batch -> msg->fn(msg->arg) -> bootstrap_fn
+          msg_queue_run_batch -> msg->fn(msg->arg) ->  -> nvmf_subsystem_init
           _nvmf_transport_create_done -> ctx->cb_fn -> _ctx->ops->create -> .create = nvmf_rdma_create,
           nvmf_rdma_create
             TAILQ_INIT(&rtransport->devices);
@@ -1586,8 +1587,10 @@ spdk_nvmf_subsystem_set_ana_reporting
 nvmf_subsystem_set_cntlid_range
 spdk_nvmf_subsystem_start rpc_nvmf_subsystem_started
   nvmf_subsystem_state_change -> nvmf：子系统暂停仅暂停管理队列此外，用户可以指定一个命名空间以在操作期间也暂停。 这允许在发生对其他命名空间的 I/O 时管理主机、侦听器以及添加命名空间。 暂停特定命名空间还允许删除该命名空间，而不会影响子系统中其他命名空间的 I/O
+    __sync_val_compare_and_swap(&subsystem->changing_state, false, true) -> 互斥, 避免两次改状态, type __sync_val_compare_and_swap (type *ptr, type oldval type newval, ...) // 比较*ptr与oldval的值，如果两者相等，则将newval更新到*ptr并返回操作之前*ptr的值, https://zhuanlan.zhihu.com/p/32303037, 原子操作, 这对于避免双重状态更改和命中断言非常重要
     nvmf_subsystem_get_intermediate_state
     nvmf_subsystem_set_state
+      __atomic_compare_exchange_n -> __atomic_compare_exchange_n函数来比较value的值与期望值是否相等。如果相等，则将新值存储到value中，并返回true；否则返回false, 我们还需要指定内存顺序（memory order），以确保正确的同步。在本例中，我们使用了std::memory_order_acq_rel和std::memory_order_acquire，它们分别表示“获取/释放”顺序和“获取”顺序。具体选择哪种内存顺序取决于特定的应用场景
     spdk_for_each_channel  subsystem_state_change_on_pg
       spdk_io_channel_iter_get_ctx
       spdk_io_channel_iter_get_channel
@@ -1631,6 +1634,7 @@ spdk_nvmf_subsystem_pause nvmf_rpc_ns_paused <- subsystem_state_change_done 将 
     _nvmf_subsystem_get_first_zoned_ns
     nvmf_subsystem_ns_changed
       nvmf_ctrlr_ns_changed
+    resume: -> nvmf_rpc_ns_paused
     spdk_nvmf_subsystem_resume(subsystem, nvmf_rpc_ns_resumed, ctx)
       
 
@@ -1673,7 +1677,7 @@ bdev_nvme_submit_request
   nbdev_io->io_path = bdev_nvme_find_io_path(nbdev_ch)
   _bdev_nvme_submit_request
     bdev_nvme_writev
-      spdk_nvme_ns_cmd_write_with_md
+      spdk_nvme_ns_cmd_write_with_md | spdk_nvme_ns_cmd_write | spdk_nvme_ns_cmd_writev | spdk_nvme_ns_cmd_writev_ext
         _nvme_ns_cmd_rw
           nvme_allocate_request
           _nvme_ns_cmd_split_request_sgl
@@ -1706,3 +1710,25 @@ nvme_transport_qpair_submit_request
 
 
 
+
+eal_worker_thread_create: https://blog.csdn.net/xxt99/article/details/125760084
+reactor 线程模型: https://mp.weixin.qq.com/s?__biz=MzI3NDA4ODY4MA==&mid=2653336301&idx=1&sn=893bceb88d7e775863ebc006e83f5532&chksm=f0cb456ac7bccc7cb720366f69941164e4e80cd5ceaef33bcbe16e7c761046aadc6e7137e4d7&scene=21#wechat_redirect
+
+
+
+thread_execute_poller
+ poller->fn
+
+
+A user of the NVMe-oF target library begins by creating a target using spdk_nvmf_tgt_create(), setting up a set of addresses on which to accept connections by calling spdk_nvmf_tgt_listen_ext(), then creating a subsystem using spdk_nvmf_subsystem_create().
+NVMe-oF 目标库的用户首先使用 spdk_nvmf_tgt_create() 创建目标，通过调用 spdk_nvmf_tgt_listen_ext() 设置一组接受连接的地址，然后使用 spdk_nvmf_subsystem_create() 创建子系统。
+
+Subsystems begin in an inactive state and must be activated by calling spdk_nvmf_subsystem_start(). Subsystems may be modified at run time, but only when in the paused or inactive state. A running subsystem may be paused by calling spdk_nvmf_subsystem_pause() and resumed by calling spdk_nvmf_subsystem_resume().
+子系统以非活动状态开始，必须通过调用 spdk_nvmf_subsystem_start() 激活。子系统可以在运行时修改，但仅限于处于暂停或非活动状态时。正在运行的子系统可以通过调用 spdk_nvmf_subsystem_pause() 暂停并通过调用 spdk_nvmf_subsystem_resume() 恢复。
+
+
+
+
+
+nvmf_check_subsystem_active
+  ns_info = &sgroup->ns_info[nsid - 1]
