@@ -1,1 +1,1 @@
-gdb build/bin/nvmf_tgt
+gdb --args build/bin/nvmf_tgt  -L all

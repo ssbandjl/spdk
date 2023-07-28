@@ -38,6 +38,23 @@ trap 'set +e; trap - ERR; echo "Error!"; exit 1;' ERR
 
 
 io路径
+nvme_initiator -> nvmf_tgt
+...
+nvme_rdma_queue_rq
+...
+ibv_post_send
+-------------- nvme_initiator ----------------
+ibv_poll_cq
+...
+
+
+-------------- nvmf_tgt(spdk_tgt) ----------------
+
+
+
+
+
+io路径
 hello_world.c
 参考源码分析: https://blog.csdn.net/wade1010/article/details/128782710
 demo: 从hello_world程序来剖析SDPK NVMe用户态驱动，对NVMe盘的初始化、管理和读写操作
@@ -863,6 +880,18 @@ spdk_app_start(&opts, nvmf_tgt_started, NULL) -> spdk_app_start(struct spdk_app_
               "Create IB device xxx"
             rc = generate_poll_fds(rtransport);
             SPDK_POLLER_REGISTER nvmf_rdma_accept -> thread_execute_timed_poller -> poller->fn(poller->arg)
+          thread_execute_poller(thread, poller) -> 扇出,执行poller或定时器poller
+            poller->fn -> nvmf_poll_group_poll
+              TAILQ_FOREACH nvmf_transport_poll_group_poll -> nvmf_rdma_poll_group_poll
+                TAILQ_FOREACH_SAFE nvmf_rdma_poller_poll
+                  reaped = ibv_poll_cq(rpoller->cq, 32, wc) -> reaped(收割IO) -> nvmf/rdma：为每个线程而不是每个连接创建一个 cq，这在目标扩展到多个连接时大大提高了效率。 现在，可以在 O(1) 内轮询给定线程处理的所有连接，而之前是 O(n)，其中 n 是连接数
+                  switch (rdma_wr->type) 
+                    case RDMA_WR_TYPE_RECV -> 假如收到host的写请求
+                      STAILQ_INSERT_HEAD(&rqpair->resources->incoming_queue, rdma_recv, link) -> 将接收到的请求放入队列
+                      nvmf_rdma_qpair_process_pending
+                        incoming_queue -> free_queue
+                        nvmf_rdma_request_process(rtransport, rdma_req) -> 处理rdma请求, enum spdk_nvmf_rdma_request_state -> rdma请求状态机
+
     spdk_env_thread_wait_all()
 
 
@@ -1140,6 +1169,32 @@ nvmf_rdma_accept
     case RDMA_CM_EVENT_CONNECT_REQUEST
       nvmf_rdma_connect(struct spdk_nvmf_transport *transport, struct rdma_cm_event *event)
         spdk_nvmf_tgt_new_qpair(transport->tgt, &rqpair->qpair)
+          spdk_thread_send_msg(group->thread, _nvmf_poll_group_add, ctx) -> reactor
+            spdk_nvmf_poll_group_add
+              nvmf_transport_poll_group_add -> poll_group_add -> nvmf_rdma_poll_group_add
+                nvmf_rdma_qpair_initialize
+                  qp_init_attr.cap.max_send_wr	= (uint32_t)rqpair->max_queue_depth * 2 -> 设置qp属性
+                  ...
+                  nvmf_rdma_resize_cq
+                  spdk_rdma_qp_create(rqpair->cm_id, &qp_init_attr)
+                    struct ibv_qp_init_attr attr
+                    .qp_type = IBV_QPT_RC
+                    rdma_create_qp(cm_id, qp_attr->pd, &attr)
+                  nvmf_rdma_resources_create -> 创建qp
+                    rdma_recv->rdma_wr.type = RDMA_WR_TYPE_RECV
+                    spdk_rdma_get_translation
+                    spdk_rdma_memory_translation_get_lkey
+                    spdk_rdma_qp_queue_recv_wrs -> 非共享接收队列
+                      rdma_queue_recv_wrs -> rdma：为每个 qpair 添加统计信息 这些统计信息可以帮助估计工作请求批处理的效率并显示繁忙/空闲轮询比率。 发送：动词提供者的门铃更新统计信息在每次 ibv_post_send 调用时递增，对于 mlx5_dv 则在每次 ibv_wr_complete 调用时递增。 Recv：当调用 ibv_post_recv 或 ibv_post_srq_recv 函数时，两个提供程序的门铃更新统计信息都会更新。 初始化时的每个 qpair 接受一个指向共享统计信息（nvmf/nvme 轮询组）的可选指针。 如果未提供指向统计信息的指针，则 qpair 分配其自己的结构。 这样做是为了支持 NVME RDMA 启动器不使用轮询组的情况，因此我们可以避免检查 qpair 在 IO 路径中是否有统计信息
+                    rdma_req->rsp.rdma_wr.type = RDMA_WR_TYPE_SEND
+                    rdma_req->rsp.wr.opcode = IBV_WR_SEND
+                    rdma_req->data.rdma_wr.type = RDMA_WR_TYPE_DATA
+                    spdk_rdma_qp_flush_recv_wrs -> 提交所有的接收工作请求
+                      ibv_post_recv
+                RB_INSERT(qpairs_tree, &poller->qpairs, rqpair)
+                nvmf_rdma_event_accept(rqpair->cm_id, rqpair)
+                nvmf_rdma_update_ibv_state(rqpair)
+              nvmf_qpair_set_state(qpair, SPDK_NVMF_QPAIR_ACTIVE)  
     ...
   nvmf_process_ib_events -> 随后的事件是ib异步事件
 
@@ -1640,7 +1695,7 @@ spdk_nvmf_subsystem_pause nvmf_rpc_ns_paused <- subsystem_state_change_done 将 
       
 
 
-
+io路径, iopath
 接收initiator的io
 nvmf_rdma_qpair_process_pending
 nvmf_rdma_request_parse_sgl
@@ -1717,8 +1772,7 @@ reactor 线程模型: https://mp.weixin.qq.com/s?__biz=MzI3NDA4ODY4MA==&mid=2653
 
 
 
-thread_execute_poller
- poller->fn
+
 
 
 A user of the NVMe-oF target library begins by creating a target using spdk_nvmf_tgt_create(), setting up a set of addresses on which to accept connections by calling spdk_nvmf_tgt_listen_ext(), then creating a subsystem using spdk_nvmf_subsystem_create().
@@ -1745,4 +1799,131 @@ rpc_nvmf_subsystem_add_listener
 io_unit_size
 
 通知机制, 
+
+
+
+
+nvme_rdma_create_rsps
+  rsp->rdma_wr.type = RDMA_WR_TYPE_RECV
+
+
+
+
+
+
+
+host:
+nvme discover -t rdma -a 172.17.29.63 -s 4420
+tgt:
+#0  ibv_post_recv (qp=0xd91178, wr=0x2000070d3000, bad_wr=0x7fffffffd730) at /usr/include/infiniband/verbs.h:3336
+#1  0x000000000055957b in spdk_rdma_qp_flush_recv_wrs (spdk_rdma_qp=0xda7260, bad_wr=0x7fffffffd730) at common.c:361
+#2  0x00000000005075e9 in nvmf_rdma_resources_create (opts=0x7fffffffd7b0) at rdma.c:833
+#3  0x0000000000508197 in nvmf_rdma_qpair_initialize (qpair=0xda9010) at rdma.c:1059
+#4  0x0000000000510c0d in nvmf_rdma_poll_group_add (group=0xda4da0, qpair=0xda9010) at rdma.c:4192
+#5  0x00000000004f4c50 in nvmf_transport_poll_group_add (group=0xda4da0, qpair=0xda9010) at transport.c:692
+#6  0x00000000004e8fe3 in spdk_nvmf_poll_group_add (group=0xd29060, qpair=0xda9010) at nvmf.c:1066
+#7  0x00000000004e8cc5 in _nvmf_poll_group_add (_ctx=0xda9fe0) at nvmf.c:982
+#8  0x000000000059ce08 in msg_queue_run_batch (thread=0xd82a90, max_msgs=8) at thread.c:841
+#9  0x000000000059d75b in thread_poll (thread=0xd82a90, max_msgs=0, now=3600577424951201) at thread.c:1063
+#10 0x000000000059da5b in spdk_thread_poll (thread=0xd82a90, max_msgs=0, now=3600577424951201) at thread.c:1156
+#11 0x000000000055f7de in _reactor_run (reactor=0xd29140) at reactor.c:914
+#12 0x000000000055f8cd in reactor_run (arg=0xd29140) at reactor.c:952
+#13 0x000000000055fd4b in spdk_reactors_start () at reactor.c:1068
+#14 0x000000000055c20a in spdk_app_start (opts_user=0x7fffffffde70, start_fn=0x407c15 <nvmf_tgt_started>, arg1=0x0) at app.c:808
+#15 0x0000000000407d1d in main (argc=3, argv=0x7fffffffe038) at nvmf_main.c:47
+
+
+
+nvme_rdma_poller_create
+spdk_rdma_srq_flush_recv_wrs
+  ibv_post_srq_recv
+
+
+这里我们如果要查看读取的数据的话，那还需要使用date-file参数。比如这里我们想从nand写10个block的数据（这里设定一个block的大小为4K），并且将读取数据进行观察的话，那么使用如下命令即可：
+nvme write /dev/nvme0n1 -s 0 -c 10 -z 40980 -d examples.desktop
+dd if=/dev/urandom of=4k bs=4k count=1
+rm -rf 4k; for i in {0..4095};do printf a >> 4k;done; stat 4k
+gdb --args ./nvme write /dev/nvme2n1 --start-block=0 --block-count=1 --data-size=4k --data=./4k -v
+tgt_log:
+[2023-07-28 11:22:13.614276] rdma.c:2069:nvmf_rdma_request_process: *DEBUG*: Request 0x2000070d4560 entering state RDMA_REQUEST_STATE_FREE
+[2023-07-28 11:22:14.341645] reactor.c: 620:get_rusage: *INFO*: Reactor 0: 0 voluntary context switches and 9 involuntary context switches in the last second.
+[2023-07-28 11:22:15.343998] reactor.c: 620:get_rusage: *INFO*: Reactor 0: 0 voluntary context switches and 7 involuntary context switches in the last second.
+[2023-07-28 11:22:16.013980] rdma.c:2069:nvmf_rdma_request_process: *DEBUG*: Request 0x200059cd3000 entering state RDMA_REQUEST_STATE_NEW  # 1 状态机
+[2023-07-28 11:22:16.013987] rdma.c:2069:nvmf_rdma_request_process: *DEBUG*: Request 0x200059cd3000 entering state RDMA_REQUEST_STATE_NEED_BUFFER  # 2
+[2023-07-28 11:22:16.013992] rdma.c:1881:nvmf_rdma_request_parse_sgl: *DEBUG*: In-capsule data: offset 0x0, length 0x400 # 1024B
+[2023-07-28 11:22:16.013996] rdma.c:2069:nvmf_rdma_request_process: *DEBUG*: Request 0x200059cd3000 entering state RDMA_REQUEST_STATE_READY_TO_EXECUTE # 3
+[2023-07-28 11:22:16.014005] nvme_qpair.c:247:nvme_io_qpair_print_command: *NOTICE*: WRITE sqid:28 cid:33 nsid:1 lba:0 len:2 SGL DATA BLOCK OFFSET 0x0 len:0x400
+[2023-07-28 11:22:16.014022] bdev_malloc.c: 308:bdev_malloc_writev: *DEBUG*: wrote 1024 bytes to offset 0, iovcnt=1
+[2023-07-28 11:22:16.014031] accel.c: 179:accel_sequence_set_state: *DEBUG*: seq=0xe9e0a0, setting state: init -> await-virtbuf
+[2023-07-28 11:22:16.014036] accel.c: 179:accel_sequence_set_state: *DEBUG*: seq=0xe9e0a0, setting state: await-virtbuf -> check-bouncebuf
+[2023-07-28 11:22:16.014041] accel.c: 179:accel_sequence_set_state: *DEBUG*: seq=0xe9e0a0, setting state: check-bouncebuf -> await-bouncebuf
+[2023-07-28 11:22:16.014046] accel.c: 179:accel_sequence_set_state: *DEBUG*: seq=0xe9e0a0, setting state: await-bouncebuf -> exec-task
+[2023-07-28 11:22:16.014051] accel.c:1639:accel_process_sequence: *DEBUG*: Executing copy operation, sequence: 0xe9e0a0
+[2023-07-28 11:22:16.014055] accel.c: 179:accel_sequence_set_state: *DEBUG*: seq=0xe9e0a0, setting state: exec-task -> await-task
+[2023-07-28 11:22:16.014061] rdma.c:2069:nvmf_rdma_request_process: *DEBUG*: Request 0x200059cd3000 entering state RDMA_REQUEST_STATE_EXECUTING  # 4
+[2023-07-28 11:22:16.014067] accel.c: 179:accel_sequence_set_state: *DEBUG*: seq=0xe9e0a0, setting state: await-task -> complete-task
+[2023-07-28 11:22:16.014072] accel.c: 179:accel_sequence_set_state: *DEBUG*: seq=0xe9e0a0, setting state: complete-task -> next-task
+[2023-07-28 11:22:16.014076] accel.c:1239:accel_sequence_complete: *DEBUG*: Completed sequence: 0xe9e0a0 with status: 0
+[2023-07-28 11:22:16.014083] nvme_qpair.c: 477:spdk_nvme_print_completion: *NOTICE*: SUCCESS (00/00) qid:28 cid:33 cdw0:0 sqhd:0000 p:0 m:0 dnr:0
+[2023-07-28 11:22:16.014090] rdma.c:2069:nvmf_rdma_request_process: *DEBUG*: Request 0x200059cd3000 entering state RDMA_REQUEST_STATE_EXECUTED # 5
+[2023-07-28 11:22:16.014095] rdma.c:2069:nvmf_rdma_request_process: *DEBUG*: Request 0x200059cd3000 entering state RDMA_REQUEST_STATE_READY_TO_COMPLETE #6
+[2023-07-28 11:22:16.014100] rdma.c:2069:nvmf_rdma_request_process: *DEBUG*: Request 0x200059cd3000 entering state RDMA_REQUEST_STATE_COMPLETING #7
+[2023-07-28 11:22:16.014116] rdma.c:2069:nvmf_rdma_request_process: *DEBUG*: Request 0x200059cd3000 entering state RDMA_REQUEST_STATE_COMPLETED #8
+[2023-07-28 11:22:16.014121] rdma.c:2069:nvmf_rdma_request_process: *DEBUG*: Request 0x200059cd3000 entering state RDMA_REQUEST_STATE_FREE #9
+[2023-07-28 11:22:16.174240] rdma.c:2069:nvmf_rdma_request_process: *DEBUG*: Request 0x2000070d4560 entering state RDMA_REQUEST_STATE_NEW
+[2023-07-28 11:22:16.174246] rdma.c:2069:nvmf_rdma_request_process: *DEBUG*: Request 0x2000070d4560 entering state RDMA_REQUEST_STATE_READY_TO_EXECUTE
+
+
+nvmf_rdma_request_process
+...
+do -> loop
+switch (rdma_req->state)
+case RDMA_REQUEST_STATE_NEW -> 开始状态机, nvmf：将RDMA请求处理变成状态机，围绕请求处理形式化状态机。 通过调用 spdk_nvmf_rdma_request_process() 来推进状态。 这大大澄清了实现并清理了一些极端情况。 不幸的是，差异也很大，而且似乎没有办法减少它
+  rdma_recv = rdma_req->recv
+  rdma_req->req.cmd = (union nvmf_h2c_msg *)rdma_recv->sgl[0].addr
+  nvmf_rdma_check_fused_ordering(rtransport, rqpair, rdma_req) -> nvmf/rdma：向 tgt 层连续发出融合命令，RDMA 读取可能会导致命令以与从主机接收到的顺序不同的顺序提交到目标层。 通常这很好，但不适用于融合命令。 因此，在融合命令到达 nvmf_rdma_request_process() 时对其进行跟踪。 如果我们发现一对没有有效 FUSED 设置的顺序命令（即 NONE/SECOND、FIRST/NONE、FIRST/FIRST），我们会将请求标记为“fused_failed”，稍后会在它们正常运行之前使它们失败 发送到目标层。 当我们确实找到一对有效的融合命令（FIRST 后跟 SECOND）时，我们将等到两者都 READY_TO_EXECUTE，然后将它们连续提交到目标层
+  spdk_nvmf_req_get_xfer
+    if (cmd->opc == SPDK_NVME_OPC_FABRIC) -> 127
+      spdk_nvme_opc_get_data_transfer -> SPDK_NVME_DATA_BIDIRECTIONAL 3
+    SPDK_NVME_SGL_TYPE_DATA_BLOCK
+  rdma_req->state = RDMA_REQUEST_STATE_NEED_BUFFER
+  STAILQ_INSERT_TAIL(&rgroup->group.pending_buf_queue, &rdma_req->req, buf_link)
+...
+case RDMA_REQUEST_STATE_NEED_BUFFER
+  nvmf_rdma_request_parse_sgl(rtransport, device, rdma_req)
+    In-capsule data
+    req->iov[0].iov_base = rdma_req->recv->buf + offset
+  rdma_req->state = RDMA_REQUEST_STATE_READY_TO_EXECUTE
+...
+case RDMA_REQUEST_STATE_READY_TO_EXECUTE
+  rdma_req->state = RDMA_REQUEST_STATE_EXECUTING
+  spdk_nvmf_request_exec(&rdma_req->req) -> 执行请求, 支持zcopy零拷贝
+    nvmf_check_subsystem_active(req)
+    spdk_nvme_print_command -> SPDK_NVME_OPC_WRITE -> nvme_io_qpair_print_command -> IO写命令
+      case SPDK_NVME_OPC_WRITE -> WRITE sqid:28 cid:33 nsid:1 lba:0 len:2 SGL DATA BLOCK OFFSET 0x0 len:0x400
+    TAILQ_INSERT_TAIL(&qpair->outstanding, req, link)
+    status = nvmf_ctrlr_process_io_cmd(req)
+      ns = _nvmf_subsystem_get_ns(ctrlr->subsys, nsid) -> nvmf：不仅为每个子系统侦听器创建 ANA 状态，还为每个 ANA 组创建 ANA 状态 将 ANA 状态从每个子系统侦听器细化为每个 ANA 组的每个子系统侦听器。 将每个 ANA 组的 ANA 状态数组添加到子系统侦听器。 该数组由 ANA 组 ID - 1 索引。然后在 I/O 路径中，我们通过 ctrlr->listener->ana_state[ns->anagrpid - 1] 获取 ANA 状态。 当 FFFFFFFFh 被指定为获取功能和设置功能命令的 NSID 时，NVMe 规范指示存在 NVM 子系统特定的 ANA 状态。 对于这些，我们返回优化状态。 更新 nvmf_subsystem_get_listeners RPC 以返回基础 ANA 组的所有 ANA 状态。 nvmf_subsystem_get_listeners RPC尚未成熟，尚未在测试代码中使用。 因此兼容性并不是最重要的
+      ana_state = nvmf_ctrlr_get_ana_state(ctrlr, ns->anagrpid)
+      SPDK_DTRACE_PROBE3_TICKS nvmf_request_io_exec_path -> trace
+      nvmf_ns_reservation_request_check(ns_info, ctrlr, req) -> 检查当前控制器（主机）是否允许使用 NVMe 命令, 保留命令?
+      bdev = ns->bdev
+      desc = ns->desc
+      ch = ns_info->channel
+      if (spdk_nvmf_request_using_zcopy(req)) -> 零拷贝?
+      nvmf_bdev_ctrlr_write_cmd(bdev, desc, ch, req)
+        nvmf_bdev_ctrlr_get_rw_params
+        spdk_bdev_writev_blocks(desc, ch, req->iov, req->iovcnt, start_lba, num_blocks, nvmf_bdev_ctrlr_complete_cmd, req) -> 向给定通道上的 bdev 提交写入请求。 这与 spdk_bdev_write 的不同之处在于允许在分散收集列表中描述数据缓冲区。 某些物理设备对数据提出内存对齐要求，并且可能无法直接从提供的缓冲区中传输出去。 在这种情况下，请求可能会失败
+          bdev_writev_blocks_with_md
+            bdev_io_valid_blocks
+            bdev_io = bdev_channel_get_io(channel)
+            ...
+            bdev_io->u.bdev.iovs = iov
+            ...
+            _bdev_io_submit_ext(desc, bdev_io) -> bdev：从 spdk_bdev_io 中删除 spdk_bdev_ext_io_opts spdk_bdev_ext_io_opts 结构用于在提交 bdev IO 请求时传递额外选项，而无需修改/添加函数来处理新选项。 此外，该结构还有一个大小字段，允许在不破坏 ABI 的情况下添加新字段（因此必须提高库的主要版本）。 它也是 spdk_bdev_io 的一部分，将其从该结构中删除有几个原因： 1. 大小字段仅在通过指针传递的结构中才有意义。 spdk_bdev_ext_io_opts 确实作为指向 spdk_bdev_{readv,writev}_blocks_ext() 的指针传递，但它也嵌入在 spdk_bdev_io (internal.ext_opts_copy) 中，这也是 API 的一部分。 这意味着每次向 spdk_bdev_ext_io_opts 添加新字段时，spdk_bdev_io 的大小也会发生变化，因此我们无论如何都需要更改 libspdk_bdev 的主要版本，从而使 spdk_bdev_ext_io_opts.size 无用。 2. size字段也使得internal.ext_opts使用起来很麻烦，因为每次访问它的一个字段时，我们都需要检查大小。 目前代码并没有这样做，因为最初引入此结构时所有现有的 spdk_bdev_ext_io_opts 字段都存在，但我们需要在访问任何新字段之前检查大小。 3. spdk_bdev_ext_io_opts有一个metadata字段，而spdk_bdev_io已经有u.bdev.md_buf，这意味着我们在spdk_bdev_io中的几个不同的地方存储相同的东西（u.bdev.md_buf，u.bdev.ext_opts->metadata，internal。 ext_opts->元数据）。 因此，此补丁从 spdk_bdev_io 中删除对 spdk_bdev_ext_io_opts 的所有引用，并将其替换为 spdk_bdev_io 中缺少的字段（memory_domain、memory_domain_ctx）。 不幸的是，此更改破坏了 API，并需要更改支持 spdk_bdev_io.u.bdev.ext_opts 的 bdev 模块
+              bdev_io_needs_sequence_exec
+              
+        return SPDK_NVMF_REQUEST_EXEC_STATUS_ASYNCHRONOUS -> status
+    if (status == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE)
+      _nvmf_request_complete(req)
 

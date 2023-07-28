@@ -607,6 +607,7 @@ spdk_nvmf_req_get_xfer(struct spdk_nvmf_request *req) {
 	struct spdk_nvme_cmd *cmd = &req->cmd->nvme_cmd;
 	struct spdk_nvme_sgl_descriptor *sgl = &cmd->dptr.sgl1;
 
+	// printf("cmd->opc:%d\n", cmd->opc);
 	/* Figure out data transfer direction */
 	if (cmd->opc == SPDK_NVME_OPC_FABRIC)
 	{
@@ -624,6 +625,7 @@ spdk_nvmf_req_get_xfer(struct spdk_nvmf_request *req) {
 	/* Even for commands that may transfer data, they could have specified 0 length.
 	 * We want those to show up with xfer SPDK_NVME_DATA_NONE.
 	 */
+	// printf("sgl->generic.type:%d\n", sgl->generic.type);
 	switch (sgl->generic.type)
 	{
 	case SPDK_NVME_SGL_TYPE_DATA_BLOCK:

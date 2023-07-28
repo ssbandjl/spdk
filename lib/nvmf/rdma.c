@@ -105,6 +105,23 @@ enum spdk_nvmf_rdma_request_state {
 	RDMA_REQUEST_NUM_STATES,
 };
 
+const char* spdk_nvmf_rdma_request_state_str[14] = {
+	"RDMA_REQUEST_STATE_FREE",
+	"RDMA_REQUEST_STATE_NEW",
+	"RDMA_REQUEST_STATE_NEED_BUFFER",
+	"RDMA_REQUEST_STATE_DATA_TRANSFER_TO_CONTROLLER_PENDING",
+	"RDMA_REQUEST_STATE_TRANSFERRING_HOST_TO_CONTROLLER",
+	"RDMA_REQUEST_STATE_READY_TO_EXECUTE",
+	"RDMA_REQUEST_STATE_EXECUTING",
+	"RDMA_REQUEST_STATE_EXECUTED",
+	"RDMA_REQUEST_STATE_DATA_TRANSFER_TO_HOST_PENDING",
+	"RDMA_REQUEST_STATE_READY_TO_COMPLETE",
+	"RDMA_REQUEST_STATE_TRANSFERRING_CONTROLLER_TO_HOST",
+	"RDMA_REQUEST_STATE_COMPLETING",
+	"RDMA_REQUEST_STATE_COMPLETED",
+	"RDMA_REQUEST_NUM_STATES",
+};
+
 SPDK_TRACE_REGISTER_FN(nvmf_trace, "nvmf_rdma", TRACE_GROUP_NVMF_RDMA)
 {
 	spdk_trace_register_object(OBJECT_NVMF_RDMA_IO, 'r');
@@ -2049,7 +2066,7 @@ nvmf_rdma_request_process(struct spdk_nvmf_rdma_transport *rtransport,
 	do {
 		prev_state = rdma_req->state;
 
-		SPDK_DEBUGLOG(rdma, "Request %p entering state %d\n", rdma_req, prev_state);
+		SPDK_DEBUGLOG(rdma, "Request %p entering state %s\n", rdma_req, spdk_nvmf_rdma_request_state_str[prev_state]);
 
 		switch (rdma_req->state) {
 		case RDMA_REQUEST_STATE_FREE:
