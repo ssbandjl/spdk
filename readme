@@ -1921,8 +1921,37 @@ case RDMA_REQUEST_STATE_READY_TO_EXECUTE
             bdev_io->u.bdev.iovs = iov
             ...
             _bdev_io_submit_ext(desc, bdev_io) -> bdev：从 spdk_bdev_io 中删除 spdk_bdev_ext_io_opts spdk_bdev_ext_io_opts 结构用于在提交 bdev IO 请求时传递额外选项，而无需修改/添加函数来处理新选项。 此外，该结构还有一个大小字段，允许在不破坏 ABI 的情况下添加新字段（因此必须提高库的主要版本）。 它也是 spdk_bdev_io 的一部分，将其从该结构中删除有几个原因： 1. 大小字段仅在通过指针传递的结构中才有意义。 spdk_bdev_ext_io_opts 确实作为指向 spdk_bdev_{readv,writev}_blocks_ext() 的指针传递，但它也嵌入在 spdk_bdev_io (internal.ext_opts_copy) 中，这也是 API 的一部分。 这意味着每次向 spdk_bdev_ext_io_opts 添加新字段时，spdk_bdev_io 的大小也会发生变化，因此我们无论如何都需要更改 libspdk_bdev 的主要版本，从而使 spdk_bdev_ext_io_opts.size 无用。 2. size字段也使得internal.ext_opts使用起来很麻烦，因为每次访问它的一个字段时，我们都需要检查大小。 目前代码并没有这样做，因为最初引入此结构时所有现有的 spdk_bdev_ext_io_opts 字段都存在，但我们需要在访问任何新字段之前检查大小。 3. spdk_bdev_ext_io_opts有一个metadata字段，而spdk_bdev_io已经有u.bdev.md_buf，这意味着我们在spdk_bdev_io中的几个不同的地方存储相同的东西（u.bdev.md_buf，u.bdev.ext_opts->metadata，internal。 ext_opts->元数据）。 因此，此补丁从 spdk_bdev_io 中删除对 spdk_bdev_ext_io_opts 的所有引用，并将其替换为 spdk_bdev_io 中缺少的字段（memory_domain、memory_domain_ctx）。 不幸的是，此更改破坏了 API，并需要更改支持 spdk_bdev_io.u.bdev.ext_opts 的 bdev 模块
-              bdev_io_needs_sequence_exec
-              
+              bdev_io_needs_sequence_exec -> false, bdev：写请求的加速序列支持现在可以提交包含一系列加速操作的写入请求，这些操作需要在实际写入数据之前执行。 如果 bdev 支持加速序列并且不需要拆分请求，则此类请求将直接传递到 bdev 模块（以便它可以将后续操作附加到加速序列）。 如果这些条件中的任何一个不满足，bdev 层将在将请求传递给 bdev 模块之前执行所有累积的加速操作。 不提交带有加速序列的拆分 IO 的原因是我们也需要拆分该加速序列。 目前，accel 中没有这样的功能，因此我们以与底层 bdev 模块不支持 accel 序列相同的方式处理这种情况（它在 bdev_io 拆分之前执行）
+              bdev_io_submit(bdev_io)
+                spdk_bdev_io_get_thread(bdev_io)
+                TAILQ_INSERT_TAIL(&ch->io_submitted, bdev_io, internal.ch_link)
+                _bdev_io_submit(bdev_io)
+                  bdev_io_do_submit(bdev_ch, bdev_io)
+                    spdk_likely(TAILQ_EMPTY(&shared_resource->nomem_io))
+                    bdev_submit_request(bdev, ch, bdev_io) -> bdev->fn_table->submit_request(ioch, bdev_io) -> bdev_malloc_submit_request
+                      _bdev_malloc_submit_request
+                        case SPDK_BDEV_IO_TYPE_WRITE
+                        bdev_malloc_writev
+                          bdev_malloc_check_iov_len
+                          spdk_accel_append_copy -> 将复制操作附加到序列。 序列中的复制操作很特殊，因为它不能保证数据将被实际复制。 如果可能的话，它只会更改序列中某些操作的源/目标缓冲区
+                            seq = accel_sequence_get(accel_ch)
+                            accel_sequence_get_task
+                            task->op_code = ACCEL_OPC_COPY
+                            TAILQ_INSERT_TAIL(&seq->tasks, task, seq_link)
+                            ...
+                          spdk_accel_sequence_finish(bdev_io->u.bdev.accel_sequence, malloc_sequence_done, task)
+                            accel_process_sequence(seq)
+                              accel_sequence_set_state(seq, ACCEL_SEQUENCE_STATE_AWAIT_VIRTBUF)
+                              accel_sequence_set_state(seq, ACCEL_SEQUENCE_STATE_CHECK_BOUNCEBUF)
+                              accel_sequence_set_state(seq, ACCEL_SEQUENCE_STATE_EXEC_TASK)
+                              ...
+                              rc = accel_submit_task(accel_ch, task) -> module->submit_tasks(module_ch, task) -> sw_accel_submit_tasks
+                                case ACCEL_OPC_COPY
+                                _sw_accel_copy_iovs
+                                  for (len = spdk_ioviter_first(&iter, src_iovs, src_iovcnt
+                                  memcpy(dst, src, len) -> 最终执行了一次内存拷贝
+                                _add_to_comp_list(sw_ch, accel_task, rc)
+                          spdk_accel_submit_copy malloc_done
         return SPDK_NVMF_REQUEST_EXEC_STATUS_ASYNCHRONOUS -> status
     if (status == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE)
       _nvmf_request_complete(req)
