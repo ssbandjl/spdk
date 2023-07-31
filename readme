@@ -8,6 +8,13 @@ log日志, SPDK Trace Log用法简介: https://zhuanlan.zhihu.com/p/556631633
 提交io到nvme设备: https://mp.weixin.qq.com/s/HnrBHknlKtGpLprCmJQxIw
 
 
+
+常用命令:
+查看线程状态: ./scripts/rpc.py -s /var/tmp/spdk_xb.sock thread_get_stats
+lscpu
+cat /proc/cpuinfo 查看cpu核数(逻辑) lcore,core_id对应
+
+
 spdk_tgt, 及 SPDK Vhost target提供了VM中virtio-blk/scsi半虚拟化IO请求的加速器，相比较原来的QEMU virtio-blk方案以及kernel vhost-scsi方案极大的提高了性能，VM内置的内核半虚拟化驱动即可使用
 
 spdk
@@ -799,7 +806,7 @@ spdk_app_start(&opts, nvmf_tgt_started, NULL) -> spdk_app_start(struct spdk_app_
   app_copy_opts
   spdk_log_set_print_level
   app_setup_env
-  calculate_mempool_size
+  calculate_mempool_size -> app：添加 msg_mempool_size 自动计算 修复 #811 目前，无论 SPDK 应用程序运行在多少个核心上，消息内存池大小始终配置为相同的默认值。 在某些情况下，默认值 262143 是不够的，特别是在启动大量 SPDK 线程的情况下。 如果分配给 SPDK 的核心超过 63 个，则此补丁添加了 msg_mempool_size 的计算。 在这种情况下，msg_mempool_size 的大小计算为 core_count * 4096。对于最多 63 个核心，始终使用值 262143。 用户还可以使用 --msg-mempool-size 选项指定消息内存池的大小。 如果由用户指定，它始终会覆盖默认或自动计算的大小
   spdk_log_open
   spdk_reactors_init(size_t msg_mempool_size) -> 初始化 reactor, spdk线程模型: https://zhuanlan.zhihu.com/p/560861776
     g_spdk_event_mempool = spdk_mempool_create(mempool_name
@@ -1647,14 +1654,14 @@ spdk_nvmf_subsystem_start rpc_nvmf_subsystem_started
     nvmf_subsystem_get_intermediate_state
     nvmf_subsystem_set_state
       __atomic_compare_exchange_n -> __atomic_compare_exchange_n函数来比较value的值与期望值是否相等。如果相等，则将新值存储到value中，并返回true；否则返回false, 我们还需要指定内存顺序（memory order），以确保正确的同步。在本例中，我们使用了std::memory_order_acq_rel和std::memory_order_acquire，它们分别表示“获取/释放”顺序和“获取”顺序。具体选择哪种内存顺序取决于特定的应用场景
-    spdk_for_each_channel  subsystem_state_change_on_pg
+    spdk_for_each_channel  subsystem_state_change_on_pg -> 在与 io_device 关联的每个通道上调用“fn”。 这是异步发生的，因此可以在 spdk_for_each_channel 返回后调用 fn 。 将为每个通道串行调用“fn”，这样对“fn”的两次调用不会在时间上重叠。 调用“fn”后，调用 spdk_for_each_channel_continue() 继续迭代
       spdk_io_channel_iter_get_ctx
       spdk_io_channel_iter_get_channel
       spdk_io_channel_get_ctx
       SPDK_NVMF_SUBSYSTEM_ACTIVE nvmf_poll_group_add_subsystem subsystem_state_change_continue
         spdk_for_each_channel_continue
           thread_get_io_channel
-          spdk_thread_send_msg(thread, _call_channel, i)
+          spdk_thread_send_msg(thread, _call_channel, i) -> i->fn(i) -> subsystem_state_change_on_pg
           spdk_thread_send_msg(i->orig_thread, _call_completion, i)
         poll_group_update_subsystem
 
@@ -1766,9 +1773,14 @@ nvme_transport_qpair_submit_request
 
 
 
+rte_eal_init
+  RTE_COMPILE_TIME_CPUFLAGS -> cpu功能表 -> const struct feature_entry rte_cpu_feature_table[]
+  RTE_LCORE_FOREACH_WORKER(i) 
+  eal_worker_thread_create: https://blog.csdn.net/xxt99/article/details/125760084
+  reactor 线程模型: https://mp.weixin.qq.com/s?__biz=MzI3NDA4ODY4MA==&mid=2653336301&idx=1&sn=893bceb88d7e775863ebc006e83f5532&chksm=f0cb456ac7bccc7cb720366f69941164e4e80cd5ceaef33bcbe16e7c761046aadc6e7137e4d7&scene=21#wechat_redirect
 
-eal_worker_thread_create: https://blog.csdn.net/xxt99/article/details/125760084
-reactor 线程模型: https://mp.weixin.qq.com/s?__biz=MzI3NDA4ODY4MA==&mid=2653336301&idx=1&sn=893bceb88d7e775863ebc006e83f5532&chksm=f0cb456ac7bccc7cb720366f69941164e4e80cd5ceaef33bcbe16e7c761046aadc6e7137e4d7&scene=21#wechat_redirect
+
+
 
 
 
@@ -1789,11 +1801,56 @@ nvmf_check_subsystem_active
   ns_info = &sgroup->ns_info[nsid - 1]
 
 
+
+#0  0x00007ffff7309dd0 in rdma_listen () from /lib64/librdmacm.so.1
+#1  0x000000000050da5a in nvmf_rdma_listen (transport=0xd9a440, trid=0xda7370, listen_opts=0x7fffffffd830) at rdma.c:2924
+#2  0x00000000004f424b in spdk_nvmf_transport_listen (transport=0xd9a440, trid=0xda7078, opts=0x7fffffffd830) at transport.c:410
+#3  0x00000000004e83b8 in spdk_nvmf_tgt_listen_ext (tgt=0xd82570, trid=0xda7078, opts=0xda72b1) at nvmf.c:683
+#4  0x00000000004eded4 in nvmf_rpc_listen_paused (subsystem=0xda9450, cb_arg=0xda7010, status=0) at nvmf_rpc.c:756
+#5  0x00000000004dee65 in subsystem_state_change_done (i=0xdab280, status=0) at subsystem.c:625
+#6  0x00000000005a0bad in _call_completion (ctx=0xdab280) at thread.c:2508
+#7  0x000000000059ce96 in msg_queue_run_batch (thread=0xd296d0, max_msgs=8) at thread.c:841
+#8  0x000000000059d7e9 in thread_poll (thread=0xd296d0, max_msgs=0, now=4341767202243019) at thread.c:1063
+#9  0x000000000059dae9 in spdk_thread_poll (thread=0xd296d0, max_msgs=0, now=4341767202243019) at thread.c:1156
+#10 0x000000000055f86c in _reactor_run (reactor=0xd29140) at reactor.c:914
+#11 0x000000000055f95b in reactor_run (arg=0xd29140) at reactor.c:952
+#12 0x000000000055fdd9 in spdk_reactors_start () at reactor.c:1068
+#13 0x000000000055c298 in spdk_app_start (opts_user=0x7fffffffde50, start_fn=0x407c15 <nvmf_tgt_started>, arg1=0x0) at app.c:808
+#14 0x0000000000407d1d in main (argc=5, argv=0x7fffffffe018) at nvmf_main.c:47
 rpc_nvmf_subsystem_add_listener
   nvmf_rpc_listen_paused
     spdk_nvmf_tgt_listen_ext
       spdk_nvmf_transport_listen
         rc = transport->ops->listen(transport, &listener->trid, opts) -> rdma_listen
+
+rpc_listen_address_to_trid -> 设置传输id
+  SPDK_NVMF_ADRFAM_IPV4
+  address->traddr -> 172.17.29.63, address: {transport = 0xda7310 "rdma", adrfam = 0x0, traddr = 0xda7330 "172.17.29.63", trsvcid = 0xda7350 "4520"}
+spdk_nvmf_listen_opts_init
+spdk_nvmf_subsystem_pause(subsystem, 0, nvmf_rpc_listen_paused, ctx)
+
+
+
+执行rpc:
+#0  rpc_nvmf_subsystem_add_listener (request=0xd16cb0, params=0xdabd70) at nvmf_rpc.c:853
+#1  0x00000000005a650a in jsonrpc_handler (request=0xd16cb0, method=0xdabd30, params=0xdabd70) at rpc.c:124
+#2  0x00000000005a8626 in jsonrpc_server_handle_request (request=0xd16cb0, method=0xdabd30, params=0xdabd70) at jsonrpc_server_tcp.c:222
+#3  0x00000000005a70b6 in parse_single_request (request=0xd16cb0, values=0xdabcf0) at jsonrpc_server.c:75
+#4  0x00000000005a769d in jsonrpc_parse_request (conn=0x7ffff3e62040, json=0x7ffff3e62058, size=248) at jsonrpc_server.c:205
+#5  0x00000000005a8846 in jsonrpc_server_conn_recv (conn=0x7ffff3e62040) at jsonrpc_server_tcp.c:284
+#6  0x00000000005a8c18 in spdk_jsonrpc_server_poll (server=0x7ffff3e62010) at jsonrpc_server_tcp.c:402
+#7  0x00000000005a6803 in spdk_rpc_accept () at rpc.c:213
+#8  0x0000000000596816 in rpc_subsystem_poll (arg=0x0) at rpc.c:21
+#9  0x000000000059d5bf in thread_execute_timed_poller (thread=0xd296d0, poller=0xd90fd0, now=4342423016780193) at thread.c:1007
+#10 0x000000000059d8d6 in thread_poll (thread=0xd296d0, max_msgs=0, now=4342423016780193) at thread.c:1097
+#11 0x000000000059dae9 in spdk_thread_poll (thread=0xd296d0, max_msgs=0, now=4342423016780193) at thread.c:1156
+#12 0x000000000055f86c in _reactor_run (reactor=0xd29140) at reactor.c:914
+#13 0x000000000055f95b in reactor_run (arg=0xd29140) at reactor.c:952
+#14 0x000000000055fdd9 in spdk_reactors_start () at reactor.c:1068
+#15 0x000000000055c298 in spdk_app_start (opts_user=0x7fffffffde50, start_fn=0x407c15 <nvmf_tgt_started>, arg1=0x0) at app.c:808
+#16 0x0000000000407d1d in main (argc=5, argv=0x7fffffffe018) at nvmf_main.c:47
+
+
 
 
 io_unit_size
@@ -1956,3 +2013,40 @@ case RDMA_REQUEST_STATE_READY_TO_EXECUTE
     if (status == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE)
       _nvmf_request_complete(req)
 
+
+
+
+app启动创建了两个线程, 一个控制线程, 一个遥测线程
+#0  0x0000000000406980 in pthread_create@plt () -> rte_ctrl_thread_create(&intr_thread, "eal-intr-thread", NULL -> 创建控制线程。 创建具有给定名称和属性的控制线程。 新线程的亲和力基于调用 rte_eal_init() 时检索到的 CPU 亲和力，然后排除数据平面和服务 lcore。 如果设置线程名称失败，则会忽略该错误并记录一条调试消息
+#1  0x00000000005f8623 in rte_ctrl_thread_create (thread=0xb5a940 <intr_thread>, name=0x8448d6 "eal-intr-thread", attr=0x0, start_routine=0x61730c <eal_intr_thread_main>, arg=0x0) at ../lib/eal/common/eal_common_thread.c:310
+#2  0x000000000061754a in rte_eal_intr_init () at ../lib/eal/linux/eal_interrupts.c:1191
+#3  0x0000000000610f46 in rte_eal_init (argc=11, argv=0xd16cb0) at ../lib/eal/linux/eal.c:1038
+#4  0x00000000004bde4a in spdk_env_init (opts=0x7fffffffdac0) at init.c:608
+#5  0x000000000055ad41 in app_setup_env (opts=0x7fffffffdb90) at app.c:372
+#6  0x000000000055bffc in spdk_app_start (opts_user=0x7fffffffde50, start_fn=0x407c15 <nvmf_tgt_started>, arg1=0x0) at app.c:743
+#7  0x0000000000407d1d in main (argc=5, argv=0x7fffffffe018) at nvmf_main.c:47
+
+telemetry_v2_init
+
+...
+rte_eal_intr_init
+  rte_ctrl_thread_create(&intr_thread, "eal-intr-thread", NULL eal_intr_thread_main
+    pthread_create(thread, attr, ctrl_thread_start, (void *)params) -> eal_intr_thread_main
+    for (;;)
+      int pfd = epoll_create(1)
+      epoll_ctl
+      AILQ_FOREACH(src, &intr_sources, next) -> 中断源列表
+      eal_intr_handle_interrupts
+        epoll_wait
+        eal_intr_process_interrupts
+          active_cb.cb_fn(active_cb.cb_arg) -> 执行中断源回调
+
+
+rte_dev_event_monitor_start
+  rte_intr_callback_register(intr_handle, dev_uev_handler, NULL)
+
+
+
+
+
+TAILQ_INSERT_TAIL(&intr_sources, src, next) 注册中断源
