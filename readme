@@ -69,7 +69,7 @@ examples/nvme/hello_world/hello_world.c -> main
 spdk_env_opts_init(&opts)
 main
   parse_args
-  spdk_env_opts_init
+  spdk_env_opts_init -> pts->reactor_mask = optarg -> -m 0xFFFFFFFF
   spdk_env_init
     build_eal_cmdline
     rte_eal_init
@@ -1773,8 +1773,25 @@ nvme_transport_qpair_submit_request
 
 
 
-rte_eal_init
-  RTE_COMPILE_TIME_CPUFLAGS -> cpu功能表 -> const struct feature_entry rte_cpu_feature_table[]
+rte_eal_init, 在启动DPDK进程时会传入启动参数，这些参数会分成两部分，一部分是DPDK的eal配置参数，如占用的CPU处理核的列表，分配的大页内存大小，网卡的黑白名单等；另外一部分是进程自定义参数，由开发者自行定义参数列表和含义。参数列表中eal配置参数放在前面，进程自定义参数在后面，中间通过“–”进行分割, https://pxiaoer.blog/2022/04/11/04-dpu%E7%BD%91%E7%BB%9C%E5%BC%80%E5%8F%91sdk-dpdk%E4%B8%89/, https://zhuanlan.zhihu.com/p/610197943, dpu: https://pxiaoer.blog/category/machinelearning/dpu/, 
+  rte_cpu_is_supported -> RTE_COMPILE_TIME_CPUFLAGS -> cpu功能表 -> const struct feature_entry rte_cpu_feature_table[]
+  if (!__atomic_compare_exchange_n(&run_once, &has_run, 1, 0, -> , bool __atomic_compare_exchange_n(type *ptr, type *expected, type desired, bool weak, int success_memorder, int failure_memorder), 此函数的意义类似于三目表达式, 比较ptr、expected指向内容，若相同则将desired中的值写到ptr, 否则将ptr中的值写入expected, 返回ptr的值
+  eal_reset_internal_config(internal_conf)
+  eal_log_level_parse(argc, argv) -> 尽早设置日志级别
+  eal_save_args(argc, argv) -> 将DPDK进程的启动参数保留下来, 在启动DPDK进程时会传入启动参数，这些参数会分成两部分，一部分是DPDK的eal配置参数，如占用的CPU处理核的列表，分配的大页内存大小，网卡的黑白名单等；另外一部分是进程自定义参数，由开发者自行定义参数列表和含义。参数列表中eal配置参数放在前面，进程自定义参数在后面，中间通过“–”进行分割,分配两段内存空间并交给两个全局的变量eal_args和eal_app_args，后将两部分参数分别存放在这两段内存空间当中
+  rte_eal_cpu_init -> CPU处理核信息初始化, lscpu, 该例子的主机中，有一个socket。socket可以对应主板上的一个CPU插槽，就是一块CPU芯片。对于一般的PC机来说，只有一个socket，大型服务器一般有多个socket。一个socket中一般会有多个core，即一个独立的处理单元，在单线程模式下，一个独立的处理单元包含一套标准的寄存器和L1级缓存，同时刻只能运行一个线程；而多线程模式下，一套处理单元有两套寄存器，同时刻可以运行两个线程，这两个线程共享L1级缓存。上例中所显示的主机的CPU有8个处理单元，因为开启了多线程，每个处理单元线程数是2，这样逻辑上讲一共有16个线程(或CPU), 而DPDK的处理核lcore则对应的是线程(或CPU)的编号
+  eal_parse_args -> DPDK参数解析
+  eal_plugins_init -> 如果是Windows系统，是不支持插件动态载入的，eal_plugins_init()的内容为空。如果是Linux系统时，如果能通过执行系统调用dlopen打开动态链接库librte_eal.so.XX，则调用eal_plugin_add将默认动态库的目录default_solib_dir添加到全局变量solib_list当中(此外还可以通过DPDK的启动参数-d，将自定义目录添加到solib_list中), 由于在初始化阶段加入solib_list中的可能是动态库本身也可能是动态库所在的目录，eal_plugins_init()会在遍历solib_list中将目录中的*.so文件全部遍历之后加入solib_list中；如果已经是*.so本身，则设置solib的lib_handle
+  eal_trace_init -> 初始化跟踪功能, 调用eal_trace_init()初始化跟踪功能，该功能是对一些事件和变量进行跟踪，用于多线程同步和时间度量等。该功能比较复杂，后续分析过程中会详细介绍，此处先略过
+  eal_option_device_parse -> 解析设备, 前面提到DPDK的参数时，-a和-b参数分别指定网卡设备的白黑名单，这些信息是存放在devopt_list这个全局变量当中的，eal_option_device_parse()会遍历其中的每个设备，并转换成新的数据结构存放在devargs_list当中
+  rte_config_init -> 初始化配置, rte_config_init()中，会根据process_type进行不同的初始化任务。process_type是由eal的启动参数指定的，目前支持两种模式：primary和secondary。process_type在解析参数时存放在internal_config中，然后此处赋值到rte_config中
+  rte_eal_intr_init -> 中断初始化
+  rte_mp_channel_init -> 初始化进程间通信文件
+  eal_mp_dev_hotplug_init -> 设备热插拔初始化
+  rte_bus_scan -> scan()方法的主要作用是用来遍历所有的设备，并将设备与注册在该总线上的驱动进行匹配，当匹配成功时，建立驱动和设备之间的对应关系。DPDK只提供了接口要求各总线实现该接口，具体如何实现则由各总线设备自行定义
+  rte_eal_using_phys_addrs -> 检查是否允许直接物理地址访问
+  rte_eal_iova_mode
+  ...
   RTE_LCORE_FOREACH_WORKER(i) 
   eal_worker_thread_create: https://blog.csdn.net/xxt99/article/details/125760084
     pthread_create((pthread_t *)&lcore_config[lcore_id].thread_id.opaque_id eal_worker_thread_loop -> eal_thread_loop, dpdk多线程: https://blog.csdn.net/xxt99/article/details/125760084
@@ -2055,3 +2072,68 @@ rte_dev_event_monitor_start
 
 
 TAILQ_INSERT_TAIL(&intr_sources, src, next) 注册中断源
+
+默认配置:
+(gdb) p internal_config
+$8 = {
+  memory = 0, 
+  force_nchannel = 0, 
+  force_nrank = 0, 
+  no_hugetlbfs = 0, 
+  hugepage_file = {
+    unlink_before_mapping = false, 
+    unlink_existing = true
+  }, 
+  no_pci = 0, 
+  no_hpet = 1, 
+  vmware_tsc_map = 0, 
+  no_shconf = 0, 
+  in_memory = 0, 
+  create_uio_dev = 0, 
+  process_type = RTE_PROC_PRIMARY, 
+  force_sockets = 0, 
+  socket_mem = {0 <repeats 32 times>}, 
+  force_socket_limits = 0, 
+  socket_limit = {0 <repeats 32 times>}, 
+---Type <return> to continue, or q <return> to quit---
+  base_virtaddr = 0, 
+  legacy_mem = 0, 
+  match_allocations = 0, 
+  single_file_segments = 0, 
+  syslog_facility = 24, 
+  vfio_intr_mode = RTE_INTR_MODE_NONE, 
+  vfio_vf_token = '\000' <repeats 15 times>, 
+  hugefile_prefix = 0x0, 
+  hugepage_dir = 0x0, 
+  user_mbuf_pool_ops_name = 0x0, 
+  num_hugepage_sizes = 0, 
+  hugepage_info = {{
+      hugepage_sz = 0, 
+      hugedir = '\000' <repeats 4095 times>, 
+      num_pages = {0 <repeats 32 times>}, 
+      lock_descriptor = -1
+    }, {
+      hugepage_sz = 0, 
+      hugedir = '\000' <repeats 4095 times>, 
+      num_pages = {0 <repeats 32 times>}, 
+---Type <return> to continue, or q <return> to quit---
+      lock_descriptor = -1
+    }, {
+      hugepage_sz = 0, 
+      hugedir = '\000' <repeats 4095 times>, 
+      num_pages = {0 <repeats 32 times>}, 
+      lock_descriptor = -1
+    }}, 
+  iova_mode = RTE_IOVA_DC, 
+  ctrl_cpuset = {
+    __bits = {0 <repeats 16 times>}
+  }, 
+  init_complete = 0, 
+  no_telemetry = 0, 
+  max_simd_bitwidth = {
+    forced = false, 
+    bitwidth = 256
+  }, 
+  huge_worker_stack_size = 0
+}
+
