@@ -1777,6 +1777,11 @@ rte_eal_init
   RTE_COMPILE_TIME_CPUFLAGS -> cpu功能表 -> const struct feature_entry rte_cpu_feature_table[]
   RTE_LCORE_FOREACH_WORKER(i) 
   eal_worker_thread_create: https://blog.csdn.net/xxt99/article/details/125760084
+    pthread_create((pthread_t *)&lcore_config[lcore_id].thread_id.opaque_id eal_worker_thread_loop -> eal_thread_loop, dpdk多线程: https://blog.csdn.net/xxt99/article/details/125760084
+      ret = f(fct_arg) -> 执行回调, 函数f为空的话就让出cpu，直到f不为空为止
+  rte_thread_set_affinity_by_id -> 设置亲和性
+  rte_eal_mp_remote_launch(sync_func, NULL, SKIP_MAIN) -> 在所有 lcore 上启动函数。 检查每个 WORKER lcore 是否处于 WAIT 状态，然后为每个 lcore 调用 rte_eal_remote_launch()
+  ...
   reactor 线程模型: https://mp.weixin.qq.com/s?__biz=MzI3NDA4ODY4MA==&mid=2653336301&idx=1&sn=893bceb88d7e775863ebc006e83f5532&chksm=f0cb456ac7bccc7cb720366f69941164e4e80cd5ceaef33bcbe16e7c761046aadc6e7137e4d7&scene=21#wechat_redirect
 
 
