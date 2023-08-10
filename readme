@@ -7,7 +7,7 @@ spdk api文档: https://spdk.io/doc/jsonrpc.html
 log日志, SPDK Trace Log用法简介: https://zhuanlan.zhihu.com/p/556631633
 提交io到nvme设备: https://mp.weixin.qq.com/s/HnrBHknlKtGpLprCmJQxIw
 
-
+submodul_and_spdk_obj: https://portal.qiniu.com/kodo/bucket/resource-v2?bucketName=sxb-obj
 
 常用命令:
 查看线程状态: ./scripts/rpc.py -s /var/tmp/spdk_xb.sock thread_get_stats
@@ -2137,3 +2137,13 @@ $8 = {
   huge_worker_stack_size = 0
 }
 
+
+
+
+daos_bdev:
+_bdev_daos_submit_request
+  case SPDK_BDEV_IO_TYPE_WRITE
+    bdev_daos_writev
+      daos_event_init
+      d_iov_set
+      dfs_write
