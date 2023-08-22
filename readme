@@ -2147,3 +2147,27 @@ _bdev_daos_submit_request
       daos_event_init
       d_iov_set
       dfs_write
+
+
+
+daos iopath:
+---------------------------- DAOS ----------------------------
+vos_blob_format_cb
+  bio_write_blob_hdr
+    bio_write
+      bio_rw
+        bio_rwv
+          bio_iod_post 提交io描述
+            dma_rw
+              nvme_rw
+---------------------------- SPDK ----------------------------
+                spdk_blob_io_write rw_completion
+                  blob_request_submit_op
+                    blob_request_submit_op_single
+                      bs_batch_write_dev
+                        blob_bdev->bs_dev.write
+                        bdev_blob_write
+                          spdk_bdev_write_blocks -> bdev_io_submit
+---------------------------- SPDK ----------------------------                          
+
+
