@@ -1,0 +1,46 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "vhost_target",
+      "type": "cppdbg",
+      "request": "launch",
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "cwd": "${workspaceFolder}/build/bin",
+      "program": "${workspaceFolder}/build/bin/vhost",
+      "args": ["-S", "/var/tmp", "-m", "0x3"],
+      "environment": [
+        // {"name": "LD_LIBRARY_PATH", "value": "/snap/core22/1122/usr/lib/x86_64-linux-gnu"},
+      ],
+      "MIMode": "gdb",
+      "miDebuggerPath": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    },
+    {
+      "name": "C/C++ Runner: Debug Session",
+      "type": "cppdbg",
+      "request": "launch",
+      "args": [],
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "cwd": "/root/project/stor/spdk/xb/spdk",
+      "program": "/root/project/stor/spdk/xb/spdk/build/Debug/outDebug",
+      "MIMode": "gdb",
+      "miDebuggerPath": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    }
+  ]
+}

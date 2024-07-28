@@ -128,88 +128,88 @@ app more example
 
 probe流程详解:
 struct spdk_nvme_probe_ctx {
-	struct spdk_nvme_transport_id		trid;
-	void					*cb_ctx;
-	spdk_nvme_probe_cb			probe_cb;
-	spdk_nvme_attach_cb			attach_cb;
-	spdk_nvme_remove_cb			remove_cb;
-	TAILQ_HEAD(, spdk_nvme_ctrlr)		init_ctrlrs;
+  struct spdk_nvme_transport_id		trid;
+  void					*cb_ctx;
+  spdk_nvme_probe_cb			probe_cb;
+  spdk_nvme_attach_cb			attach_cb;
+  spdk_nvme_remove_cb			remove_cb;
+  TAILQ_HEAD(, spdk_nvme_ctrlr)		init_ctrlrs;
 };
 
 rc = spdk_nvme_probe(NULL, NULL, probe_cb, attach_cb, NULL);  		20.02版本的调用	if (spdk_nvme_probe(NULL, probe_ctx, probe_cb, attach_cb, remove_cb)) 		20.10中已删除	probe_cb	
-	spdk_nvme_trid_populate_transport 初始化trid  设置pcie类型SPDK_NVME_TRANSPORT_NAME_PCIE
-	probe_ctx = spdk_nvme_probe_async(trid, cb_ctx, probe_cb, attach_cb, remove_cb);  开始进行probe_ctx的初始化
-				nvme_driver_init  初始化g_spdk_nvme_driver的全局变量，其中包括锁，driver队列，热插拔fd的connect获取，uuid的初始化  只允许一个进程去做，加锁，避免引起混乱
-				probe_ctx = calloc(1, sizeof(*probe_ctx));  创建上下文 类型为：struct spdk_nvme_probe_ctx 
-				nvme_probe_ctx_init(probe_ctx, trid, cb_ctx, probe_cb, attach_cb, remove_cb);  变量的赋值，初始化probe_ctx->init_ctrlrs的队列，用来存放需要初始化的nvme 控制器
-				rc = nvme_probe_internal(probe_ctx, false); 
-					nvme_transport_ctrlr_scan(probe_ctx, direct_connect)； 
-					nvme_pcie_ctrlr_scan
-						enum_ctx.probe_ctx = probe_ctx;
-						bool enum_ctx.has_pci_addr ？ 判断probe_ctx->trid.traddr中内容是否为空， 不为空，说明有特殊指定pci，则调用spdk_pci_device_attach，为空说明没有特殊指定pci  则调用spdk_pci_enumerate
-						spdk_pci_enumerate(spdk_pci_nvme_get_driver(), pcie_nvme_enum_cb, &enum_ctx); 本example传入的参数为NULL，则直接执行enumerate流程
-							cleanup_pci_devices  清除pci设备，状态dev->internal.removed为true的，从g_pci_devices中移除，在热插拔链表g_pci_hotplugged_devices中遍历，移除该队列并插入到g_pci_devices的尾部
-							TAILQ_FOREACH(dev, &g_pci_devices, internal.tailq) {  开始遍历g_pci_devices，过程中需要加g_pci_mutex锁，防止列表信息变化。 实际上此时g_pci_devices为空，直接退出
-							}
-							scan_pci_bus					重新把所有的bus上的设备扫一遍，主要是pci bus
-							driver->cb_fn = enum_cb;
-							driver->cb_arg = enum_ctx;      把pcie_nvme_enum_cb和arg传入作为nvme driver的回调
-							rte_bus_probe					调用pci_probe 把pci设备进行绑定
-								----------------------------------------------------------------------------------------------------------一个个匹配，所以以下流程对于满足条件的pci设备会走多次
-								rte_pci_probe_one_driver	device和驱动匹配上，如果不是匹配的，则退出。
-								rte_pci_map_device			进行pci地址映射，以在用户空间访问
-								ret = dr->probe(dr, dev);	调用pci_device_init函数，作为driver的probe。  pci_env_init函数中进行的probe函数的指定
-									pci_device_init			
-										rc = driver->cb_fn(driver->cb_arg, dev);  主要进行addr等基础信息的赋值传递，同时执行一开始传入的回调函数
-										pcie_nvme_enum_cb						
-											nvme_get_ctrlr_by_trid_unsafe		去g_nvme_attached_ctrlrs和g_spdk_nvme_driver->shared_attached_ctrlrs两个链表中搜索ctrlr，用来进行判断是否已创建
-											nvme_ctrlr_probe(&trid, enum_ctx->probe_ctx, pci_dev);  有一个条件，用户传入过pci，则只创建传入的pci的ctrlr，否则全部创建
-												spdk_nvme_ctrlr_get_default_ctrlr_opts				获取默认的ctrlr的opts参数
-												probe_ctx->probe_cb(probe_ctx->cb_ctx, trid, &opts) 调用传入的probe_cb，打印了"Attaching to %s\n", trid->traddr
-												ctrlr = nvme_transport_ctrlr_construct(trid, &opts, devhandle);  开始创建ctrlr
-													spdk_pci_device_claim(pci_dev)										先claim pci设备，保证唯一性
-													pctrlr = spdk_zmalloc(sizeof(struct nvme_pcie_ctrlr), 64, NULL,		创建nvme的ctrlr
-																			SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_SHARE);
-													rc = nvme_ctrlr_construct(&pctrlr->ctrlr);			初始化spdk_nvme_ctrlr的所有信息，初始化ctrlr->ctrlr_lock、active_procs等资源
-													rc = nvme_pcie_ctrlr_allocate_bars(pctrlr);
-															rc = spdk_pci_device_map_bar(pctrlr->devhandle, 0, &addr, &phys_addr, &size);  把之前映射好的地址读取过来，保存在参数中
-															pctrlr->regs = (volatile struct spdk_nvme_registers *)addr;						关联pctrlr的regs和实际的pci的addr
-															pctrlr->regs_size = size;														赋值寄存器的size
-															nvme_pcie_ctrlr_map_cmb(pctrlr);												把addr、phys_addr、size、offset进行传递
-													
-													spdk_pci_device_cfg_read16(pci_dev, &cmd_reg, 4);				读取中断管理的fd，写入404，使中断失效
-													cmd_reg |= 0x404;
-													spdk_pci_device_cfg_write16(pci_dev, cmd_reg, 4);
-													
-													nvme_ctrlr_get_cap(&pctrlr->ctrlr, &cap)
-													nvme_ctrlr_get_vs(&pctrlr->ctrlr, &vs)
-													nvme_ctrlr_init_cap(&pctrlr->ctrlr, &cap, &vs);					通过寄存器读取的方式获取cap和vs信息，初始化cap。主要信息是page_size、io_queue_size、io_queue_requests
-													rc = nvme_pcie_ctrlr_construct_admin_qpair(&pctrlr->ctrlr, pctrlr->ctrlr.opts.admin_queue_size);         创建管理队列qpair
-															pqpair = spdk_zmalloc(sizeof(*pqpair), 64, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_SHARE);	使用的是大页内存
-															rc = nvme_qpair_init(ctrlr->adminq, 0, /* qpair ID */ ctrlr, SPDK_NVME_QPRIO_URGENT, num_entries);  初始化qpair的下属队列等，0号qpair就是管理队列
-															nvme_pcie_qpair_construct(ctrlr->adminq, NULL);				创建其他qpair所需的信息max_completions_cap、tracker等，tracker是一次性分配该qpair的所有数量，因为内存对齐和边界的要求。
-																														然后将tracker装入到qpair中的tracker数组指针中进行保存，并插入free_tr中进行记录
-															nvme_pcie_qpair_reset(qpair);								qpair中的队列信息清零
-													rc = nvme_ctrlr_add_process(&pctrlr->ctrlr, pci_dev);				创建进程信息，用于多进程下的ctrlr管理
-													
-													ctrlr->remove_cb = probe_ctx->remove_cb;							remove_cb的传入
-													ctrlr->cb_ctx = probe_ctx->cb_ctx;
-													nvme_qpair_set_state(ctrlr->adminq, NVME_QPAIR_ENABLED);			设置qpair的状态
-													TAILQ_INSERT_TAIL(&probe_ctx->init_ctrlrs, ctrlr, tailq);			插入控制器到probe_ctx->init_ctrlrs中，用于后续的状态初始化
-										TAILQ_INSERT_TAIL(&g_pci_hotplugged_devices, dev, internal.tailq);				插入到热插拔的队列中
-								--------------------------------------------------------------------------------------------------------------------------------
-							cleanup_pci_devices();		把新probe的控制器给放入g_pci_devices中管理（此前为空）
-						
-	nvme_init_controllers(probe_ctx);		
-		rc = spdk_nvme_probe_poll_async(probe_ctx);
-			------------------------------------------------------------TAILQ_FOREACH_SAFE(ctrlr, &probe_ctx->init_ctrlrs, tailq, ctrlr_tmp) {      对每一个在init_ctrlrs队列中的ctrlr
-			nvme_ctrlr_poll_internal(ctrlr, probe_ctx);		对每个在probe_ctx->init_ctrlrs的ctrlr执行，直到该队列为空，设置g_spdk_nvme_driver->initialized = true;返回0
-				rc = nvme_ctrlr_process_init(ctrlr);		配置ctrlr的寄存器状态 cc.en，identify 、 construct namespace、 identify namespace 等，直到状态为NVME_CTRLR_STATE_READY才算成功
-				TAILQ_REMOVE(&probe_ctx->init_ctrlrs, ctrlr, tailq);								移除初始化队列
-				TAILQ_INSERT_TAIL(&g_spdk_nvme_driver->shared_attached_ctrlrs, ctrlr, tailq);		插入到g_spdk_nvme_driver->shared_attached_ctrlrs队列
-				nvme_ctrlr_proc_get_ref(ctrlr);														移除inactive的proc，给当前的proc进行active_proc->ref++
-				probe_ctx->attach_cb(probe_ctx->cb_ctx, &ctrlr->trid, ctrlr, &ctrlr->opts);			如果attach_cb有效，则进行attach_cb流程
-			------------------------------------------------------------	循环执行
+  spdk_nvme_trid_populate_transport 初始化trid  设置pcie类型SPDK_NVME_TRANSPORT_NAME_PCIE
+  probe_ctx = spdk_nvme_probe_async(trid, cb_ctx, probe_cb, attach_cb, remove_cb);  开始进行probe_ctx的初始化
+        nvme_driver_init  初始化g_spdk_nvme_driver的全局变量，其中包括锁，driver队列，热插拔fd的connect获取，uuid的初始化  只允许一个进程去做，加锁，避免引起混乱
+        probe_ctx = calloc(1, sizeof(*probe_ctx));  创建上下文 类型为：struct spdk_nvme_probe_ctx 
+        nvme_probe_ctx_init(probe_ctx, trid, cb_ctx, probe_cb, attach_cb, remove_cb);  变量的赋值，初始化probe_ctx->init_ctrlrs的队列，用来存放需要初始化的nvme 控制器
+        rc = nvme_probe_internal(probe_ctx, false); 
+          nvme_transport_ctrlr_scan(probe_ctx, direct_connect)； 
+          nvme_pcie_ctrlr_scan
+            enum_ctx.probe_ctx = probe_ctx;
+            bool enum_ctx.has_pci_addr ？ 判断probe_ctx->trid.traddr中内容是否为空， 不为空，说明有特殊指定pci，则调用spdk_pci_device_attach，为空说明没有特殊指定pci  则调用spdk_pci_enumerate
+            spdk_pci_enumerate(spdk_pci_nvme_get_driver(), pcie_nvme_enum_cb, &enum_ctx); 本example传入的参数为NULL，则直接执行enumerate流程
+              cleanup_pci_devices  清除pci设备，状态dev->internal.removed为true的，从g_pci_devices中移除，在热插拔链表g_pci_hotplugged_devices中遍历，移除该队列并插入到g_pci_devices的尾部
+              TAILQ_FOREACH(dev, &g_pci_devices, internal.tailq) {  开始遍历g_pci_devices，过程中需要加g_pci_mutex锁，防止列表信息变化。 实际上此时g_pci_devices为空，直接退出
+              }
+              scan_pci_bus					重新把所有的bus上的设备扫一遍，主要是pci bus
+              driver->cb_fn = enum_cb;
+              driver->cb_arg = enum_ctx;      把pcie_nvme_enum_cb和arg传入作为nvme driver的回调
+              rte_bus_probe					调用pci_probe 把pci设备进行绑定
+                ----------------------------------------------------------------------------------------------------------一个个匹配，所以以下流程对于满足条件的pci设备会走多次
+                rte_pci_probe_one_driver	device和驱动匹配上，如果不是匹配的，则退出。
+                rte_pci_map_device			进行pci地址映射，以在用户空间访问
+                ret = dr->probe(dr, dev);	调用pci_device_init函数，作为driver的probe。  pci_env_init函数中进行的probe函数的指定
+                  pci_device_init			
+                    rc = driver->cb_fn(driver->cb_arg, dev);  主要进行addr等基础信息的赋值传递，同时执行一开始传入的回调函数
+                    pcie_nvme_enum_cb						
+                      nvme_get_ctrlr_by_trid_unsafe		去g_nvme_attached_ctrlrs和g_spdk_nvme_driver->shared_attached_ctrlrs两个链表中搜索ctrlr，用来进行判断是否已创建
+                      nvme_ctrlr_probe(&trid, enum_ctx->probe_ctx, pci_dev);  有一个条件，用户传入过pci，则只创建传入的pci的ctrlr，否则全部创建
+                        spdk_nvme_ctrlr_get_default_ctrlr_opts				获取默认的ctrlr的opts参数
+                        probe_ctx->probe_cb(probe_ctx->cb_ctx, trid, &opts) 调用传入的probe_cb，打印了"Attaching to %s\n", trid->traddr
+                        ctrlr = nvme_transport_ctrlr_construct(trid, &opts, devhandle);  开始创建ctrlr
+                          spdk_pci_device_claim(pci_dev)										先claim pci设备，保证唯一性
+                          pctrlr = spdk_zmalloc(sizeof(struct nvme_pcie_ctrlr), 64, NULL,		创建nvme的ctrlr
+                                      SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_SHARE);
+                          rc = nvme_ctrlr_construct(&pctrlr->ctrlr);			初始化spdk_nvme_ctrlr的所有信息，初始化ctrlr->ctrlr_lock、active_procs等资源
+                          rc = nvme_pcie_ctrlr_allocate_bars(pctrlr);
+                              rc = spdk_pci_device_map_bar(pctrlr->devhandle, 0, &addr, &phys_addr, &size);  把之前映射好的地址读取过来，保存在参数中
+                              pctrlr->regs = (volatile struct spdk_nvme_registers *)addr;						关联pctrlr的regs和实际的pci的addr
+                              pctrlr->regs_size = size;														赋值寄存器的size
+                              nvme_pcie_ctrlr_map_cmb(pctrlr);												把addr、phys_addr、size、offset进行传递
+                          
+                          spdk_pci_device_cfg_read16(pci_dev, &cmd_reg, 4);				读取中断管理的fd，写入404，使中断失效
+                          cmd_reg |= 0x404;
+                          spdk_pci_device_cfg_write16(pci_dev, cmd_reg, 4);
+                          
+                          nvme_ctrlr_get_cap(&pctrlr->ctrlr, &cap)
+                          nvme_ctrlr_get_vs(&pctrlr->ctrlr, &vs)
+                          nvme_ctrlr_init_cap(&pctrlr->ctrlr, &cap, &vs);					通过寄存器读取的方式获取cap和vs信息，初始化cap。主要信息是page_size、io_queue_size、io_queue_requests
+                          rc = nvme_pcie_ctrlr_construct_admin_qpair(&pctrlr->ctrlr, pctrlr->ctrlr.opts.admin_queue_size);         创建管理队列qpair
+                              pqpair = spdk_zmalloc(sizeof(*pqpair), 64, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_SHARE);	使用的是大页内存
+                              rc = nvme_qpair_init(ctrlr->adminq, 0, /* qpair ID */ ctrlr, SPDK_NVME_QPRIO_URGENT, num_entries);  初始化qpair的下属队列等，0号qpair就是管理队列
+                              nvme_pcie_qpair_construct(ctrlr->adminq, NULL);				创建其他qpair所需的信息max_completions_cap、tracker等，tracker是一次性分配该qpair的所有数量，因为内存对齐和边界的要求。
+                                                            然后将tracker装入到qpair中的tracker数组指针中进行保存，并插入free_tr中进行记录
+                              nvme_pcie_qpair_reset(qpair);								qpair中的队列信息清零
+                          rc = nvme_ctrlr_add_process(&pctrlr->ctrlr, pci_dev);				创建进程信息，用于多进程下的ctrlr管理
+                          
+                          ctrlr->remove_cb = probe_ctx->remove_cb;							remove_cb的传入
+                          ctrlr->cb_ctx = probe_ctx->cb_ctx;
+                          nvme_qpair_set_state(ctrlr->adminq, NVME_QPAIR_ENABLED);			设置qpair的状态
+                          TAILQ_INSERT_TAIL(&probe_ctx->init_ctrlrs, ctrlr, tailq);			插入控制器到probe_ctx->init_ctrlrs中，用于后续的状态初始化
+                    TAILQ_INSERT_TAIL(&g_pci_hotplugged_devices, dev, internal.tailq);				插入到热插拔的队列中
+                --------------------------------------------------------------------------------------------------------------------------------
+              cleanup_pci_devices();		把新probe的控制器给放入g_pci_devices中管理（此前为空）
+            
+  nvme_init_controllers(probe_ctx);		
+    rc = spdk_nvme_probe_poll_async(probe_ctx);
+      ------------------------------------------------------------TAILQ_FOREACH_SAFE(ctrlr, &probe_ctx->init_ctrlrs, tailq, ctrlr_tmp) {      对每一个在init_ctrlrs队列中的ctrlr
+      nvme_ctrlr_poll_internal(ctrlr, probe_ctx);		对每个在probe_ctx->init_ctrlrs的ctrlr执行，直到该队列为空，设置g_spdk_nvme_driver->initialized = true;返回0
+        rc = nvme_ctrlr_process_init(ctrlr);		配置ctrlr的寄存器状态 cc.en，identify 、 construct namespace、 identify namespace 等，直到状态为NVME_CTRLR_STATE_READY才算成功
+        TAILQ_REMOVE(&probe_ctx->init_ctrlrs, ctrlr, tailq);								移除初始化队列
+        TAILQ_INSERT_TAIL(&g_spdk_nvme_driver->shared_attached_ctrlrs, ctrlr, tailq);		插入到g_spdk_nvme_driver->shared_attached_ctrlrs队列
+        nvme_ctrlr_proc_get_ref(ctrlr);														移除inactive的proc，给当前的proc进行active_proc->ref++
+        probe_ctx->attach_cb(probe_ctx->cb_ctx, &ctrlr->trid, ctrlr, &ctrlr->opts);			如果attach_cb有效，则进行attach_cb流程
+      ------------------------------------------------------------	循环执行
 ------------------------------------------------------------------------------------------------  到此为止example的spdk_nvme_probe流程就结束了 
 
 probe代码详解, 参考文档: https://www.cnblogs.com/vlhn/p/7727016.html
@@ -228,7 +228,6 @@ https://github.com/ssbandjl/spdk/blob/xb/doc/nvme_spec.md
 
 
 
-bdev_malloc_create
 
 examples/blob/hello_world/hello_blob.c
 
@@ -510,88 +509,88 @@ app more example
 
 probe流程详解:
 struct spdk_nvme_probe_ctx {
-	struct spdk_nvme_transport_id		trid;
-	void					*cb_ctx;
-	spdk_nvme_probe_cb			probe_cb;
-	spdk_nvme_attach_cb			attach_cb;
-	spdk_nvme_remove_cb			remove_cb;
-	TAILQ_HEAD(, spdk_nvme_ctrlr)		init_ctrlrs;
+  struct spdk_nvme_transport_id		trid;
+  void					*cb_ctx;
+  spdk_nvme_probe_cb			probe_cb;
+  spdk_nvme_attach_cb			attach_cb;
+  spdk_nvme_remove_cb			remove_cb;
+  TAILQ_HEAD(, spdk_nvme_ctrlr)		init_ctrlrs;
 };
 
 rc = spdk_nvme_probe(NULL, NULL, probe_cb, attach_cb, NULL);  		20.02版本的调用	if (spdk_nvme_probe(NULL, probe_ctx, probe_cb, attach_cb, remove_cb)) 		20.10中已删除	probe_cb	
-	spdk_nvme_trid_populate_transport 初始化trid  设置pcie类型SPDK_NVME_TRANSPORT_NAME_PCIE
-	probe_ctx = spdk_nvme_probe_async(trid, cb_ctx, probe_cb, attach_cb, remove_cb);  开始进行probe_ctx的初始化
-				nvme_driver_init  初始化g_spdk_nvme_driver的全局变量，其中包括锁，driver队列，热插拔fd的connect获取，uuid的初始化  只允许一个进程去做，加锁，避免引起混乱
-				probe_ctx = calloc(1, sizeof(*probe_ctx));  创建上下文 类型为：struct spdk_nvme_probe_ctx 
-				nvme_probe_ctx_init(probe_ctx, trid, cb_ctx, probe_cb, attach_cb, remove_cb);  变量的赋值，初始化probe_ctx->init_ctrlrs的队列，用来存放需要初始化的nvme 控制器
-				rc = nvme_probe_internal(probe_ctx, false); 
-					nvme_transport_ctrlr_scan(probe_ctx, direct_connect)； 
-					nvme_pcie_ctrlr_scan
-						enum_ctx.probe_ctx = probe_ctx;
-						bool enum_ctx.has_pci_addr ？ 判断probe_ctx->trid.traddr中内容是否为空， 不为空，说明有特殊指定pci，则调用spdk_pci_device_attach，为空说明没有特殊指定pci  则调用spdk_pci_enumerate
-						spdk_pci_enumerate(spdk_pci_nvme_get_driver(), pcie_nvme_enum_cb, &enum_ctx); 本example传入的参数为NULL，则直接执行enumerate流程
-							cleanup_pci_devices  清除pci设备，状态dev->internal.removed为true的，从g_pci_devices中移除，在热插拔链表g_pci_hotplugged_devices中遍历，移除该队列并插入到g_pci_devices的尾部
-							TAILQ_FOREACH(dev, &g_pci_devices, internal.tailq) {  开始遍历g_pci_devices，过程中需要加g_pci_mutex锁，防止列表信息变化。 实际上此时g_pci_devices为空，直接退出
-							}
-							scan_pci_bus					重新把所有的bus上的设备扫一遍，主要是pci bus
-							driver->cb_fn = enum_cb;
-							driver->cb_arg = enum_ctx;      把pcie_nvme_enum_cb和arg传入作为nvme driver的回调
-							rte_bus_probe					调用pci_probe 把pci设备进行绑定
-								----------------------------------------------------------------------------------------------------------一个个匹配，所以以下流程对于满足条件的pci设备会走多次
-								rte_pci_probe_one_driver	device和驱动匹配上，如果不是匹配的，则退出。
-								rte_pci_map_device			进行pci地址映射，以在用户空间访问
-								ret = dr->probe(dr, dev);	调用pci_device_init函数，作为driver的probe。  pci_env_init函数中进行的probe函数的指定
-									pci_device_init			
-										rc = driver->cb_fn(driver->cb_arg, dev);  主要进行addr等基础信息的赋值传递，同时执行一开始传入的回调函数
-										pcie_nvme_enum_cb						
-											nvme_get_ctrlr_by_trid_unsafe		去g_nvme_attached_ctrlrs和g_spdk_nvme_driver->shared_attached_ctrlrs两个链表中搜索ctrlr，用来进行判断是否已创建
-											nvme_ctrlr_probe(&trid, enum_ctx->probe_ctx, pci_dev);  有一个条件，用户传入过pci，则只创建传入的pci的ctrlr，否则全部创建
-												spdk_nvme_ctrlr_get_default_ctrlr_opts				获取默认的ctrlr的opts参数
-												probe_ctx->probe_cb(probe_ctx->cb_ctx, trid, &opts) 调用传入的probe_cb，打印了"Attaching to %s\n", trid->traddr
-												ctrlr = nvme_transport_ctrlr_construct(trid, &opts, devhandle);  开始创建ctrlr
-													spdk_pci_device_claim(pci_dev)										先claim pci设备，保证唯一性
-													pctrlr = spdk_zmalloc(sizeof(struct nvme_pcie_ctrlr), 64, NULL,		创建nvme的ctrlr, 按64B对齐
-																			SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_SHARE);
-													rc = nvme_ctrlr_construct(&pctrlr->ctrlr);			初始化spdk_nvme_ctrlr的所有信息，初始化ctrlr->ctrlr_lock、active_procs等资源
-													rc = nvme_pcie_ctrlr_allocate_bars(pctrlr);
-															rc = spdk_pci_device_map_bar(pctrlr->devhandle, 0, &addr, &phys_addr, &size);  把之前映射好的地址读取过来，保存在参数中
-															pctrlr->regs = (volatile struct spdk_nvme_registers *)addr;						关联pctrlr的regs和实际的pci的addr
-															pctrlr->regs_size = size;														赋值寄存器的size
-															nvme_pcie_ctrlr_map_cmb(pctrlr);												把addr、phys_addr、size、offset进行传递
-													
-													spdk_pci_device_cfg_read16(pci_dev, &cmd_reg, 4);				读取中断管理的fd，写入404，使中断失效
-													cmd_reg |= 0x404;
-													spdk_pci_device_cfg_write16(pci_dev, cmd_reg, 4);
-													
-													nvme_ctrlr_get_cap(&pctrlr->ctrlr, &cap)
-													nvme_ctrlr_get_vs(&pctrlr->ctrlr, &vs)
-													nvme_ctrlr_init_cap(&pctrlr->ctrlr, &cap, &vs);					通过寄存器读取的方式获取cap和vs信息，初始化cap。主要信息是page_size、io_queue_size、io_queue_requests
-													rc = nvme_pcie_ctrlr_construct_admin_qpair(&pctrlr->ctrlr, pctrlr->ctrlr.opts.admin_queue_size);         创建管理队列qpair
-															pqpair = spdk_zmalloc(sizeof(*pqpair), 64, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_SHARE);	使用的是大页内存
-															rc = nvme_qpair_init(ctrlr->adminq, 0, /* qpair ID */ ctrlr, SPDK_NVME_QPRIO_URGENT, num_entries);  初始化qpair的下属队列等，0号qpair就是管理队列
-															nvme_pcie_qpair_construct(ctrlr->adminq, NULL);				创建其他qpair所需的信息max_completions_cap、tracker等，tracker是一次性分配该qpair的所有数量，因为内存对齐和边界的要求。
-																														然后将tracker装入到qpair中的tracker数组指针中进行保存，并插入free_tr中进行记录
-															nvme_pcie_qpair_reset(qpair);								qpair中的队列信息清零
-													rc = nvme_ctrlr_add_process(&pctrlr->ctrlr, pci_dev);				创建进程信息，用于多进程下的ctrlr管理
-													
-													ctrlr->remove_cb = probe_ctx->remove_cb;							remove_cb的传入
-													ctrlr->cb_ctx = probe_ctx->cb_ctx;
-													nvme_qpair_set_state(ctrlr->adminq, NVME_QPAIR_ENABLED);			设置qpair的状态
-													TAILQ_INSERT_TAIL(&probe_ctx->init_ctrlrs, ctrlr, tailq);			插入控制器到probe_ctx->init_ctrlrs中，用于后续的状态初始化
-										TAILQ_INSERT_TAIL(&g_pci_hotplugged_devices, dev, internal.tailq);				插入到热插拔的队列中
-								--------------------------------------------------------------------------------------------------------------------------------
-							cleanup_pci_devices();		把新probe的控制器给放入g_pci_devices中管理（此前为空）
-						
-	nvme_init_controllers(probe_ctx);		
-		rc = spdk_nvme_probe_poll_async(probe_ctx);
-			------------------------------------------------------------TAILQ_FOREACH_SAFE(ctrlr, &probe_ctx->init_ctrlrs, tailq, ctrlr_tmp) {      对每一个在init_ctrlrs队列中的ctrlr
-			nvme_ctrlr_poll_internal(ctrlr, probe_ctx);		对每个在probe_ctx->init_ctrlrs的ctrlr执行，直到该队列为空，设置g_spdk_nvme_driver->initialized = true;返回0
-				rc = nvme_ctrlr_process_init(ctrlr);		配置ctrlr的寄存器状态 cc.en，identify 、 construct namespace、 identify namespace 等，直到状态为NVME_CTRLR_STATE_READY才算成功
-				TAILQ_REMOVE(&probe_ctx->init_ctrlrs, ctrlr, tailq);								移除初始化队列
-				TAILQ_INSERT_TAIL(&g_spdk_nvme_driver->shared_attached_ctrlrs, ctrlr, tailq);		插入到g_spdk_nvme_driver->shared_attached_ctrlrs队列
-				nvme_ctrlr_proc_get_ref(ctrlr);														移除inactive的proc，给当前的proc进行active_proc->ref++
-				probe_ctx->attach_cb(probe_ctx->cb_ctx, &ctrlr->trid, ctrlr, &ctrlr->opts);			如果attach_cb有效，则进行attach_cb流程
-			------------------------------------------------------------	循环执行
+  spdk_nvme_trid_populate_transport 初始化trid  设置pcie类型SPDK_NVME_TRANSPORT_NAME_PCIE
+  probe_ctx = spdk_nvme_probe_async(trid, cb_ctx, probe_cb, attach_cb, remove_cb);  开始进行probe_ctx的初始化
+        nvme_driver_init  初始化g_spdk_nvme_driver的全局变量，其中包括锁，driver队列，热插拔fd的connect获取，uuid的初始化  只允许一个进程去做，加锁，避免引起混乱
+        probe_ctx = calloc(1, sizeof(*probe_ctx));  创建上下文 类型为：struct spdk_nvme_probe_ctx 
+        nvme_probe_ctx_init(probe_ctx, trid, cb_ctx, probe_cb, attach_cb, remove_cb);  变量的赋值，初始化probe_ctx->init_ctrlrs的队列，用来存放需要初始化的nvme 控制器
+        rc = nvme_probe_internal(probe_ctx, false); 
+          nvme_transport_ctrlr_scan(probe_ctx, direct_connect)； 
+          nvme_pcie_ctrlr_scan
+            enum_ctx.probe_ctx = probe_ctx;
+            bool enum_ctx.has_pci_addr ？ 判断probe_ctx->trid.traddr中内容是否为空， 不为空，说明有特殊指定pci，则调用spdk_pci_device_attach，为空说明没有特殊指定pci  则调用spdk_pci_enumerate
+            spdk_pci_enumerate(spdk_pci_nvme_get_driver(), pcie_nvme_enum_cb, &enum_ctx); 本example传入的参数为NULL，则直接执行enumerate流程
+              cleanup_pci_devices  清除pci设备，状态dev->internal.removed为true的，从g_pci_devices中移除，在热插拔链表g_pci_hotplugged_devices中遍历，移除该队列并插入到g_pci_devices的尾部
+              TAILQ_FOREACH(dev, &g_pci_devices, internal.tailq) {  开始遍历g_pci_devices，过程中需要加g_pci_mutex锁，防止列表信息变化。 实际上此时g_pci_devices为空，直接退出
+              }
+              scan_pci_bus					重新把所有的bus上的设备扫一遍，主要是pci bus
+              driver->cb_fn = enum_cb;
+              driver->cb_arg = enum_ctx;      把pcie_nvme_enum_cb和arg传入作为nvme driver的回调
+              rte_bus_probe					调用pci_probe 把pci设备进行绑定
+                ----------------------------------------------------------------------------------------------------------一个个匹配，所以以下流程对于满足条件的pci设备会走多次
+                rte_pci_probe_one_driver	device和驱动匹配上，如果不是匹配的，则退出。
+                rte_pci_map_device			进行pci地址映射，以在用户空间访问
+                ret = dr->probe(dr, dev);	调用pci_device_init函数，作为driver的probe。  pci_env_init函数中进行的probe函数的指定
+                  pci_device_init			
+                    rc = driver->cb_fn(driver->cb_arg, dev);  主要进行addr等基础信息的赋值传递，同时执行一开始传入的回调函数
+                    pcie_nvme_enum_cb						
+                      nvme_get_ctrlr_by_trid_unsafe		去g_nvme_attached_ctrlrs和g_spdk_nvme_driver->shared_attached_ctrlrs两个链表中搜索ctrlr，用来进行判断是否已创建
+                      nvme_ctrlr_probe(&trid, enum_ctx->probe_ctx, pci_dev);  有一个条件，用户传入过pci，则只创建传入的pci的ctrlr，否则全部创建
+                        spdk_nvme_ctrlr_get_default_ctrlr_opts				获取默认的ctrlr的opts参数
+                        probe_ctx->probe_cb(probe_ctx->cb_ctx, trid, &opts) 调用传入的probe_cb，打印了"Attaching to %s\n", trid->traddr
+                        ctrlr = nvme_transport_ctrlr_construct(trid, &opts, devhandle);  开始创建ctrlr
+                          spdk_pci_device_claim(pci_dev)										先claim pci设备，保证唯一性
+                          pctrlr = spdk_zmalloc(sizeof(struct nvme_pcie_ctrlr), 64, NULL,		创建nvme的ctrlr, 按64B对齐
+                                      SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_SHARE);
+                          rc = nvme_ctrlr_construct(&pctrlr->ctrlr);			初始化spdk_nvme_ctrlr的所有信息，初始化ctrlr->ctrlr_lock、active_procs等资源
+                          rc = nvme_pcie_ctrlr_allocate_bars(pctrlr);
+                              rc = spdk_pci_device_map_bar(pctrlr->devhandle, 0, &addr, &phys_addr, &size);  把之前映射好的地址读取过来，保存在参数中
+                              pctrlr->regs = (volatile struct spdk_nvme_registers *)addr;						关联pctrlr的regs和实际的pci的addr
+                              pctrlr->regs_size = size;														赋值寄存器的size
+                              nvme_pcie_ctrlr_map_cmb(pctrlr);												把addr、phys_addr、size、offset进行传递
+                          
+                          spdk_pci_device_cfg_read16(pci_dev, &cmd_reg, 4);				读取中断管理的fd，写入404，使中断失效
+                          cmd_reg |= 0x404;
+                          spdk_pci_device_cfg_write16(pci_dev, cmd_reg, 4);
+                          
+                          nvme_ctrlr_get_cap(&pctrlr->ctrlr, &cap)
+                          nvme_ctrlr_get_vs(&pctrlr->ctrlr, &vs)
+                          nvme_ctrlr_init_cap(&pctrlr->ctrlr, &cap, &vs);					通过寄存器读取的方式获取cap和vs信息，初始化cap。主要信息是page_size、io_queue_size、io_queue_requests
+                          rc = nvme_pcie_ctrlr_construct_admin_qpair(&pctrlr->ctrlr, pctrlr->ctrlr.opts.admin_queue_size);         创建管理队列qpair
+                              pqpair = spdk_zmalloc(sizeof(*pqpair), 64, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_SHARE);	使用的是大页内存
+                              rc = nvme_qpair_init(ctrlr->adminq, 0, /* qpair ID */ ctrlr, SPDK_NVME_QPRIO_URGENT, num_entries);  初始化qpair的下属队列等，0号qpair就是管理队列
+                              nvme_pcie_qpair_construct(ctrlr->adminq, NULL);				创建其他qpair所需的信息max_completions_cap、tracker等，tracker是一次性分配该qpair的所有数量，因为内存对齐和边界的要求。
+                                                            然后将tracker装入到qpair中的tracker数组指针中进行保存，并插入free_tr中进行记录
+                              nvme_pcie_qpair_reset(qpair);								qpair中的队列信息清零
+                          rc = nvme_ctrlr_add_process(&pctrlr->ctrlr, pci_dev);				创建进程信息，用于多进程下的ctrlr管理
+                          
+                          ctrlr->remove_cb = probe_ctx->remove_cb;							remove_cb的传入
+                          ctrlr->cb_ctx = probe_ctx->cb_ctx;
+                          nvme_qpair_set_state(ctrlr->adminq, NVME_QPAIR_ENABLED);			设置qpair的状态
+                          TAILQ_INSERT_TAIL(&probe_ctx->init_ctrlrs, ctrlr, tailq);			插入控制器到probe_ctx->init_ctrlrs中，用于后续的状态初始化
+                    TAILQ_INSERT_TAIL(&g_pci_hotplugged_devices, dev, internal.tailq);				插入到热插拔的队列中
+                --------------------------------------------------------------------------------------------------------------------------------
+              cleanup_pci_devices();		把新probe的控制器给放入g_pci_devices中管理（此前为空）
+            
+  nvme_init_controllers(probe_ctx);		
+    rc = spdk_nvme_probe_poll_async(probe_ctx);
+      ------------------------------------------------------------TAILQ_FOREACH_SAFE(ctrlr, &probe_ctx->init_ctrlrs, tailq, ctrlr_tmp) {      对每一个在init_ctrlrs队列中的ctrlr
+      nvme_ctrlr_poll_internal(ctrlr, probe_ctx);		对每个在probe_ctx->init_ctrlrs的ctrlr执行，直到该队列为空，设置g_spdk_nvme_driver->initialized = true;返回0
+        rc = nvme_ctrlr_process_init(ctrlr);		配置ctrlr的寄存器状态 cc.en，identify 、 construct namespace、 identify namespace 等，直到状态为NVME_CTRLR_STATE_READY才算成功
+        TAILQ_REMOVE(&probe_ctx->init_ctrlrs, ctrlr, tailq);								移除初始化队列
+        TAILQ_INSERT_TAIL(&g_spdk_nvme_driver->shared_attached_ctrlrs, ctrlr, tailq);		插入到g_spdk_nvme_driver->shared_attached_ctrlrs队列
+        nvme_ctrlr_proc_get_ref(ctrlr);														移除inactive的proc，给当前的proc进行active_proc->ref++
+        probe_ctx->attach_cb(probe_ctx->cb_ctx, &ctrlr->trid, ctrlr, &ctrlr->opts);			如果attach_cb有效，则进行attach_cb流程
+      ------------------------------------------------------------	循环执行
 ------------------------------------------------------------------------------------------------  到此为止example的spdk_nvme_probe流程就结束了 
 
 probe代码详解, 参考文档: https://www.cnblogs.com/vlhn/p/7727016.html
@@ -609,10 +608,6 @@ git push origin xb
 https://github.com/ssbandjl/spdk/blob/xb/doc/nvme_spec.md
 
 
-
-bdev_malloc_create
-
-examples/blob/hello_world/hello_blob.c
 
 块设备：
 创建daos bdev块设备
@@ -658,7 +653,9 @@ rpc_bdev_daos_create -> module/bdev/daos/bdev_daos_rpc.c
       bdev_register(bdev) -> lib/bdev/bdev.c -> bdev_register(struct spdk_bdev *bdev)
         spdk_bdev_get_memory_domains 获取给定 bdev 使用的 SPDK 内存域。 如果 bdev 报告它使用内存域，这意味着它可以使用位于这些内存域中的数据缓冲区。 用户可以调用此函数并将 domains 设置为 NULL 并将 array_size 设置为 0 以获取 bdev 使用的内存域数
         spdk_bdev_is_md_separate 查询元数据是否与块数据交织或与块数据分离
-        bdev_alloc_io_stat
+        bdev_alloc_io_stat -> io statics
+            struct spdk_bdev_io_stat *stat
+            spdk_bdev_reset_io_stat(stat, SPDK_BDEV_RESET_STAT_ALL)
         bdev_name_add
         spdk_bdev_get_buf_align
         spdk_io_device_register 将不透明的 io_device 上下文注册为 I/O 设备。 I/O设备注册后，可以使用spdk_get_io_channel()函数返回I/O通道, 许多 bdev 模块创建自己的 bdev 结构，其中 spdk_bdev 作为第一个成员。 bdev.c 当前使用 spdk_bdev 指针作为其 io_device 句柄，强制 bdev 模块选择不同的东西。将其更改为使用 spdk_bdev 指针 + 1 个字节作为其 io_device 句柄。 实际句柄并不重要——它只需要是独一无二的。 这将简化 bdev 模块开发
@@ -888,7 +885,7 @@ spdk_app_start(&opts, nvmf_tgt_started, NULL) -> spdk_app_start(struct spdk_app_
             rc = generate_poll_fds(rtransport);
             SPDK_POLLER_REGISTER nvmf_rdma_accept -> thread_execute_timed_poller -> poller->fn(poller->arg)
           thread_execute_poller(thread, poller) -> 扇出,执行poller或定时器poller
-            poller->fn -> nvmf_poll_group_poll
+            poller->fn(poller->arg) -> nvmf_poll_group_poll <- poller_register <- spdk_poller_register
               TAILQ_FOREACH nvmf_transport_poll_group_poll -> nvmf_rdma_poll_group_poll
                 TAILQ_FOREACH_SAFE nvmf_rdma_poller_poll
                   reaped = ibv_poll_cq(rpoller->cq, 32, wc) -> reaped(收割IO) -> nvmf/rdma：为每个线程而不是每个连接创建一个 cq，这在目标扩展到多个连接时大大提高了效率。 现在，可以在 O(1) 内轮询给定线程处理的所有连接，而之前是 O(n)，其中 n 是连接数
@@ -1018,23 +1015,118 @@ modinfo nvmet 和 modinfo nvmet-rdma 的输出——它们的描述中不应有�
 
 
 vhost, qemu, io_path
-dpdk/examples/vdpa/main.c
-rte_vhost_driver_start
-vhost_user_start_client
-vhost_user_add_connection
-fdset_add(&vhost_user.fdset, fd, vhost_user_read_cb
-vhost_user_read_cb
-vhost_user_msg_handler
+dpdk/examples/vdpa/main.c -> main
+start_vdpa
+    rte_vhost_driver_start
+        vhost_user_start_server
+            bind, listen
+            fdset_add(&vhost_user.fdset, fd, vhost_user_server_new_connection, NULL, vsocket)
+                fd = accept(fd, NULL, NULL)
+                vhost_user_add_connection
+        or vhost_user_start_client
+            vhost_user_connect_nonblock
+            vhost_user_add_connection
+                fdset_add(&vhost_user.fdset, fd, vhost_user_read_cb
+                    vhost_user_msg_handler(conn->vid, connfd)
+                        read_vhost_message(dev, fd, &ctx)
+                        vhost_user_check_and_alloc_queue_pair
+                        switch (request)
+                        msg_result = (*dev->extern_ops.pre_msg_handle)(dev->vid, &ctx)
+                        msg_result = (*dev->extern_ops.post_msg_handle)(dev->vid, &ctx)
+                        send_vhost_reply(dev, fd, &ctx)
 dev->notify_ops->new_device(dev->vid)
 static const struct rte_vhost_device_ops g_spdk_vhost_ops
-.new_device =  start_device
-start_device(int vid)
-spdk_thread_send_msg(vdev->thread, vhost_user_session_start, vsession) -> vhost_user_session_start(void *arg1)
-backend->start_session(vdev, vsession, NULL)
+.new_device =  start_device <- case VHOST_USER_SET_VRING_KICK
+    start_device(int vid)
+        spdk_thread_send_msg(vdev->thread, vhost_user_session_start, vsession) -> vhost_user_session_start(void *arg1)
+            backend->start_session(vdev, vsession, NULL)
 static const struct spdk_vhost_user_dev_backend vhost_blk_user_device_backend
 .start_session =  vhost_blk_start -> vhost_blk_start(struct spdk_vhost_dev *vdev 以前 spdk_vhost_dev_backend 持有 vhost_blk 和 vhost_scsi 功能的回调，以及由 vhost_user 后端调用的回调。 此补丁将这些回调分为两个结构：spdk_vhost_dev_backend - 由 vhost_blk 和 vhost_scsi 实现，spdk_vhost_user_dev_backend - 仅由 vhost_user 后端实现，回调特定于该传输的会话管理
-  vdev_worker -> vdev_worker(void *arg)
+    bvsession->io_channel = vhost_blk_get_io_channel(vdev)
+        spdk_bdev_get_io_channel(bvdev->bdev_desc)
+    vdev_worker -> vdev_worker(void *arg) -> _vdev_vq_worker
+        process_packed_vq
+        or process_vq
+    or no_bdev_vdev_worker -> _no_bdev_vdev_vq_worker
+        no_bdev_process_packed_vq
+            task_idx = vhost_vring_packed_desc_get_buffer_id(vq, req_idx, &num_descs)
+            unlikely vhost_vq_packed_ring_enqueue
+            blk_task_init(task)
+                blk_task->iovcnt = SPDK_COUNTOF(blk_task->iovs)
+                blk_task->payload_size = 0
+            blk_iovs_packed_queue_setup
+                vhost_vq_get_desc_packed(vsession, vq, req_idx, &desc, &desc_table, &desc_table_size)
+                    *desc =  &virtqueue->vring.desc_packed[req_idx]
+                    if (vhost_vring_packed_desc_is_indirect(*desc))
+                        vhost_packed_desc_indirect_to_desc_table
+                            *desc_table = vhost_gpa_to_vva(vsession, addr, len)
+                                vva = (void *)rte_vhost_va_from_guest_pa(vsession->mem, addr, &newlen)
+                blk_iovs_packed_desc_setup(vsession, vq, req_idx, desc_table, desc_table_size, iovs, iovs_cnt, length)
+                    vhost_vring_packed_desc_to_iov(vsession, iovs, &cnt, desc)
+                        vhost_vring_desc_payload_to_iov(vsession, iov, iov_index, desc->addr, desc->len) -> desc -> payload
+                            do
+                                vva = (uintptr_t)rte_vhost_va_from_guest_pa(vsession->mem, payload, &len)
+                                iov[*iov_index].iov_base = (void *)vva;
+                                iov[*iov_index].iov_len = len;
+                                remaining -= len;
+                    out_cnt += vhost_vring_packed_desc_is_wr(desc)
+                    vhost_vring_packed_desc_get_next(&desc, &req_idx, vq, desc_table, desc_table_size) -> Get subsequent descriptor from vq or desc table
+                    *length = len;
+                    *iovs_cnt = cnt
+            vhost_vq_packed_ring_enqueue
+                rte_vhost_set_last_inflight_io_packed(vsession->vid, virtqueue->vring_idx, inflight_head)
+                rte_vhost_clr_inflight_desc_packed
+                vhost_log_used_vring_elem(vsession, virtqueue, virtqueue->last_used_idx)
+                virtqueue->packed.used_phase = !virtqueue->packed.used_phase
+                virtqueue->used_req_cnt++
+        or no_bdev_process_vq
+        vhost_session_vq_used_signal
+    spdk_poller_register_interrupt(bvsession->requestq_poller, vhost_blk_poller_set_interrupt_mode, bvsession)
+        poller->set_intr_cb_fn = cb_fn
+        poller->set_intr_cb_arg = cb_arg
+        if (poller->thread->in_interrupt) 
+            poller->set_intr_cb_fn(poller, poller->set_intr_cb_arg, true)
+                vhost_blk_poller_set_interrupt_mode
+                    vhost_user_session_set_interrupt_mode
+                        if (interrupt_mode)
+                            write(q->vring.kickfd, &num_events, sizeof(num_events))
+                            vsession->interrupt_mode = true
+                        else vsession->interrupt_mode = false
 
+.new_connection = new_connection,
+    TAILQ_INSERT_TAIL(&user_dev->vsessions, vsession, tailq)
+    vhost_session_install_rte_compat_hooks(vsession)
+        rte_vhost_extern_callback_register(vsession->vid, &g_spdk_extern_vhost_ops, NULL)
+.destroy_connection = destroy_connection,
+
+
+
+struct rte_vhost_user_extern_ops g_spdk_extern_vhost_ops = {
+	.pre_msg_handle = extern_vhost_pre_msg_handler,
+
+	.post_msg_handle = extern_vhost_post_msg_handler,
+        if (msg->request == VHOST_USER_SET_MEM_TABLE)
+            vhost_register_memtable_if_required(vsession, vid)
+        switch (msg->request)
+        case VHOST_USER_SET_FEATURES:
+		    rc = vhost_get_negotiated_features(vid, &vsession->negotiated_features)
+        case VHOST_USER_SET_VRING_CALL
+            rc = set_device_vq_callfd(vsession, qid)
+        case VHOST_USER_SET_VRING_KICK
+            enable_device_vq(vsession, qid)
+                rte_vhost_get_vhost_ring_inflight(vsession->vid, qid, &q->vring_inflight)
+                rte_vhost_get_vring_base(vsession->vid, qid, &q->last_avail_idx, &q->last_used_idx)
+                backend->alloc_vq_tasks(vsession, qid)
+                if (packed_ring)
+                    rte_vhost_get_vring_base_from_inflight
+                    q->packed.avail_phase = q->last_avail_idx >> 15
+                    q->last_avail_idx = q->last_avail_idx & 0x7FFF;
+                    q->packed.used_phase = q->last_used_idx >> 15;
+                    q->last_used_idx = q->last_used_idx & 0x7FFF;
+                else backend->register_vq_interrupt(vsession, q)
+            if (!vsession->started)
+                g_spdk_vhost_ops.new_device(vid)
+};
 
 
 参考流程, https://rootw.github.io/2018/05/SPDK-ioanalyze/
@@ -1243,8 +1335,8 @@ nvmf_rdma_update_ibv_state
 
 SPDK 加速框架介绍: https://www.sdnlab.com/25328.html
 static struct accel_mlx5_module g_accel_mlx5 = {
-	.module = {
-		.module_init		= accel_mlx5_init,
+  .module = {
+    .module_init		= accel_mlx5_init,
 accel_mlx5_init
 spdk_io_device_register(&g_accel_mlx5, accel_mlx5_create_cb, accel_mlx5_destroy_cb,
 accel_mlx5_create_cb
@@ -1257,9 +1349,9 @@ mlx5_qp_init_2_rts
 
 
 struct ibv_qp_attr
-	uint8_t			timeout;
-	uint8_t			retry_cnt;
-	uint8_t			rnr_retry;
+  uint8_t			timeout;
+  uint8_t			retry_cnt;
+  uint8_t			rnr_retry;
 
 
 poll_group_add
@@ -1302,10 +1394,10 @@ gdb --args ./nvmf_tgt -L all
 
 
 
-	struct ibv_qp_attr qp_attr;
-	struct ibv_qp_init_attr init_attr;
-	ibv_query_qp(rqpair->rdma_qp->qp, &qp_attr, IBV_QP_STATE, &init_attr);
-	SPDK_ERRLOG("SSSS qp timeout:%d, retry_cnt:%d, rnr_retry:%d\n",  qp_attr.timeout, qp_attr.retry_cnt, qp_attr.rnr_retry);
+  struct ibv_qp_attr qp_attr;
+  struct ibv_qp_init_attr init_attr;
+  ibv_query_qp(rqpair->rdma_qp->qp, &qp_attr, IBV_QP_STATE, &init_attr);
+  SPDK_ERRLOG("SSSS qp timeout:%d, retry_cnt:%d, rnr_retry:%d\n",  qp_attr.timeout, qp_attr.retry_cnt, qp_attr.rnr_retry);
 
 
 [2023-07-11 17:10:21.941507] nvme_qpair.c: 220:nvme_admin_qpair_print_command: *NOTICE*: FABRIC CONNECT qid:63 cid:12288 SGL DATA BLOCK OFFSET 0x0 len:0x400
@@ -1551,7 +1643,7 @@ nvmf_rdma_qpair_process_pending
         case SPDK_NVME_OPC_GET_LOG_PAGE
         nvmf_ctrlr_get_log_page
           spdk_nvmf_qpair_get_listen_trid
-          	.qpair_get_listen_trid = nvmf_rdma_qpair_get_listen_trid
+            .qpair_get_listen_trid = nvmf_rdma_qpair_get_listen_trid
               spdk_nvme_trid_populate_transport
           nvmf_get_discovery_log_page
             nvmf_generate_discovery_log
@@ -1616,12 +1708,46 @@ pip3 install configshell_fb
 
 创建内存块设备 -> bdev_malloc_create -> rpc_bdev_malloc_create
 create_malloc_disk -> dev/malloc：使用 options 结构体创建 malloc bdev 定义一个 options 结构体 malloc_bdev_opts，并直接将其用于 bdev_malloc_create RPC。 为此，bdev_malloc.h 包含 bdev_module.h 而不是 bdev.h 来定义 struct spdk_uuid，并且 struct malloc_bdev_opts 具有 struct spdk_uuid 的实例。 一起清理文件包含。 此外，使用 spdk_uuid_copy() 将 uuid 从 malloc_bdev_opts 复制到 malloc 磁盘而不是 = 运算符，并删除重复的大小检查。 这些有助于添加更多参数进行创建
-  mdisk = calloc(1, sizeof(*mdisk)) -> 使用env库执行之前直接调用DPDK的所有内存分配
-  mdisk->malloc_buf = spdk_zmalloc -> bdev/malloc：支持交错和分离元数据 malloc bdev 模块在此补丁中支持交错和分离元数据。 与 NULL bdev 模块不同，opts->block_size 是数据块大小，如果 opts->md_interleave 为 true，则块大小在内部计算为 opts->block_size 和 opts->md_size 之和，否则为 opts->block_size 。 这样会更直观。 此外，opts->md_size 仅接受 0、8、16、32、64 或 128 中的一个。以下补丁将支持保护信息 (T10 DIF/DIX)。
-  spdk_bdev_register(&mdisk->disk)
-  TAILQ_INSERT_TAIL(&g_malloc_disks, mdisk, link)
+    mdisk = calloc(1, sizeof(*mdisk)) -> 使用env库执行之前直接调用DPDK的所有内存分配
+    mdisk->malloc_buf = spdk_zmalloc(opts->num_blocks * block_size, 2 * 1024 * 1024, NULL,SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA) -> bdev/malloc：支持交叉和分离元数据 malloc bdev 模块在此补丁中支持交错和分离元数据。 与 NULL bdev 模块不同，opts->block_size 是数据块大小，如果 opts->md_interleave 为 true，则块大小在内部计算为 opts->block_size 和 opts->md_size 之和，否则为 opts->block_size 。 这样会更直观。 此外，opts->md_size 仅接受 0、8、16、32、64 或 128 中的一个。以下补丁将支持保护信息 (T10 DIF/DIX)
+    mdisk->malloc_md_buf = spdk_zmalloc(opts->num_blocks * opts->md_size, 2 * 1024 * 1024, NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA)
+    mdisk->disk.name = strdup(opts->name)
+    if (opts->dif_type != SPDK_DIF_DISABLE)
+        malloc_disk_setup_pi(mdisk)
+    if (opts->optimal_io_boundary) -> bdev/malloc：使用选项结构创建 malloc bdev 定义选项结构 malloc_bdev_opts，并将其直接用于 bdev_malloc_create RPC。为此，bdev_malloc.h 包含 bdev_module.h 而不是 bdev.h 以定义 struct spdk_uuid，而 struct malloc_bdev_opts 具有 struct spdk_uuid 的实例。一起清理文件包含。此外，使用 spdk_uuid_copy() 将 uuid 从 malloc_bdev_opts 复制到 malloc 磁盘，而不是 = 运算符，并删除重复的大小检查。这些有助于添加更多创建参数
+    mdisk->disk.fn_table = &malloc_fn_table;
+    mdisk->disk.module = &malloc_if;
+    spdk_bdev_register(&mdisk->disk)
+    TAILQ_INSERT_TAIL(&g_malloc_disks, mdisk, link)
 
 
+static const struct spdk_bdev_fn_table malloc_fn_table = {
+	.destruct			= bdev_malloc_destruct,
+	.submit_request			= bdev_malloc_submit_request,
+	.io_type_supported		= bdev_malloc_io_type_supported,
+	.get_io_channel			= bdev_malloc_get_io_channel,
+    spdk_get_io_channel(&g_malloc_disks)
+	.write_config_json		= bdev_malloc_write_json_config,
+	.get_memory_domains		= bdev_malloc_get_memory_domains,
+        spdk_memory_domain_get_first
+        spdk_memory_domain_get_next
+	.accel_sequence_supported	= bdev_malloc_accel_sequence_supported,
+};
+
+static struct spdk_bdev_module malloc_if = {
+	.name = "malloc",
+	.module_init = bdev_malloc_initialize,
+        spdk_io_device_register(&g_malloc_disks, malloc_create_channel_cb, malloc_destroy_channel_cb, sizeof(struct malloc_channel), "bdev_malloc")
+	.module_fini = bdev_malloc_deinitialize,
+	.get_ctx_size = bdev_malloc_get_ctx_size,
+};
+
+
+malloc_create_channel_cb
+    ch->accel_channel = spdk_accel_get_io_channel()
+        spdk_get_io_channel
+    ch->completion_poller = SPDK_POLLER_REGISTER(malloc_completion_poller, ch, 0)
+    TAILQ_INIT(&ch->completed_tasks)
 
 
 #0  rpc_nvmf_create_subsystem (request=0xd16cb0, params=0xdab250) at nvmf_rpc.c:385
@@ -2007,9 +2133,9 @@ case RDMA_REQUEST_STATE_READY_TO_EXECUTE
                 _bdev_io_submit(bdev_io)
                   bdev_io_do_submit(bdev_ch, bdev_io)
                     spdk_likely(TAILQ_EMPTY(&shared_resource->nomem_io))
-                    bdev_submit_request(bdev, ch, bdev_io) -> bdev->fn_table->submit_request(ioch, bdev_io) -> bdev_malloc_submit_request
+                    bdev_submit_request(bdev, ch, bdev_io) -> bdev->fn_table->submit_request(ioch, bdev_io) -> bdev_malloc_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
                       _bdev_malloc_submit_request
-                        case SPDK_BDEV_IO_TYPE_WRITE
+                        case SPDK_BDEV_IO_TYPE_WRITE -> write
                         bdev_malloc_writev
                           bdev_malloc_check_iov_len
                           spdk_accel_append_copy -> 将复制操作附加到序列。 序列中的复制操作很特殊，因为它不能保证数据将被实际复制。 如果可能的话，它只会更改序列中某些操作的源/目标缓冲区
@@ -2170,4 +2296,658 @@ vos_blob_format_cb
                           spdk_bdev_write_blocks -> bdev_io_submit
 ---------------------------- SPDK ----------------------------                          
 
+qemu check:
+qemu-system-x86_64 -device vhost-user-scsi-pci,help
+qemu-system-x86_64 -device vhost-user-blk-pci,help
 
+start vhost:
+HUGEMEM=4096 scripts/setup.sh
+build/bin/vhost -S /var/tmp -m 0x3
+
+scsi
+scripts/rpc.py bdev_malloc_create 64 512 -b Malloc0
+scripts/rpc.py vhost_create_scsi_controller --cpumask 0x1 vhost.0 -> rpc_vhost_create_scsi_controller
+scripts/rpc.py vhost_scsi_controller_add_target vhost.0 0 Malloc0 -> rpc_vhost_scsi_controller_add_target
+scripts/rpc.py vhost_scsi_controller_remove_target vhost.0 0
+
+blk
+scripts/rpc.py vhost_create_blk_controller --cpumask 0x1 vhost.1 Malloc0
+scripts/rpc.py vhost_create_blk_controller --cpumask 0x1 -r vhost.1 Malloc0
+
+qemu:
+-object memory-backend-file,id=mem,size=1G,mem-path=/dev/hugepages,share=on -numa node,memdev=mem
+-drive file=guest_os_image.qcow2,if=none,id=disk -device ide-hd,drive=disk,bootindex=0
+其次，通过为启动映像指定 bootindex=0，确保 QEMU 从虚拟机映像启动，而不是从 SPDK malloc 块设备启动。
+
+
+scsi
+-chardev socket,id=char0,path=/var/tmp/vhost.0 -device vhost-user-scsi-pci,id=scsi0,chardev=char0
+
+vhost_blk
+-chardev socket,id=char1,path=/var/tmp/vhost.1 -device vhost-user-blk-pci,id=blk0,chardev=char1
+
+ taskset -c 2,3 qemu-system-x86_64 \
+  --enable-kvm \
+  -cpu host -smp 2 \
+  -m 1G -object memory-backend-file,id=mem0,size=1G,mem-path=/dev/hugepages,share=on -numa node,memdev=mem0 \
+  -drive file=guest_os_image.qcow2,if=none,id=disk \
+  -device ide-hd,drive=disk,bootindex=0 \
+  -chardev socket,id=spdk_vhost_scsi0,path=/var/tmp/vhost.0 \
+  -device vhost-user-scsi-pci,id=scsi0,chardev=spdk_vhost_scsi0,num_queues=2 \
+  -chardev socket,id=spdk_vhost_blk0,path=/var/tmp/vhost.1 \
+  -device vhost-user-blk-pci,chardev=spdk_vhost_blk0,num-queues=2
+
+
+
+
+start vhost_target:
+export LD_LIBRARY_PATH=/snap/core22/1122/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+build/bin/vhost -S /var/tmp -m 0x3 -> app/vhost/vhost.c -> main
+    spdk_app_opts_init
+    opts.name = "vhost"
+    spdk_app_start(&opts, vhost_started, NULL)
+[2024-07-06 14:42:06.618134] [ DPDK EAL parameters: vhost --no-shconf -c 0x3 --huge-unlink --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=user1:6 --iova-mode=pa --base-virtaddr=0x200000000000 --match-allocations --file-prefix=spdk_pid106081 ]
+
+
+
+vhost_spec, req api, 
+enum vhost_user_request {
+    VHOST_USER_NONE = 0,
+    VHOST_USER_GET_FEATURES = 1,
+    VHOST_USER_SET_FEATURES = 2,
+    VHOST_USER_SET_OWNER = 3,
+    VHOST_USER_RESET_OWNER = 4,
+    VHOST_USER_SET_MEM_TABLE = 5,
+    VHOST_USER_SET_LOG_BASE = 6,
+    VHOST_USER_SET_LOG_FD = 7,
+    VHOST_USER_SET_VRING_NUM = 8,
+    VHOST_USER_SET_VRING_ADDR = 9,
+    VHOST_USER_SET_VRING_BASE = 10,
+    VHOST_USER_GET_VRING_BASE = 11,
+    VHOST_USER_SET_VRING_KICK = 12,
+    VHOST_USER_SET_VRING_CALL = 13,
+    VHOST_USER_SET_VRING_ERR = 14,
+    VHOST_USER_GET_PROTOCOL_FEATURES = 15,
+    VHOST_USER_SET_PROTOCOL_FEATURES = 16,
+    VHOST_USER_GET_QUEUE_NUM = 17,
+    VHOST_USER_SET_VRING_ENABLE = 18,
+    VHOST_USER_SET_STATUS = 39,
+    VHOST_USER_GET_STATUS = 40,
+};
+
+
+rpc.py bdev_virtio_attach_controller --dev-type blk --trtype user --traddr /tmp/vhost.0 --vq-count 2 --vq-size 512 VirtioBlk0
+or rpc.py bdev_virtio_attach_controller --dev-type blk --trtype pci --traddr 0000:01:00.0 VirtioBlk1
+    rpc_bdev_virtio_attach_controller
+        bdev_virtio_pci_blk_dev_create
+        bdev_virtio_user_blk_dev_create
+            virtio_user_blk_dev_create
+                virtio_user_dev_init
+                    dev = calloc(1, sizeof(*dev))
+                    virtio_dev_construct(vdev, name, &virtio_user_ops, dev)
+                    virtio_user_dev_setup
+                        vhost_user_setup(dev)
+                            fd = socket(AF_UNIX, SOCK_STREAM, 0)
+                            connect(fd, (struct sockaddr *)&un, sizeof(un))
+                        case VIRTIO_USER_BACKEND_VHOST_VDPA
+                            dev->ops = &virtio_ops_vdpa
+                    vhost_user_sock(dev, VHOST_USER_SET_OWNER, NULL)
+                        switch (req)
+                        case VHOST_USER_SET_MEM_TABLE
+                            prepare_vhost_memory_user
+                        vhost_user_write(vhostfd, &msg, len, fds, fd_num)
+                        vhost_user_read(vhostfd, &msg)
+                virtio_dev_reset
+                virtio_blk_dev_init
+        bdev_virtio_vfio_user_blk_dev_create
+
+
+static const struct virtio_dev_ops virtio_user_ops = {
+	.read_dev_cfg	= virtio_user_read_dev_config,
+	.write_dev_cfg	= virtio_user_write_dev_config,
+	.get_status	= virtio_user_get_status,
+	.set_status	= virtio_user_set_status,
+        virtio_user_start_device -> VIRTIO_CONFIG_STATUS_DRIVER_OK
+            ret = dev->ops->set_memory_table(dev)
+            vhost_user_sock(dev, VHOST_USER_GET_QUEUE_NUM, &host_max_queues) -> forword to backend
+            virtio_user_queue_setup(vdev, virtio_user_create_queue)
+                vhost_user_sock(dev, VHOST_USER_SET_VRING_CALL, &file)
+                file.fd = dev->callfds[queue_sel]
+                dev->ops->set_vring_call(dev, &file)
+            virtio_user_register_mem
+                const struct spdk_mem_map_ops virtio_user_map_ops = {
+                    .notify_cb = virtio_user_map_notify,
+                        vhost_user_sock(dev, VHOST_USER_SET_MEM_TABLE, NULL)
+                    .are_contiguous = NULL
+                };
+                dev->mem_map = spdk_mem_map_alloc(0, &virtio_user_map_ops, vdev)
+            virtio_user_queue_setup(vdev, virtio_user_kick_queue)
+                addr.desc_user_addr = (uint64_t)(uintptr_t)vring->desc
+                addr.avail_user_addr = (uint64_t)(uintptr_t)vring->avail
+                addr.used_user_addr = (uint64_t)(uintptr_t)vring->used
+                dev->ops->set_vring_num(dev, &state)
+                dev->ops->set_vring_base(dev, &state)
+                dev->ops->set_vring_addr(dev, &addr)
+                dev->ops->set_vring_kick(dev, &file)
+            ret = dev->ops->enable_qp(dev, 0, 1)
+	.get_features	= virtio_user_get_features,
+	.set_features	= virtio_user_set_features,
+	.destruct_dev	= virtio_user_destroy,
+	.get_queue_size	= virtio_user_get_queue_size,
+	.setup_queue	= virtio_user_setup_queue,
+	.del_queue	= virtio_user_del_queue,
+	.notify_queue	= virtio_user_notify_queue,
+	.dump_json_info = virtio_user_dump_json_info,
+	.write_json_config = virtio_user_write_json_config,
+};
+
+
+vhost_create_blk_controller --cpumask 0x1 vhost.1 Malloc0  # -> /var/tmp/vhost.1
+vhost_create_blk_controller -> rpc_vhost_create_blk_controller -> spdk vhost_blk commit: https://github.com/ssbandjl/spdk/commit/b727e804d61c5094e073c8503694b5d84b2d6adf
+    spdk_vhost_blk_construct(req.ctrlr, req.cpumask, req.dev_name, req.transport, params)
+        struct spdk_vhost_blk_dev *bvdev = NULL
+        const char *transport_name = VIRTIO_BLK_DEFAULT_TRANSPORT -> vhost_user_blk
+        bvdev->ops = virtio_blk_get_transport_ops(transport_name)
+            TAILQ_FOREACH(ops, &g_spdk_virtio_blk_transport_ops, link) <- SPDK_VIRTIO_BLK_TRANSPORT_REGISTER(vhost_user_blk, &vhost_user_blk)
+        spdk_bdev_open_ext(dev_name, true, bdev_event_cb, bvdev, &bvdev->bdev_desc)
+        bdev = spdk_bdev_desc_get_bdev(bvdev->bdev_desc)
+        vdev->virtio_features = SPDK_VHOST_BLK_FEATURES_BASE
+        在启用多队列的情况下启动 qemu 时，vhost 设备将启动/停止多次，与队列数有关，因为当时不知道此设备使用的确切队列数。一旦获得有效的 IO 队列，目标就必须停止并启动设备。在停止和启动 vhost 设备时，后端 bdev io 设备将被重复删除和创建。在 struct spdk_vhost_blk_dev 中保存 bdev 引用，这样 io 设备就不会被删除
+        bvdev->dummy_io_channel = spdk_bdev_get_io_channel(bvdev->bdev_desc) -> vhost_blk：加速 vhost 设备启动，当使用 vhost-user-blk multiqueue（将 num-queues 设置为大于 1）启动 qemu 时，vhost 设备将被启动/停止多次（与队列数有关），因为 vhost-user 后端不知道此设备使用的队列的确切数量。一旦获得有效的 IO 队列，目标就必须停止并启动设备。当停止和启动 vhost 设备时，后端 bdev io 设备将被重复删除和创建。如果后端 bdev 是一个分布式系统，则成本与网络 RTT 一样大。在此补丁中，添加一个 dummy_io_channel 来保存对 io 设备的引用，这样 io 设备就不会被删除
+        vhost_dev_register(vdev, name, cpumask, params, &vhost_blk_device_backend, &vhost_blk_user_device_backend)
+    free_rpc_vhost_blk_ctrlr(&req)
+
+
+static const struct spdk_vhost_user_dev_backend vhost_blk_user_device_backend = {
+    .session_ctx_size = sizeof(struct spdk_vhost_blk_session) - sizeof(struct spdk_vhost_session),
+    .start_session =  vhost_blk_start,
+    .stop_session = vhost_blk_stop,
+    .alloc_vq_tasks = alloc_vq_task_pool,
+        vq->tasks = spdk_zmalloc
+        task = &((struct spdk_vhost_user_blk_task *)vq->tasks)[j]
+        task->bvsession = bvsession;
+        task->req_idx = j;
+        task->vq = vq;
+    .register_vq_interrupt = vhost_blk_vq_register_interrupt, -> _vhost_blk_vq_register_interrupt
+        vq->intr = spdk_interrupt_register(vq->vring.kickfd, vdev_vq_worker, vq, "vdev_vq_worker")
+             process_packed_vq(bvsession, vq) <- if (packed_ring)
+                resubmit_cnt = submit_inflight_desc(bvsession, vq) -> lib/vhost：将 submit_inflight_desc() 添加到 CPU 使用率统计中，submit_inflight_desc() 实际上做了一些有意义的工作，因此当它真正处理任务时，轮询器应该返回 BUSY 状态
+                    vhost_vq_used_ring_enqueue
+                        vhost_vq_used_signal
+                            rte_vhost_vring_call(vsession->vid, virtqueue->vring_idx)
+                    process_packed_inflight_blk_task
+                        blk_task_enqueue(task)
+                        blk_task_inc_task_cnt(task)
+                        blk_task_init(task)
+                        blk_iovs_inflight_queue_setup
+                        vhost_user_process_blk_request
+                            virtio_blk_process_request(vdev, bvsession->io_channel, &user_task->blk_task, vhost_user_blk_request_finish, NULL) -> vhost：添加 virtio_blk 抽象，此补丁为自定义传输添加了 virtio_blk 抽象，其中首先使用“vhost_user_blk”。添加了 spdk_virtio_blk_transport_ops，描述了每个传输要实现的必要回调。请使用 SPDK_VIRTIO_BLK_TRANSPORT_REGISTER 注册传输。传输可以使用 virtio_blk_process_request() 来处理来自其队列的传入 I/O。添加了 virtio_blk_create_transport RPC 来创建已注册的传输之一，可能带有自定义 JSON 参数。向 vhost_create_blk_controller RPC 添加了“transport”参数，以指定哪个传输应该创建控制器。默认情况下使用 vhost_user_blk 传输 -> commit: https://github.com/ssbandjl/spdk/commit/b727e804d61c5094e073c8503694b5d84b2d6adf
+                                struct virtio_blk_outhdr req
+                                task->cb = cb
+                                iov = &task->iovs[0]
+                                memcpy(&req, iov->iov_base, sizeof(req))
+                                switch (type)
+                                case VIRTIO_BLK_T_IN:
+                                    spdk_bdev_readv(bvdev->bdev_desc, ch,&task->iovs[1], iovcnt, req.sector * 512,payload_len,blk_request_complete_cb, task)
+                                case VIRTIO_BLK_T_OUT
+                                    spdk_bdev_writev(bvdev->bdev_desc, ch, &task->iovs[1], iovcnt, req.sector * 512, payload_len, blk_request_complete_cb, task)
+                                        bdev_bytes_to_blocks(spdk_bdev_desc_get_bdev(desc)
+                                        spdk_bdev_writev_blocks
+                                case VIRTIO_BLK_T_DISCARD
+                                case VIRTIO_BLK_T_WRITE_ZEROES
+                                case VIRTIO_BLK_T_FLUSH
+                                case VIRTIO_BLK_T_GET_ID
+                                default
+                                    blk_request_finish(VIRTIO_BLK_S_UNSUPP, task)
+                    else process_blk_task
+                vhost_vq_packed_ring_is_avail
+                process_packed_blk_task
+             or process_vq(bvsession, vq) -> split ring
+             vhost_session_vq_used_signal
+                rte_vhost_vring_call
+                    vhost_vring_call_packed
+                    or vhost_vring_call_split
+                        eventfd_write(vq->callfd, (eventfd_t) 1)
+        or spdk_interrupt_register(vq->vring.kickfd, no_bdev_vdev_vq_worker, vq, "no_bdev_vdev_vq_worker")
+};
+
+
+blk_request_complete_cb
+    spdk_bdev_free_io(bdev_io)
+    blk_request_finish(success ? VIRTIO_BLK_S_OK : VIRTIO_BLK_S_IOERR, task)
+    
+
+static const struct spdk_vhost_dev_backend vhost_blk_device_backend = {
+    .type = VHOST_BACKEND_BLK,
+    .vhost_get_config = vhost_blk_get_config,
+    .dump_info_json = vhost_blk_dump_info_json,
+    .write_config_json = vhost_blk_write_config_json,
+    .remove_device = vhost_blk_destroy,
+    .set_coalescing = vhost_blk_set_coalescing,
+    .get_coalescing = vhost_blk_get_coalescing,
+};
+
+
+
+
+vhost_user.c
+
+
+rpc_vhost_create_scsi_controller
+    spdk_vhost_scsi_dev_construct
+        vhost_dev_register(&svdev->vdev, name, cpumask, NULL, &spdk_vhost_scsi_device_backend, &spdk_vhost_scsi_user_device_backend)
+            if (spdk_vhost_dev_find(name))
+                TAILQ_FOREACH(vdev, &g_vhost_devices, tailq)
+            if (vdev->backend->type == VHOST_BACKEND_SCSI)
+                vhost_user_dev_register(vdev, name, &cpumask, user_backend)
+                    vdev->path = strdup(path)
+                    user_dev = calloc(1, sizeof(*user_dev))
+                    vhost_user_dev_set_coalescing(user_dev, SPDK_VHOST_COALESCING_DELAY_BASE_US, SPDK_VHOST_VQ_IOPS_COALESCING_THRESHOLD) -> 设置合并/延迟参数
+                        uint64_t delay_time_base = delay_base_us * spdk_get_ticks_hz() / 1000000ULL
+                        user_dev->coalescing_delay_us = delay_base_us
+                        user_dev->coalescing_iops_threshold = iops_threshold
+                    vhost_register_unix_socket(path, name, vdev->virtio_features, vdev->disabled_features, vdev->protocol_features)
+                        rte_vhost_driver_register(path, RTE_VHOST_USER_ASYNC_COPY) -> vhost：添加 vhost-user 客户端模式，向 rte_vhost_driver_register() 添加新参数（标志）。当设置 RTE_VHOST_USER_CLIENT 标志时，DPDK vhost-user 充当客户端模式。这些标志还将允许未来的扩展而不会再次破坏 API。剩下的就是：分配一个 unix 套接字，绑定/监听服务器，连接客户端。此扩展仅适用于 vhost-user，因此当为 vhost-cuse 提供任何标志时，我们只需退出并报告错误 -> vhost：引入异步入队注册 API，执行大型内存复制通常占用大部分 CPU 周期，并成为 vhost-user 入队操作中的热点。为了将大型复制从 CPU 卸载到 DMA 设备，引入了异步 API，CPU 只需将复制作业提交给 DMA，而无需等待其复制完成。因此，数据传输期间无需 CPU 干预。我们可以节省宝贵的 CPU 周期并提高基于 vhost-user 的应用程序的整体吞吐量。此补丁引入了用于 vhost 异步数据入队操作的注册/取消注册 API。除了注册 API 实现外，还定义了异步入队数据路径所需的数据结构和异步回调函数的原型
+                            vsocket = malloc(sizeof(struct vhost_user_socket))
+                            1ULL << VIRTIO_NET_F_HOST_TSO4
+                            VIRTIO_NET_F_HOST_TSO6
+                            VIRTIO_NET_F_HOST_UFO
+                            RTE_VHOST_USER_CLIENT
+                                vhost_user_reconnect_init
+                                    rte_ctrl_thread_create(&reconn_tid, "vhost_reconn", NULL, vhost_user_client_reconnect, NULL)
+                                        vhost_user_connect_nonblock
+                                            connect(fd, un, sz)
+                                        vhost_user_add_connection
+                                            vid = vhost_new_device()
+                                                dev->flags = VIRTIO_DEV_BUILTIN_VIRTIO_NET
+                                            vhost_attach_vdpa_device(vid, vsocket->vdpa_dev)
+                                            vsocket->notify_ops->new_connection(vid)
+                                            fdset_add(&vhost_user.fdset, fd, vhost_user_read_cb, NULL, conn)
+                                            TAILQ_INSERT_TAIL(&vsocket->conn_list, conn, next)
+                            create_unix_socket(vsocket)
+                            vhost_user.vsockets[vhost_user.vsocket_cnt++] = vsocket
+                        rte_vhost_driver_set_features(path, virtio_features)
+                        rte_vhost_driver_callback_register(path, &g_spdk_vhost_ops)
+                            vsocket->notify_ops = ops
+                        rte_vhost_driver_start(path)
+            else -> vdev->backend->type == VHOST_BACKEND_BLK
+                virtio_blk_construct_ctrlr(vdev, name, &cpumask, params, user_backend)
+                    bvdev->ops->create_ctrlr(vdev, cpumask, address, params, (void *)user_backend) -> vhost_user_blk_create_ctrlr
+            TAILQ_INSERT_TAIL(&g_vhost_devices, vdev, tailq)
+    free_rpc_vhost_scsi_ctrlr
+
+static const struct spdk_vhost_dev_backend spdk_vhost_scsi_device_backend = {
+    .type = VHOST_BACKEND_SCSI,
+    .dump_info_json = vhost_scsi_dump_info_json,
+    .write_config_json = vhost_scsi_write_config_json,
+    .remove_device = vhost_scsi_dev_remove,
+    .set_coalescing = vhost_user_set_coalescing,
+    .get_coalescing = vhost_user_get_coalescing,
+};
+
+static const struct spdk_vhost_user_dev_backend spdk_vhost_scsi_user_device_backend = {
+    .session_ctx_size = sizeof(struct spdk_vhost_scsi_session) - sizeof(struct spdk_vhost_session),
+    .start_session =  vhost_scsi_start,
+        spdk_scsi_dev_allocate_io_channels
+    .stop_session = vhost_scsi_stop,
+    .alloc_vq_tasks = alloc_vq_task_pool,
+};
+
+
+
+
+
+
+rpc_vhost_scsi_controller_add_target
+    vdev = spdk_vhost_dev_find(req.ctrlr)
+    spdk_vhost_scsi_dev_add_tgt(vdev, req.scsi_target_num, req.bdev_name)
+        svdev = to_scsi_dev(vdev)
+        state->status = VHOST_SCSI_DEV_ADDING
+        state->dev = spdk_scsi_dev_construct_ext(target_name, bdev_names_list, lun_id_list, 1, SPDK_SPC_PROTOCOL_IDENTIFIER_SAS, vhost_scsi_lun_resize, svdev, vhost_scsi_lun_hotremove, svdev)
+            spdk_scsi_dev_add_lun_ext(dev, bdev_name_list[i], lun_id_list[i], resize_cb, resize_ctx, hotremove_cb, hotremove_ctx)
+                scsi_dev_find_free_lun(dev, lun_id, &prev_lun)
+                lun = scsi_lun_construct(bdev_name, resize_cb, resize_ctx, hotremove_cb, hotremove_ctx)
+                    spdk_bdev_open_ext(bdev_name, true, bdev_event_cb, lun, &lun->bdev_desc)
+                        bdev_desc_alloc(bdev, event_cb, event_ctx, &desc)
+                            desc->memory_domains_supported = spdk_bdev_get_memory_domains(bdev, NULL, 0) > 0
+                            desc->callback.event_fn = event_cb
+                        bdev_open(bdev, write, desc)
+                            bdev_start_qos(bdev)
+                                spdk_bdev_for_each_channel(bdev, bdev_enable_qos_msg, ctx, bdev_enable_qos_done)
+                            TAILQ_INSERT_TAIL(&bdev->internal.open_descs, desc, link)
+                TAILQ_INSERT_HEAD(&dev->luns, lun, tailq)
+                or TAILQ_INSERT_AFTER(&dev->luns, prev_lun, lun, tailq)
+        spdk_scsi_dev_add_port(state->dev, 0, "vhost")
+            port = spdk_scsi_dev_find_port_by_id(dev, id)
+            port = scsi_dev_find_free_port(dev)
+            scsi_port_construct(port, id, dev->num_ports, name)
+        vhost_user_dev_foreach_session(vdev, vhost_scsi_session_add_tgt, vhost_scsi_dev_add_tgt_cpl_cb, (void *)(uintptr_t)scsi_tgt_num)
+            spdk_thread_send_msg(vdev->thread, foreach_session, ev_ctx)
+    free_rpc_vhost_scsi_ctrlr_add_target(&req)
+
+
+
+vhost_scsi_session_add_tgt
+    spdk_scsi_dev_allocate_io_channels(svsession->scsi_dev_state[scsi_tgt_num].dev)
+        TAILQ_FOREACH_SAFE(lun, &dev->luns, tailq, tmp_lun)
+            scsi_lun_allocate_io_channel(lun)
+                lun->io_channel = spdk_bdev_get_io_channel(lun->bdev_desc)
+                    spdk_get_io_channel(__bdev_to_io_dev(spdk_bdev_desc_get_bdev(desc)))
+                        dev = io_device_get(io_device)
+                        ch = thread_get_io_channel(thread, dev)
+                        RB_INSERT(io_channel_tree, &thread->io_channels, ch)
+                        dev->create_cb(io_device, (uint8_t *)ch + sizeof(*ch))
+    if (vhost_dev_has_feature(vsession, VIRTIO_SCSI_F_HOTPLUG))
+        eventq_enqueue(svsession, scsi_tgt_num, VIRTIO_SCSI_T_TRANSPORT_RESET, VIRTIO_SCSI_EVT_RESET_RESCAN)
+
+
+rpc_bdev_iscsi_create
+    create_iscsi_disk(req.name, req.url, req.initiator_iqn, bdev_iscsi_create_cb, request)
+
+
+
+bdev_iscsi_create_cb
+    spdk_json_write_string(w, spdk_bdev_get_name(bdev))
+    spdk_jsonrpc_end_result(request, w)
+
+
+
+
+
+vhost_user.h
+typedef enum VhostUserRequest
+
+
+
+struct spdk_bdev_io_stat {
+    uint64_t bytes_read;
+    uint64_t num_read_ops;
+    uint64_t bytes_written;
+    uint64_t num_write_ops;
+    uint64_t bytes_unmapped;
+    uint64_t num_unmap_ops;
+    uint64_t bytes_copied;
+    uint64_t num_copy_ops;
+    uint64_t read_latency_ticks;
+    uint64_t max_read_latency_ticks;
+    uint64_t min_read_latency_ticks;
+    uint64_t write_latency_ticks;
+    uint64_t max_write_latency_ticks;
+    uint64_t min_write_latency_ticks;
+    uint64_t unmap_latency_ticks;
+    uint64_t max_unmap_latency_ticks;
+    uint64_t min_unmap_latency_ticks;
+    uint64_t copy_latency_ticks;
+    uint64_t max_copy_latency_ticks;
+    uint64_t min_copy_latency_ticks;
+    uint64_t ticks_rate;
+
+    /* This data structure is privately defined in the bdev library.
+     * This data structure is only used by the bdev_get_iostat RPC now.
+     */
+    struct spdk_bdev_io_error_stat *io_error;
+
+    /* For efficient deep copy, no members should be added after io_error. */
+};
+
+
+SPDK_VIRTIO_BLK_TRANSPORT_REGISTER(vhost_user_blk, &vhost_user_blk);
+static const struct spdk_virtio_blk_transport_ops vhost_user_blk = {
+    .name = "vhost_user_blk",
+
+    .dump_opts = vhost_user_blk_dump_opts,
+
+    .create = vhost_user_blk_create,
+    .destroy = vhost_user_blk_destroy,
+
+    .create_ctrlr = vhost_user_blk_create_ctrlr,
+        vhost_user_dev_register(vdev, address, cpumask, custom_opts)
+    .destroy_ctrlr = vhost_user_blk_destroy_ctrlr,
+
+    .bdev_event = vhost_user_bdev_event_cb,
+    .set_coalescing = vhost_user_set_coalescing,
+    .get_coalescing = vhost_user_get_coalescing,
+};
+
+
+
+
+
+vhost sample:
+1. start qemu server:
+qemu-system-x86_64 -machine accel=kvm -cpu host \
+    -m $mem -object memory-backend-file,id=mem,size=$mem,mem-path=/dev/hugepages,share=on \
+    -mem-prealloc -numa node,memdev=mem \
+    -chardev socket,id=char1,path=/tmp/sock0,server \
+    -netdev type=vhost-user,id=hostnet1,chardev=char1  \
+    -device virtio-net-pci,netdev=hostnet1,id=net1,mac=52:54:00:00:00:14 \
+    ...
+
+
+2. Start the vswitch as client: vswitch(client) -> qemu(server)
+./dpdk-vhost -l 0-3 -n 4 --socket-mem 1024 --socket-file /tmp/sock0 --client
+dpdk/examples/vhost/main.c -> main
+    reset_dma
+    us_vhost_parse_args
+    nb_ports = rte_eth_dev_count_avail()
+    mbuf_pool = rte_pktmbuf_pool_create("MBUF_POOL", total_num_mbufs, MBUF_CACHE_SIZE, 0, MBUF_DATA_SIZE, rte_socket_id())
+    port_init(portid)
+    rte_ctrl_thread_create(&tid, "print-stats", NULL, print_stats, NULL)
+    RTE_LCORE_FOREACH_WORKER(lcore_id)
+        rte_eal_remote_launch(switch_worker, NULL, lcore_id)
+    rte_vhost_async_dma_configure
+    get_async_flag_by_socketid
+    rte_vhost_driver_register
+    rte_vhost_driver_set_features(file, VIRTIO_NET_FEATURES)
+    rte_vhost_driver_disable_features(file, 1ULL << VIRTIO_NET_F_MRG_RXBUF)
+    rte_vhost_driver_callback_register(file, &virtio_net_device_ops)
+    rte_vhost_driver_start(file)
+        vsocket = find_vhost_user_socket(path)
+    RTE_LCORE_FOREACH_WORKER(lcore_id)
+        rte_eal_wait_lcore(lcore_id)
+    rte_vhost_async_dma_unconfigure
+    rte_eal_cleanup()
+
+
+
+static const struct rte_vhost_device_ops virtio_net_device_ops =
+{
+  .new_device =  new_device,
+        vdev = rte_zmalloc("vhost device", sizeof(*vdev), RTE_CACHE_LINE_SIZE)
+        vhost_txbuff[i * RTE_MAX_VHOST_DEVICE + vid] = rte_zmalloc("vhost bufftable", sizeof(struct vhost_bufftable), RTE_CACHE_LINE_SIZE)
+        int socketid = get_socketid_by_vid(vid)
+        init_vid2socketid_array(vid, socketid)
+        vhost_async_channel_register(vid)
+            rte_vhost_async_channel_register(vid, VIRTIO_RXQ)
+                async_channel_register(dev, vq) -> vhost：保留对 virtqueue 索引的引用，在 dev->virtqueue[] 数组中拥有对 vq 索引的反向引用，可以统一内部 API，只需传递 dev 和 vq。它还允许在日志消息中显示 vq 索引。删除不需要的 virtqueue 索引检查（例如在所有可用 virtqueue 上循环调用的静态帮助程序）。尽快移动 virtqueue 索引有效性检查
+                    async = rte_zmalloc_socket(NULL, sizeof(struct vhost_async), 0, node)
+                    async->pkts_info = rte_malloc_socket(NULL, vq->size * sizeof(struct async_inflight_info), RTE_CACHE_LINE_SIZE, node)
+            rte_vhost_async_channel_register(vid, VIRTIO_TXQ)
+        init_vhost_queue_ops(vid)
+            vdev_queue_ops[vid].enqueue_pkt_burst = builtin_enqueue_pkts
+                vs_enqueue_pkts(dev, queue_id, pkts, count)
+                    rte_prefetch0(&vr->avail->ring[start_idx & (vr->size - 1)])
+                    enqueue_pkt(dev, vr, pkts[i], desc_idx)
+                    __atomic_add_fetch(&vr->used->idx, count, __ATOMIC_RELEASE)
+                    queue->last_used_idx += count
+                    rte_vhost_vring_call(dev->vid, queue_id)
+            vdev_queue_ops[vid].dequeue_pkt_burst = builtin_dequeue_pkts
+            else
+                vdev_queue_ops[vid].enqueue_pkt_burst = async_enqueue_pkts
+        vs_vhost_net_setup(vdev)
+            rte_vhost_get_negotiated_features
+            rte_vhost_get_mem_table
+            rte_vhost_get_vring_numm
+            rte_vhost_get_vhost_vring
+                if (vq_is_packed(dev)) {
+                    vring->desc_packed = vq->desc_packed;
+                    vring->driver_event = vq->driver_event;
+                    vring->device_event = vq->device_event;
+                } else {
+                    vring->desc = vq->desc;
+                    vring->avail = vq->avail;
+                    vring->used = vq->used;
+                }
+                vring->callfd  = vq->callfd;
+                vring->kickfd  = vq->kickfd;
+                vring->size    = vq->size;
+        rte_vhost_enable_guest_notification(vid, VIRTIO_RXQ, 0); -> 使用vid替换virtio_net dev
+            vhost_enable_guest_notification
+                return vhost_enable_notify_packed(dev, vq, enable);
+                or vhost_enable_notify_split
+        rte_vhost_enable_guest_notification(vid, VIRTIO_TXQ, 0);
+  .destroy_device = destroy_device,
+  .vring_state_changed = vring_state_changed,
+};
+
+
+
+
+struct virtio_user_backend_ops virtio_ops_vdpa = {
+	.setup = vhost_vdpa_setup,
+	.destroy = vhost_vdpa_destroy,
+	.get_backend_features = vhost_vdpa_get_backend_features,
+	.set_owner = vhost_vdpa_set_owner,
+	.get_features = vhost_vdpa_get_features,
+	.set_features = vhost_vdpa_set_features,
+	.set_memory_table = vhost_vdpa_set_memory_table,
+        vhost_vdpa_iotlb_batch_begin(dev)
+            msg.type = VHOST_IOTLB_MSG_V2
+            msg.iotlb.type = VHOST_IOTLB_BATCH_BEGIN
+            write(data->vhostfd, &msg, sizeof(msg)
+        vhost_vdpa_dma_unmap(dev, NULL, 0, SIZE_MAX)
+            msg.iotlb.type = VHOST_IOTLB_INVALIDATE
+            write(data->vhostfd, &msg, sizeof(msg)
+        if (rte_eal_iova_mode() == RTE_IOVA_VA) -> rte_eal_get_configuration()->iova_mode
+            rte_memseg_contig_walk_thread_unsafe(vhost_vdpa_map_contig, dev)
+                vhost_vdpa_dma_map(dev, ms->addr, ms->iova, len)
+                    msg.iotlb.type = VHOST_IOTLB_UPDATE
+                    msg.iotlb.iova = iova
+        rte_memseg_walk_thread_unsafe(vhost_vdpa_map, dev)
+            vhost_vdpa_dma_map(dev, ms->addr, ms->iova, len)
+        vhost_vdpa_iotlb_batch_end(dev)
+            msg.iotlb.type = VHOST_IOTLB_BATCH_END
+	.set_vring_num = vhost_vdpa_set_vring_num, -> vhost_vdpa_ioctl(data->vhostfd, VHOST_SET_VRING_NUM, state)
+	.set_vring_base = vhost_vdpa_set_vring_base, -> vhost_vdpa_ioctl(data->vhostfd, VHOST_SET_VRING_BASE, state)
+	.get_vring_base = vhost_vdpa_get_vring_base,
+	.set_vring_call = vhost_vdpa_set_vring_call,
+        vhost_vdpa_ioctl(data->vhostfd, VHOST_SET_VRING_CALL, file)
+	.set_vring_kick = vhost_vdpa_set_vring_kick, -> vhost_vdpa_ioctl(data->vhostfd, VHOST_SET_VRING_KICK, file)
+	.set_vring_addr = vhost_vdpa_set_vring_addr, -> vhost_vdpa_ioctl(data->vhostfd, VHOST_SET_VRING_ADDR, addr)
+	.get_status = vhost_vdpa_get_status,
+	.set_status = vhost_vdpa_set_status,
+	.get_config = vhost_vdpa_get_config,
+	.set_config = vhost_vdpa_set_config,
+	.enable_qp = vhost_vdpa_enable_queue_pair,
+        vhost_vdpa_set_vring_enable(dev, &state)
+            vhost_vdpa_ioctl(data->vhostfd, VHOST_VDPA_SET_VRING_ENABLE, state)
+	.dma_map = vhost_vdpa_dma_map_batch,
+	.dma_unmap = vhost_vdpa_dma_unmap_batch,
+	.update_link_state = vhost_vdpa_update_link_state,
+	.get_intr_fd = vhost_vdpa_get_intr_fd,
+};
+
+
+
+struct rte_vhost_mem_region {
+	uint64_t guest_phys_addr;
+	uint64_t guest_user_addr;
+	uint64_t host_user_addr;
+	uint64_t size;
+	void	 *mmap_addr;
+	uint64_t mmap_size;
+	int fd;
+};
+
+
+often math, tool
+#define SHIFT_2MB		21 /* (1 << 21) == 2MB */
+#define VALUE_2MB		(1ULL << SHIFT_2MB)
+#define MASK_2MB		(VALUE_2MB - 1)
+
+#define SHIFT_4KB		12 /* (1 << 12) == 4KB */
+#define VALUE_4KB		(1ULL << SHIFT_4KB)
+#define MASK_4KB		(VALUE_4KB - 1)
+
+#define _2MB_OFFSET(ptr)	(((uintptr_t)(ptr)) & MASK_2MB)
+#define _2MB_PAGE(ptr)		FLOOR_2MB((uintptr_t)(ptr))
+#define FLOOR_2MB(x)		(((uintptr_t)(x)) & ~MASK_2MB)
+#define CEIL_2MB(x)		FLOOR_2MB(((uintptr_t)(x)) + VALUE_2MB - 1)
+
+
+
+
+
+vhost_user_mmap_region
+
+
+
+
+virtio_user_scsi_dev_create
+    virtio_scsi_dev_init
+        virtio_dev_start(vdev, max_queues, SPDK_VIRTIO_SCSI_QUEUE_NUM_FIXED)
+            virtio_dev_set_status(vdev, VIRTIO_CONFIG_S_DRIVER_OK)
+
+
+virtio_scsi_dev_add_tgt
+    bdev->fn_table = &virtio_fn_table
+
+static const struct spdk_bdev_fn_table virtio_fn_table = {
+	.destruct		= bdev_virtio_disk_destruct,
+	.submit_request		= bdev_virtio_submit_request,
+	.io_type_supported	= bdev_virtio_io_type_supported,
+	.get_io_channel		= bdev_virtio_get_io_channel,
+	.dump_info_json		= bdev_virtio_dump_info_json,
+	.write_config_json	= bdev_virtio_write_config_json,
+};
+
+
+
+scsi
+...
+thread_poll
+poller_rc = thread_execute_poller(thread, poller)
+vdev_worker(void *arg)
+    process_vq(svsession, &vsession->virtqueue[q_idx])
+        unlikely reqs_cnt = vhost_vq_avail_ring_get(vq, reqs, SPDK_COUNTOF(reqs))
+        rte_vhost_set_inflight_desc_split(vsession->vid, vq->vring_idx, reqs[i])
+        process_scsi_task(vsession, vq, reqs[i])
+            task = &((struct spdk_vhost_scsi_task *)vq->tasks)[req_idx]
+            scsi_task_init(task)
+            result = process_request(task)
+                task_data_setup(task, &req)
+                    spdk_scsi_task_construct(&task->scsi, vhost_scsi_task_cpl, vhost_scsi_task_free_cb)
+                    vhost_vq_get_desc(vsession, task->vq, task->req_idx, &desc, &desc_table, &desc_table_len)
+                        if (vhost_vring_desc_is_indirect(*desc))
+                            *desc_table = vhost_gpa_to_vva(vsession, (*desc)->addr, sizeof(**desc) * *desc_table_size)
+                    *req = vhost_gpa_to_vva(vsession, desc->addr, sizeof(**req))
+                        vva = (void *)rte_vhost_va_from_guest_pa(vsession->mem, addr, &newlen)
+                    vhost_vring_desc_get_next(&desc, desc_table, desc_table_len)
+                vhost_scsi_task_init_target
+                    task->scsi.target_port = spdk_scsi_dev_find_port_by_id(task->scsi_dev, 0)
+                    task->scsi.lun = spdk_scsi_dev_get_lun(state->dev, lun_id)
+            task_submit(task)
+                spdk_scsi_dev_queue_task(task->scsi_dev, &task->scsi)
+                    scsi_lun_execute_task
+                        _scsi_lun_execute_task
+                            bdev_scsi_execute
+                                bdev_scsi_process_block
+                                    bdev_scsi_readwrite
+                                        spdk_bdev_readv_blocks
+                                            bdev_readv_blocks_with_md
+                                                _bdev_io_submit_ext
+                                                    bdev_io_submit
+                                                        _bdev_io_submit
+
+
+cleanup_pci_devices
+    TAILQ_FOREACH_SAFE(dev, &g_pci_hotplugged_devices, internal.tailq, tmp)
+        vtophys_pci_device_added -> 将具有 DMA 功能的 PCI 设备报告给 vtophys 转换代码。增加 SPDK 管理的具有 DMA 功能的活动设备的引用计数。必须在创建 rte_pci_device 后调用此函数
+            TAILQ_INSERT_TAIL(&g_vtophys_pci_devices, vtophys_dev, tailq)
+            #if VFIO_ENABLED
+                struct spdk_vfio_dma_map *dma_map
+                TAILQ_FOREACH(dma_map, &g_vfio.maps, tailq) 
+                    ioctl(g_vfio.fd, VFIO_IOMMU_MAP_DMA, &dma_map->map)
+
+
+                    
