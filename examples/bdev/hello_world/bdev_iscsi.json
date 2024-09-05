@@ -1,0 +1,17 @@
+{
+  "subsystems": [
+    {
+      "subsystem": "bdev",
+      "config": [
+        {
+          "method": "bdev_iscsi_create",
+          "params": {
+            "name": "iSCSI0",
+            "initiator_iqn": "iqn.2016-06.io.spdk:init",
+            "url": "iscsi://127.0.0.1/iqn.2016-06.io.spdk:disk1/1"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,132 @@
+struct vfu_virtio_req {
+	struct vfu_virtio_dev *dev;
+	struct vfu_virtio_vq *vq;
+
+	STAILQ_ENTRY(vfu_virtio_req) link;
+
+	uint32_t payload_size;
+	uint32_t used_len;
+
+	/* split vring */
+	uint16_t req_idx;
+	/* packed vring */
+	uint16_t buffer_id;
+	uint16_t num_descs;
+
+	uint16_t iovcnt;
+	struct iovec iovs[VIRTIO_DEV_MAX_IOVS + 1];
+	uint8_t desc_writeable[VIRTIO_DEV_MAX_IOVS + 1];
+
+	struct iovec *indirect_iov;
+	dma_sg_t *indirect_sg;
+
+	/* VIRIO_DEV_MAX_IOVS + 1 worth of dma_sg_size() */
+	uint8_t sg[];
+};
+
+struct virtio_blk_req {
+	volatile uint8_t *status;
+	struct virtio_blk_endpoint *endpoint;
+	/* KEEP req at last */
+	struct vfu_virtio_req req;
+};
+
+struct vfu_virtio_vq {
+	/* Read Only */
+	uint16_t id;
+	uint16_t qsize;
+
+	bool enabled;
+	uint16_t vector;
+
+	enum vfu_vq_state q_state;
+	STAILQ_HEAD(, vfu_virtio_req) free_reqs;
+
+	uint32_t desc_lo;
+	uint32_t desc_hi;
+	uint32_t avail_lo;
+	uint32_t avail_hi;
+	uint32_t used_lo;
+	uint32_t used_hi;
+
+	struct q_mapping avail;
+	struct q_mapping used;
+	struct q_mapping desc;
+
+	uint16_t last_avail_idx;
+	uint16_t last_used_idx;
+
+	struct {
+		/* To mark a descriptor as available in packed ring
+		 * Equal to avail_wrap_counter in spec.
+		 */
+		uint8_t avail_phase	: 1;
+		/* To mark a descriptor as used in packed ring
+		 * Equal to used_wrap_counter in spec.
+		 */
+		uint8_t used_phase	: 1;
+		uint8_t padding		: 5;
+		bool packed_ring	: 1;
+	} packed;
+
+	/* Request count from last event */
+	uint16_t used_req_cnt;
+	/* Next time when we need to send event */
+	uint64_t next_event_time;
+};
+
+
+struct vfu_virtio_dev {
+	char name[SPDK_VFU_MAX_NAME_LEN];
+	/* RO for Guest Driver */
+	uint16_t num_queues;
+	/* Supported feature bits by host driver, RO for Guest Driver */
+	uint64_t host_features;
+
+	struct virtio_pci_cfg cfg;
+	struct vfu_virtio_vq vqs[VIRTIO_DEV_MAX_VQS];
+
+	struct vfu_virtio_endpoint *virtio_endpoint;
+
+	/* VIRTIO_DEV_MAX_VQS * 3 worth of dma_sg_size() */
+	uint8_t sg[];
+};
+
+
+struct vfu_virtio_endpoint {
+	struct vfu_virtio_dev		*dev;
+	int				devmem_fd;
+	volatile uint32_t		*doorbells;
+
+	uint16_t			num_queues;
+	uint16_t			qsize;
+	bool				packed_ring;
+
+	uint32_t			coalescing_delay_us;
+
+	struct spdk_vfu_endpoint	*endpoint;
+	struct spdk_thread		*thread;
+
+	struct vfu_virtio_ops		virtio_ops;
+
+	/* quiesce poller */
+	uint32_t			io_outstanding;
+	bool				quiesce_in_progress;
+	struct spdk_poller		*quiesce_poller;
+};
+
+
+struct virtio_blk_endpoint {
+	struct vfu_virtio_endpoint	virtio;
+
+	/* virtio_blk specific configurations */
+	struct spdk_thread		*init_thread;
+	struct spdk_bdev		*bdev;
+	struct spdk_bdev_desc		*bdev_desc;
+	struct spdk_io_channel		*io_channel;
+	struct virtio_blk_config	blk_cfg;
+
+	/* virtio_blk ring process poller */
+	struct spdk_poller		*ring_poller;
+};
+

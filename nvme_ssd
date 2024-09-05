@@ -1,0 +1,123 @@
+struct spdk_nvme_ctrlr
+
+struct nvme_request *req
+    struct spdk_nvme_cmd		cmd;
+
+
+static const struct spdk_bdev_fn_table nvmelib_fn_table = {
+	.destruct		= bdev_nvme_destruct,
+	.submit_request		= bdev_nvme_submit_request,
+	.io_type_supported	= bdev_nvme_io_type_supported,
+	.get_io_channel		= bdev_nvme_get_io_channel,
+	.dump_info_json		= bdev_nvme_dump_info_json,
+	.write_config_json	= bdev_nvme_write_config_json,
+	.get_spin_time		= bdev_nvme_get_spin_time,
+	.get_module_ctx		= bdev_nvme_get_module_ctx,
+	.get_memory_domains	= bdev_nvme_get_memory_domains,
+	.reset_device_stat	= bdev_nvme_reset_device_stat,
+	.dump_device_stat_json	= bdev_nvme_dump_device_stat_json,
+};
+
+submit_request
+
+_nvme_ns_cmd_rw
+
+nvme_transport_qpair_submit_request(qpair, req)
+    transport->ops.qpair_submit_request(qpair, req)
+
+nvme_qpair_init
+
+NVME_INIT_REQUEST(req, cb_fn, cb_arg, *payload, payload_size, md_size)
+
+
+/**
+ * NVM command set opcodes
+ */
+enum spdk_nvme_nvm_opcode {
+	SPDK_NVME_OPC_FLUSH				= 0x00,
+	SPDK_NVME_OPC_WRITE				= 0x01,
+	SPDK_NVME_OPC_READ				= 0x02,
+	/* 0x03 - reserved */
+	SPDK_NVME_OPC_WRITE_UNCORRECTABLE		= 0x04,
+	SPDK_NVME_OPC_COMPARE				= 0x05,
+	/* 0x06-0x07 - reserved */
+	SPDK_NVME_OPC_WRITE_ZEROES			= 0x08,
+	SPDK_NVME_OPC_DATASET_MANAGEMENT		= 0x09,
+
+	SPDK_NVME_OPC_VERIFY				= 0x0c,
+	SPDK_NVME_OPC_RESERVATION_REGISTER		= 0x0d,
+	SPDK_NVME_OPC_RESERVATION_REPORT		= 0x0e,
+
+	SPDK_NVME_OPC_RESERVATION_ACQUIRE		= 0x11,
+	SPDK_NVME_OPC_IO_MANAGEMENT_RECEIVE		= 0x12,
+	SPDK_NVME_OPC_RESERVATION_RELEASE		= 0x15,
+
+	SPDK_NVME_OPC_COPY				= 0x19,
+	SPDK_NVME_OPC_IO_MANAGEMENT_SEND		= 0x1D,
+};
+
+
+
+const struct spdk_nvme_transport_ops pcie_ops = {
+	.name = "PCIE",
+	.type = SPDK_NVME_TRANSPORT_PCIE,
+	.ctrlr_construct = nvme_pcie_ctrlr_construct,
+	.ctrlr_scan = nvme_pcie_ctrlr_scan,
+	.ctrlr_destruct = nvme_pcie_ctrlr_destruct,
+	.ctrlr_enable = nvme_pcie_ctrlr_enable,
+
+	.ctrlr_get_registers = nvme_pcie_ctrlr_get_registers,
+	.ctrlr_set_reg_4 = nvme_pcie_ctrlr_set_reg_4,
+	.ctrlr_set_reg_8 = nvme_pcie_ctrlr_set_reg_8,
+	.ctrlr_get_reg_4 = nvme_pcie_ctrlr_get_reg_4,
+	.ctrlr_get_reg_8 = nvme_pcie_ctrlr_get_reg_8,
+
+	.ctrlr_get_max_xfer_size = nvme_pcie_ctrlr_get_max_xfer_size,
+	.ctrlr_get_max_sges = nvme_pcie_ctrlr_get_max_sges,
+
+	.ctrlr_reserve_cmb = nvme_pcie_ctrlr_reserve_cmb,
+	.ctrlr_map_cmb = nvme_pcie_ctrlr_map_io_cmb,
+	.ctrlr_unmap_cmb = nvme_pcie_ctrlr_unmap_io_cmb,
+
+	.ctrlr_enable_pmr = nvme_pcie_ctrlr_enable_pmr,
+	.ctrlr_disable_pmr = nvme_pcie_ctrlr_disable_pmr,
+	.ctrlr_map_pmr = nvme_pcie_ctrlr_map_io_pmr,
+	.ctrlr_unmap_pmr = nvme_pcie_ctrlr_unmap_io_pmr,
+
+	.ctrlr_create_io_qpair = nvme_pcie_ctrlr_create_io_qpair,
+	.ctrlr_delete_io_qpair = nvme_pcie_ctrlr_delete_io_qpair,
+	.ctrlr_connect_qpair = nvme_pcie_ctrlr_connect_qpair,
+	.ctrlr_disconnect_qpair = nvme_pcie_ctrlr_disconnect_qpair,
+
+	.qpair_abort_reqs = nvme_pcie_qpair_abort_reqs,
+	.qpair_reset = nvme_pcie_qpair_reset,
+	.qpair_submit_request = nvme_pcie_qpair_submit_request,
+	.qpair_process_completions = nvme_pcie_qpair_process_completions,
+	.qpair_iterate_requests = nvme_pcie_qpair_iterate_requests,
+	.admin_qpair_abort_aers = nvme_pcie_admin_qpair_abort_aers,
+
+	.poll_group_create = nvme_pcie_poll_group_create,
+	.poll_group_connect_qpair = nvme_pcie_poll_group_connect_qpair,
+	.poll_group_disconnect_qpair = nvme_pcie_poll_group_disconnect_qpair,
+	.poll_group_add = nvme_pcie_poll_group_add,
+	.poll_group_remove = nvme_pcie_poll_group_remove,
+	.poll_group_process_completions = nvme_pcie_poll_group_process_completions,
+	.poll_group_destroy = nvme_pcie_poll_group_destroy,
+	.poll_group_get_stats = nvme_pcie_poll_group_get_stats,
+	.poll_group_free_stats = nvme_pcie_poll_group_free_stats
+};
+
+
+
+nvme_pcie_qpair_submit_tracker
+    nvme_pcie_qpair_ring_sq_doorbell(qpair)
+        spdk_mmio_write_4
+
+
+nvme_ctrlr_process_init -> state_machine
+
+
+
+nvme_rdma_qpair_process_cm_event
+
+

@@ -1,0 +1,7 @@
+[daos-packages]
+name=DAOS v2.0.3 Packages Packages
+baseurl=https://packages.daos.io/v2.0.3/CentOS7/packages/x86_64
+enabled=1
+gpgcheck=1
+protect=1
+gpgkey="https://packages.daos.io/RPM-GPG-KEY"
