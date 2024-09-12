@@ -950,15 +950,16 @@ static const struct spdk_vhost_user_dev_backend vhost_blk_user_device_backend
 .start_session =  vhost_blk_start -> vhost_blk_start(struct spdk_vhost_dev *vdev 以前 spdk_vhost_dev_backend 持有 vhost_blk 和 vhost_scsi 功能的回调，以及由 vhost_user 后端调用的回调。 此补丁将这些回调分为两个结构：spdk_vhost_dev_backend - 由 vhost_blk 和 vhost_scsi 实现，spdk_vhost_user_dev_backend - 仅由 vhost_user 后端实现，回调特定于该传输的会话管理
     bvsession->io_channel = vhost_blk_get_io_channel(vdev)
         spdk_bdev_get_io_channel(bvdev->bdev_desc)
-    vdev_worker -> vdev_worker(void *arg) -> _vdev_vq_worker
-        process_packed_vq
+    vdev_worker -> vdev_worker(void *arg) -> struct spdk_vhost_virtqueue *vq = arg -> _vdev_vq_worker(vq)
+        struct spdk_vhost_session *vsession = vq->vsession
+        process_packed_vq(bvsession, vq)
         or process_vq
     or no_bdev_vdev_worker -> _no_bdev_vdev_vq_worker
         no_bdev_process_packed_vq
             task_idx = vhost_vring_packed_desc_get_buffer_id(vq, req_idx, &num_descs)
             unlikely vhost_vq_packed_ring_enqueue
             blk_task_init(task)
-                blk_task->iovcnt = SPDK_COUNTOF(blk_task->iovs)
+                blk_task->iovcnt = SPDK_COUNTOF(blk_task->iovs) -> #define SPDK_COUNTOF(arr) (sizeof(arr) / sizeof((arr)[0])) -> array
                 blk_task->payload_size = 0
             blk_iovs_packed_queue_setup
                 vhost_vq_get_desc_packed(vsession, vq, req_idx, &desc, &desc_table, &desc_table_size)
@@ -968,21 +969,34 @@ static const struct spdk_vhost_user_dev_backend vhost_blk_user_device_backend
                             *desc_table = vhost_gpa_to_vva(vsession, addr, len)
                                 vva = (void *)rte_vhost_va_from_guest_pa(vsession->mem, addr, &newlen)
                 blk_iovs_packed_desc_setup(vsession, vq, req_idx, desc_table, desc_table_size, iovs, iovs_cnt, length)
+                    struct vring_packed_desc *desc
+                    desc = &vq->vring.desc_packed[req_idx]
                     vhost_vring_packed_desc_to_iov(vsession, iovs, &cnt, desc)
                         vhost_vring_desc_payload_to_iov(vsession, iov, iov_index, desc->addr, desc->len) -> desc -> payload
                             do
-                                vva = (uintptr_t)rte_vhost_va_from_guest_pa(vsession->mem, payload, &len)
-                                iov[*iov_index].iov_base = (void *)vva;
+                                vva = (uintptr_t)rte_vhost_va_from_guest_pa(vsession->mem, payload, &len) -> Convert guest physical address to host virtual address
+                                iov[*iov_index].iov_base = (void *)vva; -> map vva to iovs, when read/write iovs, eq to read/write vva
                                 iov[*iov_index].iov_len = len;
                                 remaining -= len;
                     out_cnt += vhost_vring_packed_desc_is_wr(desc)
                     vhost_vring_packed_desc_get_next(&desc, &req_idx, vq, desc_table, desc_table_size) -> Get subsequent descriptor from vq or desc table
-                    *length = len;
+                        (*req_idx)++
+                        *desc = &desc_table[*req_idx]
+                    *length = len -> calc task payload_size from desc len
                     *iovs_cnt = cnt
             vhost_vq_packed_ring_enqueue
+                struct vring_packed_desc *desc = &virtqueue->vring.desc_packed[virtqueue->last_used_idx]
+                desc->id = buffer_id
                 rte_vhost_set_last_inflight_io_packed(vsession->vid, virtqueue->vring_idx, inflight_head)
-                rte_vhost_clr_inflight_desc_packed
+                    inflight_info->desc[last].next = inflight_info->free_head
+                desc->flags |= VRING_DESC_F_AVAIL_USED
+                or desc->flags &= ~VRING_DESC_F_AVAIL_USED
+                rte_vhost_clr_inflight_desc_packed -> lib/vhost：将 virtio 相关功能移至 rte_vhost，目前只有 rte_vhost_user 使用 virtio 相关功能。它由 vhost_scsi 使用，并将由 vhost_user_blk virtio 传输使用
+                    inflight_info->desc[head].inflight = 0
+                    inflight_info->old_used_wrap_counter = inflight_info->used_wrap_counter
                 vhost_log_used_vring_elem(vsession, virtqueue, virtqueue->last_used_idx)
+                    rte_vhost_log_used_vring(vsession->vid, virtqueue->vring_idx, offset, len)
+                        vhost_log_used_vring(dev, vq, offset, len) -> __vhost_log_write
                 virtqueue->packed.used_phase = !virtqueue->packed.used_phase
                 virtqueue->used_req_cnt++
         or no_bdev_process_vq
@@ -998,8 +1012,12 @@ static const struct spdk_vhost_user_dev_backend vhost_blk_user_device_backend
                             write(q->vring.kickfd, &num_events, sizeof(num_events))
                             vsession->interrupt_mode = true
                         else vsession->interrupt_mode = false
-
 .new_connection = new_connection,
+    posix_memalign((void **)&vsession, SPDK_CACHE_LINE_SIZE, sizeof(*vsession) + user_dev->user_backend->session_ctx_size)
+    vsession->vdev = vdev;
+    vsession->vid = vid;
+    vsession->id = user_dev->vsessions_num++;
+    vsession->name = spdk_sprintf_alloc("%ss%u", vdev->name, vsession->vid);
     TAILQ_INSERT_TAIL(&user_dev->vsessions, vsession, tailq)
     vhost_session_install_rte_compat_hooks(vsession)
         rte_vhost_extern_callback_register(vsession->vid, &g_spdk_extern_vhost_ops, NULL)
@@ -1011,6 +1029,8 @@ struct rte_vhost_user_extern_ops g_spdk_extern_vhost_ops = {
 	.pre_msg_handle = extern_vhost_pre_msg_handler,
 
 	.post_msg_handle = extern_vhost_post_msg_handler,
+        vsession = vhost_session_find_by_vid(vid)
+            TAILQ_FOREACH(vsession, &user_dev->vsessions, tailq)
         if (msg->request == VHOST_USER_SET_MEM_TABLE)
             vhost_register_memtable_if_required(vsession, vid)
         switch (msg->request)
@@ -2356,30 +2376,62 @@ enum vhost_user_request {
 
 
 
+
+
 rpc.py bdev_virtio_attach_controller --dev-type blk --trtype user --traddr /tmp/vhost.0 --vq-count 2 --vq-size 512 VirtioBlk0
 or rpc.py bdev_virtio_attach_controller --dev-type blk --trtype pci --traddr 0000:01:00.0 VirtioBlk1
     rpc_bdev_virtio_attach_controller
-        bdev_virtio_pci_blk_dev_create
-        bdev_virtio_user_blk_dev_create
-            virtio_user_blk_dev_create
-                virtio_user_dev_init
-                    dev = calloc(1, sizeof(*dev))
-                    virtio_dev_construct(vdev, name, &virtio_user_ops, dev)
-                    virtio_user_dev_setup
-                        vhost_user_setup(dev)
-                            fd = socket(AF_UNIX, SOCK_STREAM, 0)
-                            connect(fd, (struct sockaddr *)&un, sizeof(un))
-                        case VIRTIO_USER_BACKEND_VHOST_VDPA
-                            dev->ops = &virtio_ops_vdpa
-                    vhost_user_sock(dev, VHOST_USER_SET_OWNER, NULL)
-                        switch (req)
-                        case VHOST_USER_SET_MEM_TABLE
-                            prepare_vhost_memory_user
-                        vhost_user_write(vhostfd, &msg, len, fds, fd_num)
-                        vhost_user_read(vhostfd, &msg)
-                virtio_dev_reset
-                virtio_blk_dev_init
-        bdev_virtio_vfio_user_blk_dev_create
+        if (strcmp(req->dev_type, "blk") == 0)
+            pci -> bdev_virtio_pci_blk_dev_create
+            user -> bdev_virtio_user_blk_dev_create
+                virtio_user_blk_dev_create
+                    virtio_user_dev_init
+                        dev = calloc(1, sizeof(*dev))
+                        virtio_dev_construct(vdev, name, &virtio_user_ops, dev)
+                        virtio_user_dev_setup
+                            vhost_user_setup(dev)
+                                fd = socket(AF_UNIX, SOCK_STREAM, 0)
+                                connect(fd, (struct sockaddr *)&un, sizeof(un))
+                            case VIRTIO_USER_BACKEND_VHOST_VDPA
+                                dev->ops = &virtio_ops_vdpa
+                        vhost_user_sock(dev, VHOST_USER_SET_OWNER, NULL)
+                            switch (req)
+                            case VHOST_USER_SET_MEM_TABLE
+                                prepare_vhost_memory_user
+                            vhost_user_write(vhostfd, &msg, len, fds, fd_num)
+                            vhost_user_read(vhostfd, &msg)
+                    virtio_dev_reset
+                    virtio_blk_dev_init
+            vfio-user -> bdev_virtio_vfio_user_blk_dev_create
+                virtio_vfio_user_dev_init(&bvdev->vdev, name, path)
+                    virtio_dev_construct(vdev, name, &virtio_vfio_user_ops, dev)
+                        vdev->backend_ops = ops
+                    spdk_vfio_user_setup
+                        vfio_user_dev_setup(device) -> socket -> connect -> return fd
+                            vfio_user_check_version
+                                vfio_user_dev_send_request(dev, VFIO_USER_VERSION, req.payload,
+                        vfio_user_get_dev_info -> VFIO_USER_DEVICE_GET_INFO
+                        vfio_device_map_bars_and_config_region
+                            vfio_user_get_dev_region_info(device, info, len, fds, VFIO_MAXIMUM_SPARSE_MMAP_REGIONS)
+                                VFIO_USER_DEVICE_GET_REGION_INFO
+                            vfio_device_setup_sparse_mmaps
+                                region->mmaps[j].mem = mmap(NULL, region->mmaps[j].size, prot, MAP_SHARED,
+                            vfio_device_map_region
+                                region->mmaps[0].mem = mmap(NULL, region->size, prot, MAP_SHARED,
+                    spdk_vfio_user_pci_bar_access(dev->ctx, VFIO_PCI_CONFIG_REGION_INDEX, 4, 2,
+                        vfio_user_dev_mmio_access
+                            vfio_user_dev_send_request(dev, VFIO_USER_REGION_WRITE
+                            vfio_user_dev_send_request(dev, VFIO_USER_REGION_READ
+                        memcpy(bar_addr, buf, len)
+                    dev->pci_cap_region = VFIO_PCI_BAR4_REGION_INDEX
+                virtio_dev_reset(&bvdev->vdev, VIRTIO_BLK_DEV_SUPPORTED_FEATURES)
+                virtio_dev_has_feature(&bvdev->vdev, VIRTIO_BLK_F_MQ)
+                virtio_dev_read_dev_config(&bvdev->vdev, offsetof(struct virtio_blk_config, num_queues),
+                virtio_blk_dev_init(bvdev, num_queues)
+        if (strcmp(req->dev_type, "scsi") == 0)
+            pci -> bdev_virtio_pci_scsi_dev_create
+            user -> bdev_virtio_user_scsi_dev_create
+            vfio-user -> bdev_vfio_user_scsi_dev_create
 
 
 static const struct virtio_dev_ops virtio_user_ops = {
@@ -2443,27 +2495,40 @@ static const struct spdk_vhost_user_dev_backend vhost_blk_user_device_backend = 
     .start_session =  vhost_blk_start,
     .stop_session = vhost_blk_stop,
     .alloc_vq_tasks = alloc_vq_task_pool,
-        vq->tasks = spdk_zmalloc
+        vq->tasks = spdk_zmalloc(sizeof(struct spdk_vhost_user_blk_task) * task_cnt, SPDK_CACHE_LINE_SIZE, NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA)
         task = &((struct spdk_vhost_user_blk_task *)vq->tasks)[j]
         task->bvsession = bvsession;
         task->req_idx = j;
         task->vq = vq;
     .register_vq_interrupt = vhost_blk_vq_register_interrupt, -> _vhost_blk_vq_register_interrupt
-        vq->intr = spdk_interrupt_register(vq->vring.kickfd, vdev_vq_worker, vq, "vdev_vq_worker")
+        vq->intr = spdk_interrupt_register(vq->vring.kickfd, vdev_vq_worker, vq, "vdev_vq_worker") -> interrupt
              process_packed_vq(bvsession, vq) <- if (packed_ring)
                 resubmit_cnt = submit_inflight_desc(bvsession, vq) -> lib/vhost：将 submit_inflight_desc() 添加到 CPU 使用率统计中，submit_inflight_desc() 实际上做了一些有意义的工作，因此当它真正处理任务时，轮询器应该返回 BUSY 状态
                     vhost_vq_used_ring_enqueue
                         vhost_vq_used_signal
                             rte_vhost_vring_call(vsession->vid, virtqueue->vring_idx)
-                    process_packed_inflight_blk_task
+                    process_packed_inflight_blk_task(vq, req_idx)
                         blk_task_enqueue(task)
+                            if (task->vq->packed.packed_ring)
+                                vhost_vq_packed_ring_enqueue
+                            else
+                                vhost_vq_used_ring_enqueue
                         blk_task_inc_task_cnt(task)
                         blk_task_init(task)
-                        blk_iovs_inflight_queue_setup
-                        vhost_user_process_blk_request
+                        blk_iovs_inflight_queue_setup(task->bvsession, vq, task->req_idx, blk_task->iovs, &blk_task->iovcnt, &blk_task->payload_size) -> set desc -> iovs
+                            vhost_inflight_queue_get_desc
+                                *desc = &desc_array[req_idx]
+                            blk_iovs_packed_desc_setup -> set desc
+                        vhost_user_process_blk_request(task)
                             virtio_blk_process_request(vdev, bvsession->io_channel, &user_task->blk_task, vhost_user_blk_request_finish, NULL) -> vhost：添加 virtio_blk 抽象，此补丁为自定义传输添加了 virtio_blk 抽象，其中首先使用“vhost_user_blk”。添加了 spdk_virtio_blk_transport_ops，描述了每个传输要实现的必要回调。请使用 SPDK_VIRTIO_BLK_TRANSPORT_REGISTER 注册传输。传输可以使用 virtio_blk_process_request() 来处理来自其队列的传入 I/O。添加了 virtio_blk_create_transport RPC 来创建已注册的传输之一，可能带有自定义 JSON 参数。向 vhost_create_blk_controller RPC 添加了“transport”参数，以指定哪个传输应该创建控制器。默认情况下使用 vhost_user_blk 传输 -> commit: https://github.com/ssbandjl/spdk/commit/b727e804d61c5094e073c8503694b5d84b2d6adf
                                 struct virtio_blk_outhdr req
-                                task->cb = cb
+                                    /* VIRTIO_BLK_T* */
+                                    __virtio32 type;
+                                    /* io priority. */
+                                    __virtio32 ioprio;
+                                    /* Sector (ie. 512 byte offset) */
+                                    __virtio64 sector;
+                                task->cb = cb -> vhost_user_blk_request_finish
                                 iov = &task->iovs[0]
                                 memcpy(&req, iov->iov_base, sizeof(req))
                                 switch (type)
@@ -2479,9 +2544,9 @@ static const struct spdk_vhost_user_dev_backend vhost_blk_user_device_backend = 
                                 case VIRTIO_BLK_T_GET_ID
                                 default
                                     blk_request_finish(VIRTIO_BLK_S_UNSUPP, task)
-                    else process_blk_task
+                    else process_blk_task(vq, req_idx)
                 vhost_vq_packed_ring_is_avail
-                process_packed_blk_task
+                process_packed_blk_task(vq, vq->last_avail_idx)
              or process_vq(bvsession, vq) -> split ring
              vhost_session_vq_used_signal
                 rte_vhost_vring_call
@@ -2495,7 +2560,11 @@ static const struct spdk_vhost_user_dev_backend vhost_blk_user_device_backend = 
 blk_request_complete_cb
     spdk_bdev_free_io(bdev_io)
     blk_request_finish(success ? VIRTIO_BLK_S_OK : VIRTIO_BLK_S_IOERR, task)
-    
+        task->cb(status, task, task->cb_arg) -> vhost_user_blk_request_finish
+            blk_task_enqueue(user_task)
+            blk_task_finish(user_task)
+                blk_task_dec_task_cnt(task)
+                task->used = false
 
 static const struct spdk_vhost_dev_backend vhost_blk_device_backend = {
     .type = VHOST_BACKEND_BLK,
@@ -3860,6 +3929,44 @@ const struct spdk_nvme_transport_ops rdma_ops = {
 	.poll_group_get_stats = nvme_rdma_poll_group_get_stats,
 	.poll_group_free_stats = nvme_rdma_poll_group_free_stats,
 };
+
+
+static const struct virtio_dev_ops virtio_vfio_user_ops = {
+	.read_dev_cfg	= virtio_vfio_user_read_dev_config,
+	.write_dev_cfg	= virtio_vfio_user_write_dev_config,
+	.get_status	= virtio_vfio_user_get_status,
+	.set_status	= virtio_vfio_user_set_status,
+	.get_features	= virtio_vfio_user_get_features,
+	.set_features	= virtio_vfio_user_set_features,
+	.destruct_dev	= virtio_vfio_user_destruct_dev,
+	.get_queue_size	= virtio_vfio_user_get_queue_size,
+	.setup_queue	= virtio_vfio_user_setup_queue,
+	.del_queue	= virtio_vfio_user_del_queue,
+	.notify_queue	= virtio_vfio_user_notify_queue
+};
+
+
+enum vfio_user_command {
+	VFIO_USER_VERSION			= 1,
+	VFIO_USER_DMA_MAP			= 2,
+	VFIO_USER_DMA_UNMAP			= 3,
+	VFIO_USER_DEVICE_GET_INFO		= 4,
+	VFIO_USER_DEVICE_GET_REGION_INFO	= 5,
+	VFIO_USER_DEVICE_GET_REGION_IO_FDS	= 6,
+	VFIO_USER_DEVICE_GET_IRQ_INFO		= 7,
+	VFIO_USER_DEVICE_SET_IRQS		= 8,
+	VFIO_USER_REGION_READ			= 9,
+	VFIO_USER_REGION_WRITE			= 10,
+	VFIO_USER_DMA_READ			= 11,
+	VFIO_USER_DMA_WRITE			= 12,
+	VFIO_USER_DEVICE_RESET			= 13,
+	VFIO_USER_DIRTY_PAGES			= 14,
+	VFIO_USER_MAX,
+};
+
+
+
+
 
 
 
