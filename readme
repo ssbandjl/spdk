@@ -11,6 +11,8 @@ log日志, SPDK Trace Log用法简介: https://zhuanlan.zhihu.com/p/556631633
 
 submodul_and_spdk_obj: https://portal.qiniu.com/kodo/bucket/resource-v2?bucketName=sxb-obj
 
+git submodule update --init --recursive
+
 常用命令:
 查看线程状态: ./scripts/rpc.py -s /var/tmp/spdk_xb.sock thread_get_stats
 lscpu
@@ -2119,9 +2121,16 @@ case RDMA_REQUEST_STATE_READY_TO_EXECUTE
           bdev_writev_blocks_with_md
             bdev_io_valid_blocks
             bdev_io = bdev_channel_get_io(channel)
-            ...
+                bdev_io = spdk_mempool_get(g_bdev_mgr.bdev_io_pool) -> rte_mempool_get((struct rte_mempool *)mp, &ele)
+            bdev_io->type = SPDK_BDEV_IO_TYPE_WRITE
             bdev_io->u.bdev.iovs = iov
-            ...
+            bdev_io->u.bdev.iovcnt = iovcnt
+            bdev_io_init(bdev_io, bdev, cb_arg, cb)
+                bdev_io->internal.status = SPDK_BDEV_IO_STATUS_PENDING
+                bdev_io->internal.split = bdev_io_should_split(bdev_io)
+                    bdev_rw_should_split(bdev_io)
+                        bdev_io->u.bdev.iovcnt > max_segs -> split
+            bdev_io->u.bdev.accel_sequence = seq;
             _bdev_io_submit_ext(desc, bdev_io) -> bdev：从 spdk_bdev_io 中删除 spdk_bdev_ext_io_opts spdk_bdev_ext_io_opts 结构用于在提交 bdev IO 请求时传递额外选项，而无需修改/添加函数来处理新选项。 此外，该结构还有一个大小字段，允许在不破坏 ABI 的情况下添加新字段（因此必须提高库的主要版本）。 它也是 spdk_bdev_io 的一部分，将其从该结构中删除有几个原因： 1. 大小字段仅在通过指针传递的结构中才有意义。 spdk_bdev_ext_io_opts 确实作为指向 spdk_bdev_{readv,writev}_blocks_ext() 的指针传递，但它也嵌入在 spdk_bdev_io (internal.ext_opts_copy) 中，这也是 API 的一部分。 这意味着每次向 spdk_bdev_ext_io_opts 添加新字段时，spdk_bdev_io 的大小也会发生变化，因此我们无论如何都需要更改 libspdk_bdev 的主要版本，从而使 spdk_bdev_ext_io_opts.size 无用。 2. size字段也使得internal.ext_opts使用起来很麻烦，因为每次访问它的一个字段时，我们都需要检查大小。 目前代码并没有这样做，因为最初引入此结构时所有现有的 spdk_bdev_ext_io_opts 字段都存在，但我们需要在访问任何新字段之前检查大小。 3. spdk_bdev_ext_io_opts有一个metadata字段，而spdk_bdev_io已经有u.bdev.md_buf，这意味着我们在spdk_bdev_io中的几个不同的地方存储相同的东西（u.bdev.md_buf，u.bdev.ext_opts->metadata，internal。 ext_opts->元数据）。 因此，此补丁从 spdk_bdev_io 中删除对 spdk_bdev_ext_io_opts 的所有引用，并将其替换为 spdk_bdev_io 中缺少的字段（memory_domain、memory_domain_ctx）。 不幸的是，此更改破坏了 API，并需要更改支持 spdk_bdev_io.u.bdev.ext_opts 的 bdev 模块
               bdev_io_needs_sequence_exec -> false, bdev：写请求的加速序列支持现在可以提交包含一系列加速操作的写入请求，这些操作需要在实际写入数据之前执行。 如果 bdev 支持加速序列并且不需要拆分请求，则此类请求将直接传递到 bdev 模块（以便它可以将后续操作附加到加速序列）。 如果这些条件中的任何一个不满足，bdev 层将在将请求传递给 bdev 模块之前执行所有累积的加速操作。 不提交带有加速序列的拆分 IO 的原因是我们也需要拆分该加速序列。 目前，accel 中没有这样的功能，因此我们以与底层 bdev 模块不支持 accel 序列相同的方式处理这种情况（它在 bdev_io 拆分之前执行）
               bdev_io_submit(bdev_io)
@@ -2469,6 +2478,7 @@ static const struct virtio_dev_ops virtio_user_ops = {
 	.setup_queue	= virtio_user_setup_queue,
 	.del_queue	= virtio_user_del_queue,
 	.notify_queue	= virtio_user_notify_queue,
+        write(dev->kickfds[vq->vq_queue_index], &buf, sizeof(buf)
 	.dump_json_info = virtio_user_dump_json_info,
 	.write_json_config = virtio_user_write_json_config,
 };
@@ -2537,7 +2547,7 @@ static const struct spdk_vhost_user_dev_backend vhost_blk_user_device_backend = 
                                 case VIRTIO_BLK_T_OUT
                                     spdk_bdev_writev(bvdev->bdev_desc, ch, &task->iovs[1], iovcnt, req.sector * 512, payload_len, blk_request_complete_cb, task)
                                         bdev_bytes_to_blocks(spdk_bdev_desc_get_bdev(desc)
-                                        spdk_bdev_writev_blocks
+                                        spdk_bdev_writev_blocks(desc, ch, iov, iovcnt, offset_blocks, num_blocks, cb, cb_arg)
                                 case VIRTIO_BLK_T_DISCARD
                                 case VIRTIO_BLK_T_WRITE_ZEROES
                                 case VIRTIO_BLK_T_FLUSH
@@ -3025,6 +3035,26 @@ static const struct spdk_bdev_fn_table virtio_fn_table = {
         _bdev_virtio_submit_request
         bdev_virtio_command
             req->type = VIRTIO_BLK_T_IN
+            bdev_virtio_blk_send_io(ch, bdev_io)
+                struct bdev_virtio_blk_io_channel *virtio_channel = spdk_io_channel_get_ctx(ch)
+                struct virtqueue *vq = virtio_channel->vq
+                struct virtio_blk_io_ctx *io_ctx = (struct virtio_blk_io_ctx *)bdev_io->driver_ctx
+                virtqueue_req_start(vq, bdev_io, bdev_io->u.bdev.iovcnt + 2)
+                    vq->req_start = vq->vq_desc_head_idx
+                    dxp = &vq->vq_descx[vq->req_start]
+                virtqueue_req_add_iovs(vq, &io_ctx->iov_req, 1, SPDK_VIRTIO_DESC_RO)
+                    for (i = 0; i < iovcnt; ++i)
+                        desc = &vq->vq_ring.desc[new_head]
+                        desc->addr  = (uintptr_t)iovs[i].iov_base
+                        or desc->addr = spdk_vtophys(iovs[i].iov_base, NULL)
+                        desc->flags = desc_type | VRING_DESC_F_NEXT -> desc flag
+                virtqueue_req_add_iovs(vq, bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
+                virtqueue_req_add_iovs(vq, &io_ctx->iov_resp, 1, SPDK_VIRTIO_DESC_WR)
+                virtqueue_req_flush(vq)
+                    finish_req(vq)
+                    vring_used_event(&vq->vq_ring) = vq->vq_used_cons_idx - vq->vq_nentries - 1 -> #define vring_used_event(vr) ((vr)->avail->ring[(vr)->num]) -> #define vring_avail_event(vr) (*(__virtio16 *)&(vr)->used->ring[(vr)->num])
+                    vring_need_event(vring_avail_event(&vq->vq_ring), vq->vq_avail_idx, vq->vq_avail_idx - reqs_finished)
+                    virtio_dev_backend_ops(vq->vdev)->notify_queue(vq->vdev, vq)
 	.io_type_supported	= bdev_virtio_io_type_supported,
 	.get_io_channel		= bdev_virtio_get_io_channel,
 	.dump_info_json		= bdev_virtio_dump_info_json,
@@ -3279,11 +3309,6 @@ spdk_pci_device_map_bar(pci_dev, 0, &hw->bar_va, &hw->bar_pa, &hw->bar_size) -> 
 subsystem_nvme_create
 
 
-
-bdev_write_blocks_with_md
-    bdev_io->type = SPDK_BDEV_IO_TYPE_WRITE
-    bdev_io_init(bdev_io, bdev, cb_arg, cb)
-    bdev_io_submit(bdev_io)
 
 
 rpc.py bdev_rbd_register_cluster rbd_cluster
@@ -3966,6 +3991,94 @@ enum vfio_user_command {
 
 
 
+
+
+
+desc flag:
+include/linux/virtio_ring.h
+/* This marks a buffer as continuing via the next field. */
+#define VRING_DESC_F_NEXT	1
+/* This marks a buffer as write-only (otherwise read-only). */
+#define VRING_DESC_F_WRITE	2
+/* This means the buffer contains a list of buffer descriptors. */
+#define VRING_DESC_F_INDIRECT	4
+
+/*
+ * Mark a descriptor as available or used in packed ring.
+ * Notice: they are defined as shifts instead of shifted values.
+ */
+#define VRING_PACKED_DESC_F_AVAIL	7
+#define VRING_PACKED_DESC_F_USED	15
+
+/* The Host uses this in used->flags to advise the Guest: don't kick me when
+ * you add a buffer.  It's unreliable, so it's simply an optimization.  Guest
+ * will still kick if it's out of buffers. */
+#define VRING_USED_F_NO_NOTIFY	1
+/* The Guest uses this in avail->flags to advise the Host: don't interrupt me
+ * when you consume a buffer.  It's unreliable, so it's simply an
+ * optimization.  */
+#define VRING_AVAIL_F_NO_INTERRUPT	1
+
+/* Enable events in packed ring. */
+#define VRING_PACKED_EVENT_FLAG_ENABLE	0x0
+/* Disable events in packed ring. */
+#define VRING_PACKED_EVENT_FLAG_DISABLE	0x1
+/*
+ * Enable events for a specific descriptor in packed ring.
+ * (as specified by Descriptor Ring Change Event Offset/Wrap Counter).
+ * Only valid if VIRTIO_RING_F_EVENT_IDX has been negotiated.
+ */
+#define VRING_PACKED_EVENT_FLAG_DESC	0x2 -> 为打包环中的特定描述符启用事件。（由描述符环更改事件偏移/包装计数器指定）。仅当已协商 VIRTIO_RING_F_EVENT_IDX 时才有效
+
+/*
+ * Wrap counter bit shift in event suppression structure
+ * of packed ring.
+ */
+#define VRING_PACKED_EVENT_F_WRAP_CTR	15
+
+/* We support indirect buffer descriptors */
+#define VIRTIO_RING_F_INDIRECT_DESC	28
+
+/* The Guest publishes the used index for which it expects an interrupt
+ * at the end of the avail ring. Host should ignore the avail->flags field. */
+/* The Host publishes the avail index for which it expects a kick
+ * at the end of the used ring. Guest should ignore the used->flags field. */
+#define VIRTIO_RING_F_EVENT_IDX		29
+
+/* Virtio ring descriptors: 16 bytes.  These can chain together via "next". */
+struct vring_desc {
+	/* Address (guest-physical). */
+	__virtio64 addr;
+	/* Length. */
+	__virtio32 len;
+	/* The flags as indicated above. */
+	__virtio16 flags;
+	/* We chain unused descriptors via this, too */
+	__virtio16 next;
+};
+
+#define vring_used_event(vr) ((vr)->avail->ring[(vr)->num])
+#define vring_avail_event(vr) (*(__virtio16 *)&(vr)->used->ring[(vr)->num])
+
+static inline void
+vring_init(struct vring *vr, unsigned int num, void *p,
+	   unsigned long align)
+{
+	vr->num = num;
+	vr->desc = p;
+	vr->avail = (struct vring_avail *)((char *)p + num * sizeof(struct vring_desc
+								   ));
+	vr->used = (void *)(((uintptr_t)&vr->avail->ring[num] + sizeof(__virtio16)
+			     + align - 1) & ~(align - 1));
+}
+
+static inline unsigned
+vring_size(unsigned int num, unsigned long align)
+{
+	return ((sizeof(struct vring_desc) * num + sizeof(__virtio16) * (3 + num)
+		 + align - 1) & ~(align - 1))
+	       + sizeof(__virtio16) * 3 + sizeof(struct vring_used_elem) * num;
+}
 
 
 
