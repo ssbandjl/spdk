@@ -6,7 +6,7 @@
 SPDK_ROOT_DIR := $(abspath $(CURDIR)/../..)
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 
-SO_VER := 11
+SO_VER := 15
 SO_MINOR := 0
 
 C_SRCS = nvme_ctrlr_cmd.c nvme_ctrlr.c nvme_fabric.c nvme_ns_cmd.c \
@@ -14,10 +14,9 @@ C_SRCS = nvme_ctrlr_cmd.c nvme_ctrlr.c nvme_fabric.c nvme_ns_cmd.c \
 	nvme_quirks.c nvme_transport.c nvme_discovery.c \
 	nvme_ctrlr_ocssd_cmd.c nvme_ns_ocssd_cmd.c nvme_tcp.c \
 	nvme_opal.c nvme_io_msg.c nvme_poll_group.c nvme_zns.c \
-	nvme_cuse.c
-ifeq ($(OS),Linux)
-C_SRCS += nvme_vfio_user.c
-endif
+	nvme_stubs.c nvme_auth.c
+C_SRCS-$(CONFIG_NVME_CUSE) += nvme_cuse.c
+C_SRCS-$(CONFIG_VFIO_USER) += nvme_vfio_user.c
 C_SRCS-$(CONFIG_RDMA) += nvme_rdma.c
 
 LIBNAME = nvme
@@ -44,6 +43,7 @@ endif
 ifeq ($(CONFIG_NVME_CUSE),y)
 # fuse requires to set _FILE_OFFSET_BITS to 64 bits even for 64 bit machines
 CFLAGS += -D_FILE_OFFSET_BITS=64
+LOCAL_SYS_LIBS += -lfuse3
 endif
 
 CFLAGS += -Wpointer-arith

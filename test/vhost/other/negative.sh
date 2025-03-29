@@ -67,7 +67,7 @@ notice "==============="
 notice ""
 notice "running SPDK"
 notice ""
-vhost_run -n 0 -a "-m 0xf"
+vhost_run -n 0 -- -m 0xf
 notice ""
 rpc_py="$rootdir/scripts/rpc.py -s $(get_vhost_dir 0)/rpc.sock"
 $rpc_py bdev_malloc_create -b Malloc0 128 4096
@@ -209,7 +209,7 @@ notice "Trying to create already existing block transport layer"
 # vhost_user_blk transport is created by default on application start,
 # so first rpc call to create the transport should fail with EEXIST.
 if $rpc_py virtio_blk_create_transport vhost_user_blk; then
-	error "Creating already existing virtio blk transport succeded, but shouldn't"
+	error "Creating already existing virtio blk transport succeeded, but shouldn't"
 fi
 
 notice "Testing done -> shutting down"

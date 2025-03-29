@@ -1,6 +1,6 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2022 Intel Corporation.
- *   Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES
+ *   Copyright (c) 2022, 2023 NVIDIA CORPORATION & AFFILIATES
  *   All rights reserved.
  */
 
@@ -17,32 +17,60 @@
 #include "spdk/crc32.h"
 #include "spdk/util.h"
 #include "spdk/xor.h"
+#include "spdk/dif.h"
+
+#ifdef SPDK_CONFIG_HAVE_LZ4
+#include <lz4.h>
+#endif
 
 #ifdef SPDK_CONFIG_ISAL
 #include "../isa-l/include/igzip_lib.h"
 #ifdef SPDK_CONFIG_ISAL_CRYPTO
 #include "../isa-l-crypto/include/aes_xts.h"
+#include "../isa-l-crypto/include/isal_crypto_api.h"
 #endif
 #endif
-
-#define ACCEL_AES_XTS_128_KEY_SIZE 16
-#define ACCEL_AES_XTS_256_KEY_SIZE 32
 
 /* Per the AES-XTS spec, the size of data unit cannot be bigger than 2^20 blocks, 128b each block */
 #define ACCEL_AES_XTS_MAX_BLOCK_SIZE (1 << 24)
+
+#ifdef SPDK_CONFIG_ISAL
+#define COMP_DEFLATE_MIN_LEVEL ISAL_DEF_MIN_LEVEL
+#define COMP_DEFLATE_MAX_LEVEL ISAL_DEF_MAX_LEVEL
+#else
+#define COMP_DEFLATE_MIN_LEVEL 0
+#define COMP_DEFLATE_MAX_LEVEL 0
+#endif
+
+#define COMP_DEFLATE_LEVEL_NUM (COMP_DEFLATE_MAX_LEVEL + 1)
+
+struct comp_deflate_level_buf {
+	uint32_t size;
+	uint8_t  *buf;
+};
 
 struct sw_accel_io_channel {
 	/* for ISAL */
 #ifdef SPDK_CONFIG_ISAL
 	struct isal_zstream		stream;
 	struct inflate_state		state;
+	/* The array index corresponds to the algorithm level */
+	struct comp_deflate_level_buf   deflate_level_bufs[COMP_DEFLATE_LEVEL_NUM];
+	uint8_t                         level_buf_mem[ISAL_DEF_LVL0_DEFAULT + ISAL_DEF_LVL1_DEFAULT +
+					      ISAL_DEF_LVL2_DEFAULT + ISAL_DEF_LVL3_DEFAULT];
+#endif
+#ifdef SPDK_CONFIG_HAVE_LZ4
+	/* for lz4 */
+	LZ4_stream_t                    *lz4_stream;
+	LZ4_streamDecode_t              *lz4_stream_decode;
 #endif
 	struct spdk_poller		*completion_poller;
-	TAILQ_HEAD(, spdk_accel_task)	tasks_to_complete;
+	STAILQ_HEAD(, spdk_accel_task)	tasks_to_complete;
 };
 
-typedef void (*sw_accel_crypto_op)(uint8_t *k2, uint8_t *k1, uint8_t *tweak, uint64_t lba_size,
-				   const uint8_t *src, uint8_t *dst);
+typedef int (*sw_accel_crypto_op)(const uint8_t *k2, const uint8_t *k1,
+				  const uint8_t *initial_tweak, const uint64_t len_bytes,
+				  const void *in, void *out);
 
 struct sw_accel_crypto_key_data {
 	sw_accel_crypto_op encrypt;
@@ -54,32 +82,37 @@ static struct spdk_accel_module_if g_sw_module;
 static void sw_accel_crypto_key_deinit(struct spdk_accel_crypto_key *_key);
 static int sw_accel_crypto_key_init(struct spdk_accel_crypto_key *key);
 static bool sw_accel_crypto_supports_tweak_mode(enum spdk_accel_crypto_tweak_mode tweak_mode);
-static bool sw_accel_crypto_supports_cipher(enum spdk_accel_cipher cipher);
+static bool sw_accel_crypto_supports_cipher(enum spdk_accel_cipher cipher, size_t key_size);
 
-/* Post SW completions to a list and complete in a poller as we don't want to
- * complete them on the caller's stack as they'll likely submit another. */
+/* Post SW completions to a list; processed by ->completion_poller. */
 inline static void
 _add_to_comp_list(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task, int status)
 {
 	accel_task->status = status;
-	TAILQ_INSERT_TAIL(&sw_ch->tasks_to_complete, accel_task, link);
+	STAILQ_INSERT_TAIL(&sw_ch->tasks_to_complete, accel_task, link);
 }
 
 static bool
-sw_accel_supports_opcode(enum accel_opcode opc)
+sw_accel_supports_opcode(enum spdk_accel_opcode opc)
 {
 	switch (opc) {
-	case ACCEL_OPC_COPY:
-	case ACCEL_OPC_FILL:
-	case ACCEL_OPC_DUALCAST:
-	case ACCEL_OPC_COMPARE:
-	case ACCEL_OPC_CRC32C:
-	case ACCEL_OPC_COPY_CRC32C:
-	case ACCEL_OPC_COMPRESS:
-	case ACCEL_OPC_DECOMPRESS:
-	case ACCEL_OPC_ENCRYPT:
-	case ACCEL_OPC_DECRYPT:
-	case ACCEL_OPC_XOR:
+	case SPDK_ACCEL_OPC_COPY:
+	case SPDK_ACCEL_OPC_FILL:
+	case SPDK_ACCEL_OPC_DUALCAST:
+	case SPDK_ACCEL_OPC_COMPARE:
+	case SPDK_ACCEL_OPC_CRC32C:
+	case SPDK_ACCEL_OPC_COPY_CRC32C:
+	case SPDK_ACCEL_OPC_COMPRESS:
+	case SPDK_ACCEL_OPC_DECOMPRESS:
+	case SPDK_ACCEL_OPC_ENCRYPT:
+	case SPDK_ACCEL_OPC_DECRYPT:
+	case SPDK_ACCEL_OPC_XOR:
+	case SPDK_ACCEL_OPC_DIF_VERIFY:
+	case SPDK_ACCEL_OPC_DIF_GENERATE:
+	case SPDK_ACCEL_OPC_DIF_GENERATE_COPY:
+	case SPDK_ACCEL_OPC_DIF_VERIFY_COPY:
+	case SPDK_ACCEL_OPC_DIX_GENERATE:
+	case SPDK_ACCEL_OPC_DIX_VERIFY:
 		return true;
 	default:
 		return false;
@@ -162,7 +195,105 @@ _sw_accel_crc32cv(uint32_t *crc_dst, struct iovec *iov, uint32_t iovcnt, uint32_
 }
 
 static int
-_sw_accel_compress(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task)
+_sw_accel_compress_lz4(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task)
+{
+#ifdef SPDK_CONFIG_HAVE_LZ4
+	LZ4_stream_t *stream = sw_ch->lz4_stream;
+	struct iovec *siov = accel_task->s.iovs;
+	struct iovec *diov = accel_task->d.iovs;
+	size_t dst_segoffset = 0;
+	int32_t comp_size = 0;
+	uint32_t output_size = 0;
+	uint32_t i, d = 0;
+	int rc = 0;
+
+	LZ4_resetStream(stream);
+	for (i = 0; i < accel_task->s.iovcnt; i++) {
+		if ((diov[d].iov_len - dst_segoffset) == 0) {
+			if (++d < accel_task->d.iovcnt) {
+				dst_segoffset = 0;
+			} else {
+				SPDK_ERRLOG("Not enough destination buffer provided.\n");
+				rc = -ENOMEM;
+				break;
+			}
+		}
+
+		comp_size = LZ4_compress_fast_continue(stream, siov[i].iov_base, diov[d].iov_base + dst_segoffset,
+						       siov[i].iov_len, diov[d].iov_len - dst_segoffset,
+						       accel_task->comp.level);
+		if (comp_size <= 0) {
+			SPDK_ERRLOG("LZ4_compress_fast_continue was incorrectly executed.\n");
+			rc = -EIO;
+			break;
+		}
+
+		dst_segoffset += comp_size;
+		output_size += comp_size;
+	}
+
+	/* Get our total output size */
+	if (accel_task->output_size != NULL) {
+		*accel_task->output_size = output_size;
+	}
+
+	return rc;
+#else
+	SPDK_ERRLOG("LZ4 library is required to use software compression.\n");
+	return -EINVAL;
+#endif
+}
+
+static int
+_sw_accel_decompress_lz4(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task)
+{
+#ifdef SPDK_CONFIG_HAVE_LZ4
+	LZ4_streamDecode_t *stream = sw_ch->lz4_stream_decode;
+	struct iovec *siov = accel_task->s.iovs;
+	struct iovec *diov = accel_task->d.iovs;
+	size_t dst_segoffset = 0;
+	int32_t decomp_size = 0;
+	uint32_t output_size = 0;
+	uint32_t i, d = 0;
+	int rc = 0;
+
+	LZ4_setStreamDecode(stream, NULL, 0);
+	for (i = 0; i < accel_task->s.iovcnt; ++i) {
+		if ((diov[d].iov_len - dst_segoffset) == 0) {
+			if (++d < accel_task->d.iovcnt) {
+				dst_segoffset = 0;
+			} else {
+				SPDK_ERRLOG("Not enough destination buffer provided.\n");
+				rc = -ENOMEM;
+				break;
+			}
+		}
+		decomp_size = LZ4_decompress_safe_continue(stream, siov[i].iov_base,
+				diov[d].iov_base + dst_segoffset, siov[i].iov_len,
+				diov[d].iov_len - dst_segoffset);
+		if (decomp_size < 0) {
+			SPDK_ERRLOG("LZ4_compress_fast_continue was incorrectly executed.\n");
+			rc = -EIO;
+			break;
+		}
+		dst_segoffset += decomp_size;
+		output_size += decomp_size;
+	}
+
+	/* Get our total output size */
+	if (accel_task->output_size != NULL) {
+		*accel_task->output_size = output_size;
+	}
+
+	return rc;
+#else
+	SPDK_ERRLOG("LZ4 library is required to use software compression.\n");
+	return -EINVAL;
+#endif
+}
+
+static int
+_sw_accel_compress_deflate(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task)
 {
 #ifdef SPDK_CONFIG_ISAL
 	size_t last_seglen = accel_task->s.iovs[accel_task->s.iovcnt - 1].iov_len;
@@ -171,6 +302,11 @@ _sw_accel_compress(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *ac
 	size_t remaining;
 	uint32_t i, s = 0, d = 0;
 	int rc = 0;
+
+	if (accel_task->comp.level > COMP_DEFLATE_MAX_LEVEL) {
+		SPDK_ERRLOG("isal_deflate doesn't support this algorithm level(%u)\n", accel_task->comp.level);
+		return -EINVAL;
+	}
 
 	remaining = 0;
 	for (i = 0; i < accel_task->s.iovcnt; ++i) {
@@ -183,6 +319,9 @@ _sw_accel_compress(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *ac
 	sw_ch->stream.avail_out = diov[d].iov_len;
 	sw_ch->stream.next_in = siov[s].iov_base;
 	sw_ch->stream.avail_in = siov[s].iov_len;
+	sw_ch->stream.level = accel_task->comp.level;
+	sw_ch->stream.level_buf = sw_ch->deflate_level_bufs[accel_task->comp.level].buf;
+	sw_ch->stream.level_buf_size = sw_ch->deflate_level_bufs[accel_task->comp.level].size;
 
 	do {
 		/* if isal has exhausted the current dst iovec, move to the next
@@ -246,7 +385,7 @@ _sw_accel_compress(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *ac
 }
 
 static int
-_sw_accel_decompress(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task)
+_sw_accel_decompress_deflate(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task)
 {
 #ifdef SPDK_CONFIG_ISAL
 	struct iovec *siov = accel_task->s.iovs;
@@ -301,6 +440,34 @@ _sw_accel_decompress(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *
 }
 
 static int
+_sw_accel_compress(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task)
+{
+	switch (accel_task->comp.algo) {
+	case SPDK_ACCEL_COMP_ALGO_DEFLATE:
+		return _sw_accel_compress_deflate(sw_ch, accel_task);
+	case SPDK_ACCEL_COMP_ALGO_LZ4:
+		return _sw_accel_compress_lz4(sw_ch, accel_task);
+	default:
+		assert(0);
+		return -EINVAL;
+	}
+}
+
+static int
+_sw_accel_decompress(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task)
+{
+	switch (accel_task->comp.algo) {
+	case SPDK_ACCEL_COMP_ALGO_DEFLATE:
+		return _sw_accel_decompress_deflate(sw_ch, accel_task);
+	case SPDK_ACCEL_COMP_ALGO_LZ4:
+		return _sw_accel_decompress_lz4(sw_ch, accel_task);
+	default:
+		assert(0);
+		return -EINVAL;
+	}
+}
+
+static int
 _sw_accel_crypto_operation(struct spdk_accel_task *accel_task, struct spdk_accel_crypto_key *key,
 			   sw_accel_crypto_op op)
 {
@@ -312,6 +479,7 @@ _sw_accel_crypto_operation(struct spdk_accel_task *accel_task, struct spdk_accel
 	uint32_t i, block_size, crypto_len, crypto_accum_len = 0;
 	struct iovec *src_iov, *dst_iov;
 	uint8_t *src, *dst;
+	int rc;
 
 	/* iv is 128 bits, since we are using logical block address (64 bits) as iv, fill first 8 bytes with zeroes */
 	iv[0] = 0;
@@ -356,7 +524,10 @@ _sw_accel_crypto_operation(struct spdk_accel_task *accel_task, struct spdk_accel
 		src = (uint8_t *)src_iov->iov_base + src_offset;
 		dst = (uint8_t *)dst_iov->iov_base + dst_offset;
 
-		op((uint8_t *)key->key2, (uint8_t *)key->key, (uint8_t *)iv, crypto_len, src, dst);
+		rc = op((uint8_t *)key->key2, (uint8_t *)key->key, (uint8_t *)iv, crypto_len, src, dst);
+		if (rc != ISAL_CRYPTO_ERR_NONE) {
+			break;
+		}
 
 		src_offset += crypto_len;
 		dst_offset += crypto_len;
@@ -445,61 +616,172 @@ _sw_accel_xor(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_t
 }
 
 static int
+_sw_accel_dif_verify(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task)
+{
+	return spdk_dif_verify(accel_task->s.iovs,
+			       accel_task->s.iovcnt,
+			       accel_task->dif.num_blocks,
+			       accel_task->dif.ctx,
+			       accel_task->dif.err);
+}
+
+static int
+_sw_accel_dif_verify_copy(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task)
+{
+	return spdk_dif_verify_copy(accel_task->d.iovs,
+				    accel_task->d.iovcnt,
+				    accel_task->s.iovs,
+				    accel_task->s.iovcnt,
+				    accel_task->dif.num_blocks,
+				    accel_task->dif.ctx,
+				    accel_task->dif.err);
+}
+
+static int
+_sw_accel_dif_generate(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task)
+{
+	return spdk_dif_generate(accel_task->s.iovs,
+				 accel_task->s.iovcnt,
+				 accel_task->dif.num_blocks,
+				 accel_task->dif.ctx);
+}
+
+static int
+_sw_accel_dif_generate_copy(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task)
+{
+	return spdk_dif_generate_copy(accel_task->s.iovs,
+				      accel_task->s.iovcnt,
+				      accel_task->d.iovs,
+				      accel_task->d.iovcnt,
+				      accel_task->dif.num_blocks,
+				      accel_task->dif.ctx);
+}
+
+static int
+_sw_accel_dix_generate(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task)
+{
+	return spdk_dix_generate(accel_task->s.iovs,
+				 accel_task->s.iovcnt,
+				 accel_task->d.iovs,
+				 accel_task->dif.num_blocks,
+				 accel_task->dif.ctx);
+}
+
+static int
+_sw_accel_dix_verify(struct sw_accel_io_channel *sw_ch, struct spdk_accel_task *accel_task)
+{
+	return spdk_dix_verify(accel_task->s.iovs,
+			       accel_task->s.iovcnt,
+			       accel_task->d.iovs,
+			       accel_task->dif.num_blocks,
+			       accel_task->dif.ctx,
+			       accel_task->dif.err);
+}
+
+static int
+accel_comp_poll(void *arg)
+{
+	struct sw_accel_io_channel	*sw_ch = arg;
+	STAILQ_HEAD(, spdk_accel_task)	tasks_to_complete;
+	struct spdk_accel_task		*accel_task;
+
+	if (STAILQ_EMPTY(&sw_ch->tasks_to_complete)) {
+		return SPDK_POLLER_IDLE;
+	}
+
+	STAILQ_INIT(&tasks_to_complete);
+	STAILQ_SWAP(&tasks_to_complete, &sw_ch->tasks_to_complete, spdk_accel_task);
+
+	while ((accel_task = STAILQ_FIRST(&tasks_to_complete))) {
+		STAILQ_REMOVE_HEAD(&tasks_to_complete, link);
+		spdk_accel_task_complete(accel_task, accel_task->status);
+	}
+
+	return SPDK_POLLER_BUSY;
+}
+
+static int
 sw_accel_submit_tasks(struct spdk_io_channel *ch, struct spdk_accel_task *accel_task)
 {
 	struct sw_accel_io_channel *sw_ch = spdk_io_channel_get_ctx(ch);
 	struct spdk_accel_task *tmp;
 	int rc = 0;
 
+	/*
+	 * Lazily initialize our completion poller. We don't want to complete
+	 * them inline as they'll likely submit another.
+	 */
+	if (spdk_unlikely(sw_ch->completion_poller == NULL)) {
+		sw_ch->completion_poller = SPDK_POLLER_REGISTER(accel_comp_poll, sw_ch, 0);
+	}
+
 	do {
 		switch (accel_task->op_code) {
-		case ACCEL_OPC_COPY:
+		case SPDK_ACCEL_OPC_COPY:
 			_sw_accel_copy_iovs(accel_task->d.iovs, accel_task->d.iovcnt,
 					    accel_task->s.iovs, accel_task->s.iovcnt);
 			break;
-		case ACCEL_OPC_FILL:
+		case SPDK_ACCEL_OPC_FILL:
 			rc = _sw_accel_fill(accel_task->d.iovs, accel_task->d.iovcnt,
 					    accel_task->fill_pattern);
 			break;
-		case ACCEL_OPC_DUALCAST:
+		case SPDK_ACCEL_OPC_DUALCAST:
 			rc = _sw_accel_dualcast_iovs(accel_task->d.iovs, accel_task->d.iovcnt,
 						     accel_task->d2.iovs, accel_task->d2.iovcnt,
 						     accel_task->s.iovs, accel_task->s.iovcnt);
 			break;
-		case ACCEL_OPC_COMPARE:
+		case SPDK_ACCEL_OPC_COMPARE:
 			rc = _sw_accel_compare(accel_task->s.iovs, accel_task->s.iovcnt,
 					       accel_task->s2.iovs, accel_task->s2.iovcnt);
 			break;
-		case ACCEL_OPC_CRC32C:
+		case SPDK_ACCEL_OPC_CRC32C:
 			_sw_accel_crc32cv(accel_task->crc_dst, accel_task->s.iovs, accel_task->s.iovcnt, accel_task->seed);
 			break;
-		case ACCEL_OPC_COPY_CRC32C:
+		case SPDK_ACCEL_OPC_COPY_CRC32C:
 			_sw_accel_copy_iovs(accel_task->d.iovs, accel_task->d.iovcnt,
 					    accel_task->s.iovs, accel_task->s.iovcnt);
 			_sw_accel_crc32cv(accel_task->crc_dst, accel_task->s.iovs,
 					  accel_task->s.iovcnt, accel_task->seed);
 			break;
-		case ACCEL_OPC_COMPRESS:
+		case SPDK_ACCEL_OPC_COMPRESS:
 			rc = _sw_accel_compress(sw_ch, accel_task);
 			break;
-		case ACCEL_OPC_DECOMPRESS:
+		case SPDK_ACCEL_OPC_DECOMPRESS:
 			rc = _sw_accel_decompress(sw_ch, accel_task);
 			break;
-		case ACCEL_OPC_XOR:
+		case SPDK_ACCEL_OPC_XOR:
 			rc = _sw_accel_xor(sw_ch, accel_task);
 			break;
-		case ACCEL_OPC_ENCRYPT:
+		case SPDK_ACCEL_OPC_ENCRYPT:
 			rc = _sw_accel_encrypt(sw_ch, accel_task);
 			break;
-		case ACCEL_OPC_DECRYPT:
+		case SPDK_ACCEL_OPC_DECRYPT:
 			rc = _sw_accel_decrypt(sw_ch, accel_task);
+			break;
+		case SPDK_ACCEL_OPC_DIF_VERIFY:
+			rc = _sw_accel_dif_verify(sw_ch, accel_task);
+			break;
+		case SPDK_ACCEL_OPC_DIF_VERIFY_COPY:
+			rc = _sw_accel_dif_verify_copy(sw_ch, accel_task);
+			break;
+		case SPDK_ACCEL_OPC_DIF_GENERATE:
+			rc = _sw_accel_dif_generate(sw_ch, accel_task);
+			break;
+		case SPDK_ACCEL_OPC_DIF_GENERATE_COPY:
+			rc = _sw_accel_dif_generate_copy(sw_ch, accel_task);
+			break;
+		case SPDK_ACCEL_OPC_DIX_GENERATE:
+			rc = _sw_accel_dix_generate(sw_ch, accel_task);
+			break;
+		case SPDK_ACCEL_OPC_DIX_VERIFY:
+			rc = _sw_accel_dix_verify(sw_ch, accel_task);
 			break;
 		default:
 			assert(false);
 			break;
 		}
 
-		tmp = TAILQ_NEXT(accel_task, link);
+		tmp = STAILQ_NEXT(accel_task, link);
 
 		_add_to_comp_list(sw_ch, accel_task, rc);
 
@@ -509,66 +791,55 @@ sw_accel_submit_tasks(struct spdk_io_channel *ch, struct spdk_accel_task *accel_
 	return 0;
 }
 
-static struct spdk_io_channel *sw_accel_get_io_channel(void);
-static int sw_accel_module_init(void);
-static void sw_accel_module_fini(void *ctxt);
-static size_t sw_accel_module_get_ctx_size(void);
-
-static struct spdk_accel_module_if g_sw_module = {
-	.module_init		= sw_accel_module_init,
-	.module_fini		= sw_accel_module_fini,
-	.write_config_json	= NULL,
-	.get_ctx_size		= sw_accel_module_get_ctx_size,
-	.name			= "software",
-	.supports_opcode	= sw_accel_supports_opcode,
-	.get_io_channel		= sw_accel_get_io_channel,
-	.submit_tasks		= sw_accel_submit_tasks,
-	.crypto_key_init	= sw_accel_crypto_key_init,
-	.crypto_key_deinit	= sw_accel_crypto_key_deinit,
-	.crypto_supports_tweak_mode	= sw_accel_crypto_supports_tweak_mode,
-	.crypto_supports_cipher	= sw_accel_crypto_supports_cipher,
-};
-
-static int
-accel_comp_poll(void *arg)
-{
-	struct sw_accel_io_channel	*sw_ch = arg;
-	TAILQ_HEAD(, spdk_accel_task)	tasks_to_complete;
-	struct spdk_accel_task		*accel_task;
-
-	if (TAILQ_EMPTY(&sw_ch->tasks_to_complete)) {
-		return SPDK_POLLER_IDLE;
-	}
-
-	TAILQ_INIT(&tasks_to_complete);
-	TAILQ_SWAP(&tasks_to_complete, &sw_ch->tasks_to_complete, spdk_accel_task, link);
-
-	while ((accel_task = TAILQ_FIRST(&tasks_to_complete))) {
-		TAILQ_REMOVE(&tasks_to_complete, accel_task, link);
-		spdk_accel_task_complete(accel_task, accel_task->status);
-	}
-
-	return SPDK_POLLER_BUSY;
-}
-
 static int
 sw_accel_create_cb(void *io_device, void *ctx_buf)
 {
 	struct sw_accel_io_channel *sw_ch = ctx_buf;
-
-	TAILQ_INIT(&sw_ch->tasks_to_complete);
-	sw_ch->completion_poller = SPDK_POLLER_REGISTER(accel_comp_poll, sw_ch, 0);
-
 #ifdef SPDK_CONFIG_ISAL
-	isal_deflate_init(&sw_ch->stream);
-	sw_ch->stream.flush = NO_FLUSH;
-	sw_ch->stream.level = 1;
-	sw_ch->stream.level_buf = calloc(1, ISAL_DEF_LVL1_DEFAULT);
-	if (sw_ch->stream.level_buf == NULL) {
-		SPDK_ERRLOG("Could not allocate isal internal buffer\n");
+	struct comp_deflate_level_buf *deflate_level_bufs;
+	int i;
+#endif
+
+	STAILQ_INIT(&sw_ch->tasks_to_complete);
+	sw_ch->completion_poller = NULL;
+
+#ifdef SPDK_CONFIG_HAVE_LZ4
+	sw_ch->lz4_stream = LZ4_createStream();
+	if (sw_ch->lz4_stream == NULL) {
+		SPDK_ERRLOG("Failed to create the lz4 stream for compression\n");
 		return -ENOMEM;
 	}
-	sw_ch->stream.level_buf_size = ISAL_DEF_LVL1_DEFAULT;
+	sw_ch->lz4_stream_decode = LZ4_createStreamDecode();
+	if (sw_ch->lz4_stream_decode == NULL) {
+		SPDK_ERRLOG("Failed to create the lz4 stream for decompression\n");
+		LZ4_freeStream(sw_ch->lz4_stream);
+		return -ENOMEM;
+	}
+#endif
+#ifdef SPDK_CONFIG_ISAL
+	sw_ch->deflate_level_bufs[0].buf = sw_ch->level_buf_mem;
+	deflate_level_bufs = sw_ch->deflate_level_bufs;
+	deflate_level_bufs[0].size = ISAL_DEF_LVL0_DEFAULT;
+	for (i = 1; i < COMP_DEFLATE_LEVEL_NUM; i++) {
+		deflate_level_bufs[i].buf = deflate_level_bufs[i - 1].buf +
+					    deflate_level_bufs[i - 1].size;
+		switch (i) {
+		case 1:
+			deflate_level_bufs[i].size = ISAL_DEF_LVL1_DEFAULT;
+			break;
+		case 2:
+			deflate_level_bufs[i].size = ISAL_DEF_LVL2_DEFAULT;
+			break;
+		case 3:
+			deflate_level_bufs[i].size = ISAL_DEF_LVL3_DEFAULT;
+			break;
+		default:
+			assert(false);
+		}
+	}
+
+	isal_deflate_init(&sw_ch->stream);
+	sw_ch->stream.flush = NO_FLUSH;
 	isal_inflate_init(&sw_ch->state);
 #endif
 
@@ -580,10 +851,10 @@ sw_accel_destroy_cb(void *io_device, void *ctx_buf)
 {
 	struct sw_accel_io_channel *sw_ch = ctx_buf;
 
-#ifdef SPDK_CONFIG_ISAL
-	free(sw_ch->stream.level_buf);
+#ifdef SPDK_CONFIG_HAVE_LZ4
+	LZ4_freeStream(sw_ch->lz4_stream);
+	LZ4_freeStreamDecode(sw_ch->lz4_stream_decode);
 #endif
-
 	spdk_poller_unregister(&sw_ch->completion_poller);
 }
 
@@ -602,7 +873,6 @@ sw_accel_module_get_ctx_size(void)
 static int
 sw_accel_module_init(void)
 {
-	SPDK_NOTICELOG("Accel framework software module initialized.\n");
 	spdk_io_device_register(&g_sw_module, sw_accel_create_cb, sw_accel_destroy_cb,
 				sizeof(struct sw_accel_io_channel), "sw_accel_module");
 
@@ -628,17 +898,16 @@ sw_accel_create_aes_xts(struct spdk_accel_crypto_key *key)
 	}
 
 	switch (key->key_size) {
-	case ACCEL_AES_XTS_128_KEY_SIZE:
-		key_data->encrypt = XTS_AES_128_enc;
-		key_data->decrypt = XTS_AES_128_dec;
+	case SPDK_ACCEL_AES_XTS_128_KEY_SIZE:
+		key_data->encrypt = isal_aes_xts_enc_128;
+		key_data->decrypt = isal_aes_xts_dec_128;
 		break;
-	case ACCEL_AES_XTS_256_KEY_SIZE:
-		key_data->encrypt = XTS_AES_256_enc;
-		key_data->decrypt = XTS_AES_256_dec;
+	case SPDK_ACCEL_AES_XTS_256_KEY_SIZE:
+		key_data->encrypt = isal_aes_xts_enc_256;
+		key_data->decrypt = isal_aes_xts_dec_256;
 		break;
 	default:
-		SPDK_ERRLOG("Incorrect key size  %zu, should be %d for AEX_XTS_128 or %d for AES_XTS_256\n",
-			    key->key_size, ACCEL_AES_XTS_128_KEY_SIZE, ACCEL_AES_XTS_256_KEY_SIZE);
+		assert(0);
 		free(key_data);
 		return -EINVAL;
 	}
@@ -674,9 +943,85 @@ sw_accel_crypto_supports_tweak_mode(enum spdk_accel_crypto_tweak_mode tweak_mode
 }
 
 static bool
-sw_accel_crypto_supports_cipher(enum spdk_accel_cipher cipher)
+sw_accel_crypto_supports_cipher(enum spdk_accel_cipher cipher, size_t key_size)
 {
-	return cipher == SPDK_ACCEL_CIPHER_AES_XTS;
+	switch (cipher) {
+	case SPDK_ACCEL_CIPHER_AES_XTS:
+		return key_size == SPDK_ACCEL_AES_XTS_128_KEY_SIZE || key_size == SPDK_ACCEL_AES_XTS_256_KEY_SIZE;
+	default:
+		return false;
+	}
 }
+
+static bool
+sw_accel_compress_supports_algo(enum spdk_accel_comp_algo algo)
+{
+	switch (algo) {
+	case SPDK_ACCEL_COMP_ALGO_DEFLATE:
+#ifdef SPDK_CONFIG_HAVE_LZ4
+	case SPDK_ACCEL_COMP_ALGO_LZ4:
+#endif
+		return true;
+	default:
+		return false;
+	}
+}
+
+static int
+sw_accel_get_compress_level_range(enum spdk_accel_comp_algo algo,
+				  uint32_t *min_level, uint32_t *max_level)
+{
+	switch (algo) {
+	case SPDK_ACCEL_COMP_ALGO_DEFLATE:
+#ifdef SPDK_CONFIG_ISAL
+		*min_level = COMP_DEFLATE_MIN_LEVEL;
+		*max_level = COMP_DEFLATE_MAX_LEVEL;
+		return 0;
+#else
+		SPDK_ERRLOG("ISAL option is required to use software compression.\n");
+		return -EINVAL;
+#endif
+	case SPDK_ACCEL_COMP_ALGO_LZ4:
+#ifdef SPDK_CONFIG_HAVE_LZ4
+		*min_level = 1;
+		*max_level = 65537;
+		return 0;
+#else
+		SPDK_ERRLOG("LZ4 library is required to use software compression.\n");
+		return -EINVAL;
+#endif
+	default:
+		return -EINVAL;
+	}
+}
+
+static int
+sw_accel_get_operation_info(enum spdk_accel_opcode opcode,
+			    const struct spdk_accel_operation_exec_ctx *ctx,
+			    struct spdk_accel_opcode_info *info)
+{
+	info->required_alignment = 0;
+
+	return 0;
+}
+
+static struct spdk_accel_module_if g_sw_module = {
+	.module_init			= sw_accel_module_init,
+	.module_fini			= sw_accel_module_fini,
+	.write_config_json		= NULL,
+	.get_ctx_size			= sw_accel_module_get_ctx_size,
+	.name				= "software",
+	.priority			= SPDK_ACCEL_SW_PRIORITY,
+	.supports_opcode		= sw_accel_supports_opcode,
+	.get_io_channel			= sw_accel_get_io_channel,
+	.submit_tasks			= sw_accel_submit_tasks,
+	.crypto_key_init		= sw_accel_crypto_key_init,
+	.crypto_key_deinit		= sw_accel_crypto_key_deinit,
+	.crypto_supports_tweak_mode	= sw_accel_crypto_supports_tweak_mode,
+	.crypto_supports_cipher		= sw_accel_crypto_supports_cipher,
+	.compress_supports_algo         = sw_accel_compress_supports_algo,
+	.get_compress_level_range       = sw_accel_get_compress_level_range,
+	.get_operation_info		= sw_accel_get_operation_info,
+};
 
 SPDK_ACCEL_MODULE_REGISTER(sw, &g_sw_module)

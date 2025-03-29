@@ -6,6 +6,8 @@
 #include "spdk/stdinc.h"
 #include "spdk/likely.h"
 
+#include "event_internal.h"
+
 #include "spdk_internal/event.h"
 #include "spdk_internal/usdt.h"
 
@@ -16,6 +18,8 @@
 #include "spdk/scheduler.h"
 #include "spdk/string.h"
 #include "spdk/fd_group.h"
+#include "spdk/trace.h"
+#include "spdk_internal/trace_defs.h"
 
 #ifdef __linux__
 #include <sys/prctl.h>
@@ -43,9 +47,11 @@ TAILQ_HEAD(, spdk_scheduler) g_scheduler_list
 static struct spdk_scheduler *g_scheduler = NULL;
 static struct spdk_reactor *g_scheduling_reactor;
 bool g_scheduling_in_progress = false;
-static uint64_t g_scheduler_period = 0;
+static uint64_t g_scheduler_period_in_tsc = 0;
+static uint64_t g_scheduler_period_in_us;
 static uint32_t g_scheduler_core_number;
 static struct spdk_scheduler_core_info *g_core_infos = NULL;
+static struct spdk_cpuset g_scheduler_isolated_core_mask;
 
 TAILQ_HEAD(, spdk_governor) g_governor_list
 	= TAILQ_HEAD_INITIALIZER(g_governor_list);
@@ -97,12 +103,24 @@ spdk_scheduler_set(const char *name)
 		return 0;
 	}
 
+	if (g_scheduler) {
+		g_scheduler->deinit();
+	}
+
 	rc = scheduler->init();
 	if (rc == 0) {
-		if (g_scheduler) {
-			g_scheduler->deinit();
-		}
 		g_scheduler = scheduler;
+	} else {
+		/* Could not switch to the new scheduler, so keep the old
+		 * one. We need to check if it wasn't NULL, and ->init() it again.
+		 */
+		if (g_scheduler) {
+			SPDK_ERRLOG("Could not ->init() '%s' scheduler, reverting to '%s'\n",
+				    name, g_scheduler->name);
+			g_scheduler->init();
+		} else {
+			SPDK_ERRLOG("Could not ->init() '%s' scheduler.\n", name);
+		}
 	}
 
 	return rc;
@@ -117,15 +135,14 @@ spdk_scheduler_get(void)
 uint64_t
 spdk_scheduler_get_period(void)
 {
-	/* Convert from ticks to microseconds */
-	return (g_scheduler_period * SPDK_SEC_TO_USEC / spdk_get_ticks_hz());
+	return g_scheduler_period_in_us;
 }
 
 void
 spdk_scheduler_set_period(uint64_t period)
 {
-	/* Convert microseconds to ticks */
-	g_scheduler_period = period * spdk_get_ticks_hz() / SPDK_SEC_TO_USEC;
+	g_scheduler_period_in_us = period;
+	g_scheduler_period_in_tsc = period * spdk_get_ticks_hz() / SPDK_SEC_TO_USEC;
 }
 
 void
@@ -140,6 +157,52 @@ spdk_scheduler_register(struct spdk_scheduler *scheduler)
 	TAILQ_INSERT_TAIL(&g_scheduler_list, scheduler, link);
 }
 
+uint32_t
+spdk_scheduler_get_scheduling_lcore(void)
+{
+	return g_scheduling_reactor->lcore;
+}
+
+bool
+spdk_scheduler_set_scheduling_lcore(uint32_t core)
+{
+	struct spdk_reactor *reactor = spdk_reactor_get(core);
+	if (reactor == NULL) {
+		SPDK_ERRLOG("Failed to set scheduling reactor. Reactor(lcore:%d) does not exist", core);
+		return false;
+	}
+
+	g_scheduling_reactor = reactor;
+	return true;
+}
+
+bool
+scheduler_set_isolated_core_mask(struct spdk_cpuset isolated_core_mask)
+{
+	struct spdk_cpuset tmp_mask;
+
+	spdk_cpuset_copy(&tmp_mask, spdk_app_get_core_mask());
+	spdk_cpuset_or(&tmp_mask, &isolated_core_mask);
+	if (spdk_cpuset_equal(&tmp_mask, spdk_app_get_core_mask()) == false) {
+		SPDK_ERRLOG("Isolated core mask is not included in app core mask.\n");
+		return false;
+	}
+	spdk_cpuset_copy(&g_scheduler_isolated_core_mask, &isolated_core_mask);
+	return true;
+}
+
+const char *
+scheduler_get_isolated_core_mask(void)
+{
+	return spdk_cpuset_fmt(&g_scheduler_isolated_core_mask);
+}
+
+static bool
+scheduler_is_isolated_core(uint32_t core)
+{
+	return spdk_cpuset_get_cpu(&g_scheduler_isolated_core_mask, core);
+}
+
 static void
 reactor_construct(struct spdk_reactor *reactor, uint32_t lcore)
 {
@@ -150,7 +213,7 @@ reactor_construct(struct spdk_reactor *reactor, uint32_t lcore)
 	reactor->thread_count = 0;
 	spdk_cpuset_zero(&reactor->notify_cpuset);
 
-	reactor->events = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 65536, SPDK_ENV_SOCKET_ID_ANY);
+	reactor->events = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 65536, SPDK_ENV_NUMA_ID_ANY);
 	if (reactor->events == NULL) {
 		SPDK_ERRLOG("Failed to allocate events ring\n");
 		assert(false);
@@ -158,7 +221,7 @@ reactor_construct(struct spdk_reactor *reactor, uint32_t lcore)
 
 	/* Always initialize interrupt facilities for reactor */
 	if (reactor_interrupt_init(reactor) != 0) {
-		/* Reactor interrupt facilities are necessary if seting app to interrupt mode. */
+		/* Reactor interrupt facilities are necessary if setting app to interrupt mode. */
 		if (spdk_interrupt_mode_is_enabled()) {
 			SPDK_ERRLOG("Failed to prepare intr facilities\n");
 			assert(false);
@@ -205,6 +268,10 @@ spdk_reactor_get(uint32_t lcore)
 static int reactor_thread_op(struct spdk_thread *thread, enum spdk_thread_op op);
 static bool reactor_thread_op_supported(enum spdk_thread_op op);
 
+/* Power of 2 minus 1 is optimal for memory consumption */
+#define EVENT_MSG_MEMPOOL_SHIFT 14 /* 2^14 = 16384 */
+#define EVENT_MSG_MEMPOOL_SIZE ((1 << EVENT_MSG_MEMPOOL_SHIFT) - 1)
+
 int
 spdk_reactors_init(size_t msg_mempool_size)
 {
@@ -215,10 +282,10 @@ spdk_reactors_init(size_t msg_mempool_size)
 
 	snprintf(mempool_name, sizeof(mempool_name), "evtpool_%d", getpid());
 	g_spdk_event_mempool = spdk_mempool_create(mempool_name,
-			       262144 - 1, /* Power of 2 minus 1 is optimal for memory consumption */
+			       EVENT_MSG_MEMPOOL_SIZE,
 			       sizeof(struct spdk_event),
 			       SPDK_MEMPOOL_DEFAULT_CACHE_SIZE,
-			       SPDK_ENV_SOCKET_ID_ANY);
+			       SPDK_ENV_NUMA_ID_ANY);
 
 	if (g_spdk_event_mempool == NULL) {
 		SPDK_ERRLOG("spdk_event_mempool creation failed\n");
@@ -334,8 +401,8 @@ _reactor_set_notify_cpuset_cpl(void *arg1, void *arg2)
 
 	if (target->new_in_interrupt == false) {
 		target->set_interrupt_mode_in_progress = false;
-		spdk_thread_send_msg(spdk_thread_get_app_thread(), target->set_interrupt_mode_cb_fn,
-				     target->set_interrupt_mode_cb_arg);
+		_event_call(spdk_scheduler_get_scheduling_lcore(), target->set_interrupt_mode_cb_fn,
+			    target->set_interrupt_mode_cb_arg, NULL);
 	} else {
 		_event_call(target->lcore, _reactor_set_interrupt_mode, target, NULL);
 	}
@@ -401,8 +468,8 @@ _reactor_set_interrupt_mode(void *arg1, void *arg2)
 		}
 
 		target->set_interrupt_mode_in_progress = false;
-		spdk_thread_send_msg(spdk_thread_get_app_thread(), target->set_interrupt_mode_cb_fn,
-				     target->set_interrupt_mode_cb_arg);
+		_event_call(spdk_scheduler_get_scheduling_lcore(), target->set_interrupt_mode_cb_fn,
+			    target->set_interrupt_mode_cb_arg, NULL);
 	}
 }
 
@@ -422,13 +489,13 @@ spdk_reactor_set_interrupt_mode(uint32_t lcore, bool new_in_interrupt,
 		return -ENOTSUP;
 	}
 
-	if (!spdk_thread_is_app_thread(NULL)) {
-		SPDK_ERRLOG("It is only permitted within spdk application thread.\n");
+	if (spdk_env_get_current_core() != g_scheduling_reactor->lcore) {
+		SPDK_ERRLOG("It is only permitted within scheduling reactor.\n");
 		return -EPERM;
 	}
 
 	if (target->in_interrupt == new_in_interrupt) {
-		cb_fn(cb_arg);
+		cb_fn(cb_arg, NULL);
 		return 0;
 	}
 
@@ -529,8 +596,6 @@ event_queue_run_batch(void *arg)
 	struct spdk_reactor *reactor = arg;
 	size_t count, i;
 	void *events[SPDK_EVENT_BATCH_SIZE];
-	struct spdk_thread *thread;
-	struct spdk_lw_thread *lw_thread;
 
 #ifdef DEBUG
 	/*
@@ -545,16 +610,6 @@ event_queue_run_batch(void *arg)
 	if (spdk_unlikely(reactor->in_interrupt)) {
 		uint64_t notify = 1;
 		int rc;
-
-		/* There may be race between event_acknowledge and another producer's event_notify,
-		 * so event_acknowledge should be applied ahead. And then check for self's event_notify.
-		 * This can avoid event notification missing.
-		 */
-		rc = read(reactor->events_fd, &notify, sizeof(notify));
-		if (rc < 0) {
-			SPDK_ERRLOG("failed to acknowledge event queue: %s.\n", spdk_strerror(errno));
-			return -errno;
-		}
 
 		count = spdk_ring_dequeue(reactor->events, events, SPDK_EVENT_BATCH_SIZE);
 
@@ -574,26 +629,14 @@ event_queue_run_batch(void *arg)
 		return 0;
 	}
 
-	/* Execute the events. There are still some remaining events
-	 * that must occur on an SPDK thread. To accommodate those, try to
-	 * run them on the first thread in the list, if it exists. */
-	lw_thread = TAILQ_FIRST(&reactor->threads);
-	if (lw_thread) {
-		thread = spdk_thread_get_from_ctx(lw_thread);
-	} else {
-		thread = NULL;
-	}
-
 	for (i = 0; i < count; i++) {
 		struct spdk_event *event = events[i];
 
 		assert(event != NULL);
-		spdk_set_thread(thread);
-
+		assert(spdk_get_thread() == NULL);
 		SPDK_DTRACE_PROBE3(event_exec, event->fn,
 				   event->arg1, event->arg2);
 		event->fn(event->arg1, event->arg2);
-		spdk_set_thread(NULL);
 	}
 
 	spdk_mempool_put_bulk(g_spdk_event_mempool, events, count);
@@ -699,6 +742,11 @@ _threads_reschedule(struct spdk_scheduler_core_info *cores_info)
 		for (j = 0; j < core->threads_count; j++) {
 			thread_info = &core->thread_infos[j];
 			if (thread_info->lcore != i) {
+				if (core->isolated || cores_info[thread_info->lcore].isolated) {
+					SPDK_ERRLOG("A thread cannot be moved from an isolated core or \
+								moved to an isolated core. Skip rescheduling thread\n");
+					continue;
+				}
 				_threads_reschedule_thread(thread_info);
 			}
 		}
@@ -718,7 +766,7 @@ _reactors_scheduler_fini(void)
 }
 
 static void
-_reactors_scheduler_update_core_mode(void *ctx)
+_reactors_scheduler_update_core_mode(void *ctx1, void *ctx2)
 {
 	struct spdk_reactor *reactor;
 	uint32_t i;
@@ -770,7 +818,7 @@ _reactors_scheduler_balance(void *arg1, void *arg2)
 	scheduler->balance(g_core_infos, g_reactor_count);
 
 	g_scheduler_core_number = spdk_env_get_first_core();
-	_reactors_scheduler_update_core_mode(NULL);
+	_reactors_scheduler_update_core_mode(NULL, NULL);
 }
 
 /* Phase 1 of thread scheduling is to gather metrics on the existing threads */
@@ -794,8 +842,13 @@ _reactors_scheduler_gather_metrics(void *arg1, void *arg2)
 	core_info->total_busy_tsc = reactor->busy_tsc;
 	core_info->interrupt_mode = reactor->in_interrupt;
 	core_info->threads_count = 0;
+	core_info->isolated = scheduler_is_isolated_core(reactor->lcore);
 
 	SPDK_DEBUGLOG(reactor, "Gathering metrics on %u\n", reactor->lcore);
+
+	spdk_trace_record(TRACE_SCHEDULER_CORE_STATS, reactor->trace_id, 0, 0,
+			  core_info->current_busy_tsc,
+			  core_info->current_idle_tsc);
 
 	if (reactor->thread_count > 0) {
 		core_info->thread_infos = calloc(reactor->thread_count, sizeof(*core_info->thread_infos));
@@ -803,7 +856,7 @@ _reactors_scheduler_gather_metrics(void *arg1, void *arg2)
 			SPDK_ERRLOG("Failed to allocate memory when gathering metrics on %u\n", reactor->lcore);
 
 			/* Cancel this round of schedule work */
-			_event_call(g_scheduling_reactor->lcore, _reactors_scheduler_cancel, NULL, NULL);
+			_event_call(spdk_scheduler_get_scheduling_lcore(), _reactors_scheduler_cancel, NULL, NULL);
 			return;
 		}
 
@@ -818,6 +871,11 @@ _reactors_scheduler_gather_metrics(void *arg1, void *arg2)
 			core_info->thread_infos[i].current_stats = lw_thread->current_stats;
 			core_info->threads_count++;
 			assert(core_info->threads_count <= reactor->thread_count);
+
+			spdk_trace_record(TRACE_SCHEDULER_THREAD_STATS, spdk_thread_get_trace_id(thread), 0, 0,
+					  lw_thread->current_stats.busy_tsc,
+					  lw_thread->current_stats.idle_tsc);
+
 			i++;
 		}
 	}
@@ -828,7 +886,7 @@ _reactors_scheduler_gather_metrics(void *arg1, void *arg2)
 	}
 
 	/* If we've looped back around to the scheduler thread, move to the next phase */
-	if (next_core == g_scheduling_reactor->lcore) {
+	if (next_core == spdk_scheduler_get_scheduling_lcore()) {
 		/* Phase 2 of scheduling is rebalancing - deciding which threads to move where */
 		_event_call(next_core, _reactors_scheduler_balance, NULL, NULL);
 		return;
@@ -942,6 +1000,8 @@ reactor_run(void *arg)
 	snprintf(thread_name, sizeof(thread_name), "reactor_%u", reactor->lcore);
 	_set_thread_name(thread_name);
 
+	reactor->trace_id = spdk_trace_register_owner(OWNER_TYPE_REACTOR, thread_name);
+
 	reactor->tsc_last = spdk_get_ticks();
 
 	while (1) {
@@ -959,12 +1019,13 @@ reactor_run(void *arg)
 			}
 		}
 
-		if (spdk_unlikely(g_scheduler_period > 0 &&
-				  (reactor->tsc_last - last_sched) > g_scheduler_period &&
+		if (spdk_unlikely(g_scheduler_period_in_tsc > 0 &&
+				  (reactor->tsc_last - last_sched) > g_scheduler_period_in_tsc &&
 				  reactor == g_scheduling_reactor &&
 				  !g_scheduling_in_progress)) {
 			last_sched = reactor->tsc_last;
 			g_scheduling_in_progress = true;
+			spdk_trace_record(TRACE_SCHEDULER_PERIOD_START, 0, 0, 0);
 			_reactors_scheduler_gather_metrics(NULL, NULL);
 		}
 
@@ -1135,6 +1196,9 @@ _schedule_thread(void *arg1, void *arg2)
 	spdk_thread_get_stats(&lw_thread->total_stats);
 	spdk_set_thread(NULL);
 
+	if (lw_thread->initial_lcore == SPDK_ENV_LCORE_ID_ANY) {
+		lw_thread->initial_lcore = current_core;
+	}
 	lw_thread->lcore = current_core;
 
 	TAILQ_INSERT_TAIL(&reactor->threads, lw_thread, link);
@@ -1160,7 +1224,7 @@ _schedule_thread(void *arg1, void *arg2)
 static int
 _reactor_schedule_thread(struct spdk_thread *thread)
 {
-	uint32_t core;
+	uint32_t core, initial_core;
 	struct spdk_lw_thread *lw_thread;
 	struct spdk_event *evt = NULL;
 	struct spdk_cpuset *cpumask;
@@ -1175,7 +1239,9 @@ _reactor_schedule_thread(struct spdk_thread *thread)
 	lw_thread = spdk_thread_get_ctx(thread);
 	assert(lw_thread != NULL);
 	core = lw_thread->lcore;
+	initial_core = lw_thread->initial_lcore;
 	memset(lw_thread, 0, sizeof(*lw_thread));
+	lw_thread->initial_lcore = initial_core;
 
 	if (current_lcore != SPDK_ENV_LCORE_ID_ANY) {
 		local_reactor = spdk_reactor_get(current_lcore);
@@ -1234,6 +1300,11 @@ _reactor_schedule_thread(struct spdk_thread *thread)
 
 	evt = spdk_event_allocate(core, _schedule_thread, lw_thread, NULL);
 
+	if (current_lcore != core) {
+		spdk_trace_record(TRACE_SCHEDULER_MOVE_THREAD, spdk_thread_get_trace_id(thread), 0, 0,
+				  current_lcore, core);
+	}
+
 	pthread_mutex_unlock(&g_scheduler_mtx);
 
 	assert(evt != NULL);
@@ -1287,6 +1358,7 @@ reactor_thread_op(struct spdk_thread *thread, enum spdk_thread_op op)
 	case SPDK_THREAD_OP_NEW:
 		lw_thread = spdk_thread_get_ctx(thread);
 		lw_thread->lcore = SPDK_ENV_LCORE_ID_ANY;
+		lw_thread->initial_lcore = SPDK_ENV_LCORE_ID_ANY;
 		return _reactor_schedule_thread(thread);
 	case SPDK_THREAD_OP_RESCHED:
 		_reactor_request_thread_reschedule(thread);
@@ -1389,14 +1461,8 @@ reactor_schedule_thread_event(void *arg)
 	struct spdk_reactor *reactor = arg;
 	struct spdk_lw_thread *lw_thread, *tmp;
 	uint32_t count = 0;
-	uint64_t notify = 1;
 
 	assert(reactor->in_interrupt);
-
-	if (read(reactor->resched_fd, &notify, sizeof(notify)) < 0) {
-		SPDK_ERRLOG("failed to acknowledge reschedule: %s.\n", spdk_strerror(errno));
-		return -errno;
-	}
 
 	TAILQ_FOREACH_SAFE(lw_thread, &reactor->threads, link, tmp) {
 		count += reactor_post_process_lw_thread(reactor, lw_thread) ? 1 : 0;
@@ -1408,6 +1474,7 @@ reactor_schedule_thread_event(void *arg)
 static int
 reactor_interrupt_init(struct spdk_reactor *reactor)
 {
+	struct spdk_event_handler_opts opts = {};
 	int rc;
 
 	rc = spdk_fd_group_create(&reactor->fgrp);
@@ -1421,8 +1488,11 @@ reactor_interrupt_init(struct spdk_reactor *reactor)
 		goto err;
 	}
 
-	rc = SPDK_FD_GROUP_ADD(reactor->fgrp, reactor->resched_fd, reactor_schedule_thread_event,
-			       reactor);
+	spdk_fd_group_get_default_event_handler_opts(&opts, sizeof(opts));
+	opts.fd_type = SPDK_FD_TYPE_EVENTFD;
+
+	rc = SPDK_FD_GROUP_ADD_EXT(reactor->fgrp, reactor->resched_fd,
+				   reactor_schedule_thread_event, reactor, &opts);
 	if (rc) {
 		close(reactor->resched_fd);
 		goto err;
@@ -1437,8 +1507,8 @@ reactor_interrupt_init(struct spdk_reactor *reactor)
 		goto err;
 	}
 
-	rc = SPDK_FD_GROUP_ADD(reactor->fgrp, reactor->events_fd,
-			       event_queue_run_batch, reactor);
+	rc = SPDK_FD_GROUP_ADD_EXT(reactor->fgrp, reactor->events_fd,
+				   event_queue_run_batch, reactor, &opts);
 	if (rc) {
 		spdk_fd_group_remove(reactor->fgrp, reactor->resched_fd);
 		close(reactor->resched_fd);
@@ -1548,3 +1618,47 @@ spdk_governor_register(struct spdk_governor *governor)
 }
 
 SPDK_LOG_REGISTER_COMPONENT(reactor)
+
+static void
+scheduler_trace(void)
+{
+	struct spdk_trace_tpoint_opts opts[] = {
+		{
+			"SCHEDULER_PERIOD_START", TRACE_SCHEDULER_PERIOD_START,
+			OWNER_TYPE_NONE, OBJECT_NONE, 0,
+			{
+
+			}
+		},
+		{
+			"SCHEDULER_CORE_STATS", TRACE_SCHEDULER_CORE_STATS,
+			OWNER_TYPE_REACTOR, OBJECT_NONE, 0,
+			{
+				{ "busy", SPDK_TRACE_ARG_TYPE_INT, 8},
+				{ "idle", SPDK_TRACE_ARG_TYPE_INT, 8}
+			}
+		},
+		{
+			"SCHEDULER_THREAD_STATS", TRACE_SCHEDULER_THREAD_STATS,
+			OWNER_TYPE_THREAD, OBJECT_NONE, 0,
+			{
+				{ "busy", SPDK_TRACE_ARG_TYPE_INT, 8},
+				{ "idle", SPDK_TRACE_ARG_TYPE_INT, 8}
+			}
+		},
+		{
+			"SCHEDULER_MOVE_THREAD", TRACE_SCHEDULER_MOVE_THREAD,
+			OWNER_TYPE_THREAD, OBJECT_NONE, 0,
+			{
+				{ "src", SPDK_TRACE_ARG_TYPE_INT, 8 },
+				{ "dst", SPDK_TRACE_ARG_TYPE_INT, 8 }
+			}
+		}
+	};
+
+	spdk_trace_register_owner_type(OWNER_TYPE_REACTOR, 'r');
+	spdk_trace_register_description_ext(opts, SPDK_COUNTOF(opts));
+
+}
+
+SPDK_TRACE_REGISTER_FN(scheduler_trace, "scheduler", TRACE_GROUP_SCHEDULER)

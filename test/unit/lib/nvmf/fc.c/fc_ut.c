@@ -7,11 +7,12 @@
 /* NVMF FC Transport Unit Test */
 
 #include "spdk/env.h"
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 #include "spdk/nvmf.h"
 #include "spdk/endian.h"
 #include "spdk/trace.h"
 #include "spdk/log.h"
+#include "spdk/util.h"
 
 #include "ut_multithread.c"
 
@@ -57,12 +58,10 @@ DEFINE_STUB(nvmf_ctrlr_async_event_ana_change_notice, int,
 	    (struct spdk_nvmf_ctrlr *ctrlr), 0);
 DEFINE_STUB_V(spdk_nvme_trid_populate_transport, (struct spdk_nvme_transport_id *trid,
 		enum spdk_nvme_transport_type trtype));
-DEFINE_STUB_V(spdk_nvmf_ctrlr_data_init, (struct spdk_nvmf_transport_opts *opts,
-		struct spdk_nvmf_ctrlr_data *cdata));
 DEFINE_STUB(spdk_nvmf_request_complete, int, (struct spdk_nvmf_request *req),
 	    -ENOSPC);
 
-DEFINE_STUB_V(nvmf_update_discovery_log,
+DEFINE_STUB_V(spdk_nvmf_send_discovery_log_notice,
 	      (struct spdk_nvmf_tgt *tgt, const char *hostnqn));
 
 DEFINE_STUB(rte_hash_create, struct rte_hash *, (const struct rte_hash_parameters *params),
@@ -78,6 +77,14 @@ DEFINE_STUB(nvmf_fc_lld_port_remove, int, (struct spdk_nvmf_fc_port *fc_port), 0
 DEFINE_STUB_V(spdk_nvmf_request_zcopy_start, (struct spdk_nvmf_request *req));
 DEFINE_STUB_V(spdk_nvmf_request_zcopy_end, (struct spdk_nvmf_request *req, bool commit));
 DEFINE_STUB(spdk_mempool_lookup, struct spdk_mempool *, (const char *name), NULL);
+
+DEFINE_STUB(spdk_json_parse, ssize_t, (void *json, size_t size, struct spdk_json_val *values,
+				       size_t num_values, void **end, uint32_t flags), 0);
+DEFINE_STUB_V(spdk_keyring_put_key, (struct spdk_key *k));
+DEFINE_STUB_V(nvmf_qpair_auth_destroy, (struct spdk_nvmf_qpair *q));
+DEFINE_STUB_V(nvmf_tgt_stop_mdns_prr, (struct spdk_nvmf_tgt *tgt));
+DEFINE_STUB(nvmf_tgt_update_mdns_prr, int, (struct spdk_nvmf_tgt *tgt), 0);
+DEFINE_STUB(spdk_posix_file_load_from_name, void *, (const char *file_name, size_t *size), NULL);
 
 const char *
 spdk_nvme_transport_id_trtype_str(enum spdk_nvme_transport_type trtype)
@@ -136,8 +143,6 @@ nvmf_fc_lld_fini(spdk_nvmf_transport_destroy_done_cb cb_fn, void *ctx)
 
 DEFINE_STUB_V(nvmf_fc_lld_start, (void));
 DEFINE_STUB(nvmf_fc_init_q, int, (struct spdk_nvmf_fc_hwqp *hwqp), 0);
-DEFINE_STUB_V(nvmf_fc_reinit_q, (void *queues_prev, void *queues_curr));
-DEFINE_STUB(nvmf_fc_init_rqpair_buffers, int, (struct spdk_nvmf_fc_hwqp *hwqp), 0);
 DEFINE_STUB(nvmf_fc_set_q_online_state, int, (struct spdk_nvmf_fc_hwqp *hwqp, bool online), 0);
 DEFINE_STUB(nvmf_fc_put_xchg, int, (struct spdk_nvmf_fc_hwqp *hwqp, struct spdk_nvmf_fc_xchg *xri),
 	    0);
@@ -173,9 +178,6 @@ DEFINE_STUB_V(nvmf_fc_dump_all_queues, (struct spdk_nvmf_fc_hwqp *ls_queue,
 					struct spdk_nvmf_fc_hwqp *io_queues,
 					uint32_t num_io_queues,
 					struct spdk_nvmf_fc_queue_dump_info *dump_info));
-DEFINE_STUB_V(nvmf_fc_get_xri_info, (struct spdk_nvmf_fc_hwqp *hwqp,
-				     struct spdk_nvmf_fc_xchg_info *info));
-DEFINE_STUB(nvmf_fc_get_rsvd_thread, struct spdk_thread *, (void), NULL);
 
 uint32_t
 nvmf_fc_process_queue(struct spdk_nvmf_fc_hwqp *hwqp)
@@ -219,12 +221,15 @@ create_transport_test(void)
 	const struct spdk_nvmf_transport_ops *ops = NULL;
 	struct spdk_nvmf_transport_opts opts = { 0 };
 	struct spdk_nvmf_target_opts tgt_opts = {
+		.size = SPDK_SIZEOF(&tgt_opts, discovery_filter),
 		.name = "nvmf_test_tgt",
 		.max_subsystems = 0
 	};
 
 	allocate_threads(8);
 	set_thread(0);
+
+	spdk_iobuf_initialize();
 
 	g_nvmf_tgt = spdk_nvmf_tgt_create(&tgt_opts);
 	SPDK_CU_ASSERT_FATAL(g_nvmf_tgt != NULL);
@@ -428,7 +433,6 @@ main(int argc, char **argv)
 	unsigned int num_failures = 0;
 	CU_pSuite suite = NULL;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("NVMf-FC", nvmf_fc_tests_init, nvmf_fc_tests_fini);
@@ -441,9 +445,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, remove_hwqps_from_poll_groups_test);
 	CU_ADD_TEST(suite, destroy_transport_test);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 
 	return num_failures;

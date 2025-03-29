@@ -31,6 +31,7 @@ mkdir -p $TARGET_DIR
 # Source config describing QEMU and VHOST cores and NUMA
 #
 source $rootdir/test/vhost/common/autotest.config
+source "$rootdir/test/scheduler/common.sh"
 
 function vhosttestinit() {
 	if [ "$TEST_MODE" == "iso" ]; then
@@ -116,11 +117,12 @@ function vhost_run() {
 	local vhost_name
 	local run_gen_nvme=true
 	local vhost_bin="vhost"
+	local vhost_args=()
+	local cmd=()
 
-	while getopts "n:a:b:g" optchar; do
+	while getopts "n:b:g" optchar; do
 		case "$optchar" in
 			n) vhost_name="$OPTARG" ;;
-			a) vhost_args="$OPTARG" ;;
 			b) vhost_bin="$OPTARG" ;;
 			g)
 				run_gen_nvme=false
@@ -132,6 +134,9 @@ function vhost_run() {
 				;;
 		esac
 	done
+	shift $((OPTIND - 1))
+
+	vhost_args=("$@")
 
 	if [[ -z "$vhost_name" ]]; then
 		error "vhost name must be provided to vhost_run"
@@ -154,21 +159,21 @@ function vhost_run() {
 		return 1
 	fi
 
-	local cmd="$vhost_app -r $vhost_dir/rpc.sock $vhost_args"
+	cmd=("$vhost_app" "-r" "$vhost_dir/rpc.sock" "${vhost_args[@]}")
 	if [[ "$vhost_bin" =~ vhost ]]; then
-		cmd+=" -S $vhost_dir"
+		cmd+=(-S "$vhost_dir")
 	fi
 
-	notice "Loging to:   $vhost_log_file"
+	notice "Logging to:   $vhost_log_file"
 	notice "Socket:      $vhost_socket"
-	notice "Command:     $cmd"
+	notice "Command:     ${cmd[*]}"
 
 	timing_enter vhost_start
 
 	iobuf_small_count=${iobuf_small_count:-16383}
 	iobuf_large_count=${iobuf_large_count:-2047}
 
-	$cmd --wait-for-rpc &
+	"${cmd[@]}" --wait-for-rpc &
 	vhost_pid=$!
 	echo $vhost_pid > $vhost_pid_file
 
@@ -184,7 +189,7 @@ function vhost_run() {
 		framework_start_init
 
 	#do not generate nvmes if pci access is disabled
-	if [[ "$cmd" != *"--no-pci"* ]] && [[ "$cmd" != *"-u"* ]] && $run_gen_nvme; then
+	if [[ "${cmd[*]}" != *"--no-pci"* ]] && [[ "${cmd[*]}" != *"-u"* ]] && $run_gen_nvme; then
 		$rootdir/scripts/gen_nvme.sh | $rootdir/scripts/rpc.py -s $vhost_dir/rpc.sock load_subsystem_config
 	fi
 
@@ -235,6 +240,13 @@ function vhost_kill() {
 				echo "."
 			done
 		fi
+		# If this PID is our child, we should attempt to verify its status
+		# to catch any "silent" crashes that may happen upon termination.
+		if is_pid_child "$vhost_pid"; then
+			notice "Checking status of $vhost_pid"
+			wait "$vhost_pid" || rc=1
+		fi
+
 	elif kill -0 $vhost_pid; then
 		error "vhost NOT killed - you need to kill it manually"
 		rc=1
@@ -451,13 +463,10 @@ function vm_kill() {
 # List all VM numbers in VM_DIR
 #
 function vm_list_all() {
-	local vms
-	vms="$(
-		shopt -s nullglob
-		echo $VM_DIR/[0-9]*
-	)"
-	if [[ -n "$vms" ]]; then
-		basename --multiple $vms
+	local vms=()
+	vms=("$VM_DIR"/+([0-9]))
+	if ((${#vms[@]} > 0)); then
+		basename --multiple "${vms[@]}"
 	fi
 }
 
@@ -475,41 +484,34 @@ function vm_kill_all() {
 # Shutdown all VM in $VM_DIR
 #
 function vm_shutdown_all() {
-	# XXX: temporarily disable to debug shutdown issue
-	# xtrace_disable
+	local timeo=${1:-90} vms vm
 
-	local vms
-	vms=$(vm_list_all)
-	local vm
+	vms=($(vm_list_all))
 
-	for vm in $vms; do
-		vm_shutdown $vm
+	for vm in "${vms[@]}"; do
+		vm_shutdown "$vm"
 	done
 
 	notice "Waiting for VMs to shutdown..."
-	local timeo=90
-	while [[ $timeo -gt 0 ]]; do
-		local all_vms_down=1
-		for vm in $vms; do
-			if vm_is_running $vm; then
-				all_vms_down=0
-				break
-			fi
+	while ((timeo-- > 0 && ${#vms[@]} > 0)); do
+		for vm in "${!vms[@]}"; do
+			vm_is_running "${vms[vm]}" || unset -v "vms[vm]"
 		done
-
-		if [[ $all_vms_down == 1 ]]; then
-			notice "All VMs successfully shut down"
-			xtrace_restore
-			return 0
-		fi
-
-		((timeo -= 1))
 		sleep 1
 	done
 
-	rm -rf $VM_DIR
+	if ((${#vms[@]} == 0)); then
+		notice "All VMs successfully shut down"
+		return 0
+	fi
 
-	xtrace_restore
+	warning "Not all VMs were shut down. Leftovers: ${vms[*]}"
+
+	for vm in "${vms[@]}"; do
+		vm_print_logs "$vm"
+	done
+
+	return 1
 }
 
 function vm_setup() {
@@ -528,7 +530,6 @@ function vm_setup() {
 	local vm_migrate_to=""
 	local force_vm=""
 	local guest_memory=1024
-	local queue_number=""
 	local vhost_dir
 	local packed=false
 	vhost_dir="$(get_vhost_dir 0)"
@@ -545,7 +546,6 @@ function vm_setup() {
 					raw-cache=*) raw_cache=",cache${OPTARG#*=}" ;;
 					force=*) force_vm=${OPTARG#*=} ;;
 					memory=*) guest_memory=${OPTARG#*=} ;;
-					queue_num=*) queue_number=${OPTARG#*=} ;;
 					incoming=*) vm_incoming="${OPTARG#*=}" ;;
 					migrate-to=*) vm_migrate_to="${OPTARG#*=}" ;;
 					vhost-name=*) vhost_dir="$(get_vhost_dir ${OPTARG#*=})" ;;
@@ -649,28 +649,14 @@ function vm_setup() {
 	local gdbserver_socket=$((vm_socket_offset + 4))
 	local vnc_socket=$((100 + vm_num))
 	local qemu_pid_file="$vm_dir/qemu.pid"
-	local cpu_num=0
+	local cpu_list
+	local cpu_num=0 queue_number=0
 
-	set +x
-	# cpu list for taskset can be comma separated or range
-	# or both at the same time, so first split on commas
-	cpu_list=$(echo $task_mask | tr "," "\n")
-	queue_number=0
-	for c in $cpu_list; do
-		# if range is detected - count how many cpus
-		if [[ $c =~ [0-9]+-[0-9]+ ]]; then
-			val=$((c - 1))
-			val=${val#-}
-		else
-			val=1
-		fi
-		cpu_num=$((cpu_num + val))
-		queue_number=$((queue_number + val))
-	done
+	cpu_list=($(parse_cpu_list <(echo "$task_mask")))
+	cpu_num=${#cpu_list[@]} queue_number=$cpu_num
 
-	if [ -z $queue_number ]; then
-		queue_number=$cpu_num
-	fi
+	# Let's be paranoid about it
+	((cpu_num > 0 && queue_number > 0)) || return 1
 
 	# Normalize tcp ports to make sure they are available
 	ssh_socket=$(get_free_tcp_port "$ssh_socket")
@@ -800,6 +786,7 @@ function vm_setup() {
 	notice "Saving to $vm_dir/run.sh"
 	cat <<- RUN > "$vm_dir/run.sh"
 		#!/bin/bash
+		shopt -s nullglob extglob
 		rootdir=$rootdir
 		source "\$rootdir/test/scheduler/common.sh"
 		qemu_log () {
@@ -1409,3 +1396,28 @@ function get_free_tcp_port() {
 
 	echo "$port"
 }
+
+function gen_cpu_vm_spdk_config() (
+	local vm_count=$1 vm_cpu_num=$2 vm
+	local spdk_cpu_num=${3:-1} spdk_cpu_list=${4:-} spdk_cpus
+	local nodes=("${@:5}") node
+	local env
+
+	spdk_cpus=spdk_cpu_num
+	[[ -n $spdk_cpu_list ]] && spdk_cpus=spdk_cpu_list
+
+	if ((${#nodes[@]} > 0)); then
+		((${#nodes[@]} == 1)) && node=${nodes[0]}
+		for ((vm = 0; vm < vm_count; vm++)); do
+			env+=("VM${vm}_NODE=${nodes[vm]:-$node}")
+		done
+	fi
+
+	env+=("$spdk_cpus=${!spdk_cpus}")
+	env+=("vm_count=$vm_count")
+	env+=("vm_cpu_num=$vm_cpu_num")
+
+	export "${env[@]}"
+
+	"$rootdir/scripts/perf/vhost/conf-generator" -p cpu
+)

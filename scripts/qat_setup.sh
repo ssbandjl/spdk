@@ -7,14 +7,14 @@ shopt -s nullglob
 set -e
 
 rootdir=$(readlink -f $(dirname $0))/..
-allowed_drivers=("igb_uio" "uio_pci_generic")
+allowed_drivers=("igb_uio" "uio_pci_generic" "vfio_pci")
 
 reload_intel_qat() {
-	# We need to make sure the out-of-tree intel_qat driver, provided via vm_setup.sh, is in
-	# use. Otherwise, some dependency modules loaded by qat_service may fail causing some
-	# disturbance later on during the tests - in particular, it's been seen that the adf_ctl
-	# was returning inconsistent data (wrong pci addresses), confusing the service into
-	# believing SR-IOV is not enabled.
+	# We need to make sure the out-of-tree intel_qat driver, provided via autotest_setup.sh,
+	# is in use. Otherwise, some dependency modules loaded by qat_service may fail causing
+	# some disturbance later on during the tests - in particular, it's been seen that the
+	# adf_ctl was returning inconsistent data (wrong pci addresses), confusing the service
+	# into believing SR-IOV is not enabled.
 
 	# If this file doesn't exist, then either intel_qat is a kernel built-in or is not loaded.
 	# Nothing to do in such cases, qat_service will load the module for us.
@@ -70,6 +70,7 @@ reload_intel_qat
 _qat_pci_bdfs=(
 	/sys/bus/pci/drivers/c6xx/0000*
 	/sys/bus/pci/drivers/dh895xcc/0000*
+	/sys/bus/pci/drivers/4xxx/0000*
 )
 
 qat_pci_bdfs=("${_qat_pci_bdfs[@]#*drivers/}")
@@ -126,16 +127,19 @@ if ((expected_num_vfs != set_num_vfs || ${#qat_vf_bdfs[@]} != expected_num_vfs))
 	exit 1
 fi
 
-modprobe uio
-
 # Insert the dpdk uio kernel module.
 if [ $driver_to_bind == "igb_uio" ]; then
+	modprobe uio
 	if ! modprobe igb_uio; then
 		echo "Unable to insert the igb_uio kernel module. Aborting."
 		exit 1
 	fi
 elif [ "$driver_to_bind" == "uio_pci_generic" ]; then
+	modprobe uio
 	modprobe uio_pci_generic
+elif [ "$driver_to_bind" == "vfio_pci" ]; then
+	modprobe vfio
+	modprobe vfio_pci
 else
 	echo "Unsure how to work with driver $driver_to_bind. Please configure it in qat_setup.sh"
 	exit 1
@@ -151,8 +155,13 @@ for vf in "${qat_vf_bdfs[@]}"; do
 			echo "${vf##*/}" > "/sys/bus/pci/drivers/$old_driver/unbind"
 		fi
 	fi
-	echo "$driver_to_bind" > "$vf/driver_override"
-	echo "${vf##*/}" > /sys/bus/pci/drivers_probe
+	# Bind new driver
+	if [ "$driver_to_bind" == "vfio_pci" ]; then
+		"$rootdir/dpdk/usertools/dpdk-devbind.py" -b vfio-pci $vf
+	else
+		echo "$driver_to_bind" > "$vf/driver_override"
+		echo "${vf##*/}" > /sys/bus/pci/drivers_probe
+	fi
 done
 
 echo "Properly configured the qat device with driver $driver_to_bind."

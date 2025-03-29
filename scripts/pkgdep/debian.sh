@@ -6,8 +6,33 @@
 #  Copyright (c) 2022 Dell Inc, or its subsidiaries.
 #
 
-apt-get install -y gcc g++ make libcunit1-dev libaio-dev libssl-dev libjson-c-dev libcmocka-dev uuid-dev libiscsi-dev
-apt-get install -y libncurses5-dev libncursesw5-dev python3 python3-pip python3-dev
+case "$VERSION_CODENAME" in
+	bookworm | noble)
+		# These ship with pip which enforces PEP668
+		apt-get install -y python3-venv
+		virtdir=${PIP_VIRTDIR:-/var/spdk/dependencies/pip}
+
+		mkdir --p "$virtdir"
+		pkgdep_toolpath pip "$virtdir/bin"
+
+		pip3() (
+			if [[ ! -e $virtdir/bin/activate ]]; then
+				python3 -m venv --upgrade-deps --system-site-packages "$virtdir"
+			fi
+			source "$virtdir/bin/activate"
+			"$virtdir/bin/pip3" "$@"
+		)
+
+		apt-get install -y pkgconf
+		;;
+	*)
+		apt-get install -y pkg-config
+		;;
+esac
+
+apt-get install -y gcc g++ make libcunit1-dev libaio-dev libssl-dev libjson-c-dev libcmocka-dev uuid-dev libiscsi-dev \
+	libkeyutils-dev libncurses5-dev libncursesw5-dev python3 python3-pip python3-dev unzip libfuse3-dev patchelf
+
 pip3 install ninja
 pip3 install meson
 pip3 install pyelftools
@@ -16,6 +41,8 @@ pip3 install python-magic
 pip3 install grpcio
 pip3 install grpcio-tools
 pip3 install pyyaml
+pip3 install Jinja2
+pip3 install tabulate
 # Additional dependencies for SPDK CLI
 apt-get install -y python3-configshell-fb python3-pexpect
 
@@ -28,17 +55,13 @@ apt-get install -y systemtap-sdt-dev
 if [[ $INSTALL_DEV_TOOLS == "true" ]]; then
 	# Tools for developers
 	apt-get install -y git astyle lcov clang sg3-utils pciutils shellcheck \
-		abigail-tools bash-completion ruby-dev pycodestyle
+		abigail-tools bash-completion ruby-dev pycodestyle bundler rake
 	# Additional dependencies for nvmf performance test script
 	apt-get install -y python3-paramiko
 fi
 if [[ $INSTALL_PMEM == "true" ]]; then
 	# Additional dependencies for building pmem based backends
 	apt-get install -y libpmem-dev libpmemblk-dev libpmemobj-dev
-fi
-if [[ $INSTALL_FUSE == "true" ]]; then
-	# Additional dependencies for FUSE and NVMe-CUSE
-	apt-get install -y libfuse3-dev
 fi
 if [[ $INSTALL_RBD == "true" ]]; then
 	# Additional dependencies for RBD bdev in NVMe over Fabrics
@@ -56,4 +79,15 @@ fi
 if [[ $INSTALL_AVAHI == "true" ]]; then
 	# Additional dependencies for Avahi
 	apt-get install -y libavahi-client-dev
+fi
+if [[ $INSTALL_IDXD == "true" ]]; then
+	# accel-config-devel is required for kernel IDXD implementation used in DSA accel module
+	if [[ $ID == "ubuntu" && ${VERSION_ID:0:2} -ge "23" ]]; then
+		apt-get install -y libaccel-config-dev
+	else
+		echo "libaccel-config is only present on Ubuntu 23.04 or higher."
+	fi
+fi
+if [[ $INSTALL_LZ4 == "true" ]]; then
+	apt-get install -y liblz4-dev
 fi

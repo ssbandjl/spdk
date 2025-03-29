@@ -5,7 +5,8 @@
 
 
 def bdev_lvol_create_lvstore(client, bdev_name, lvs_name, cluster_sz=None,
-                             clear_method=None, num_md_pages_per_cluster_ratio=None):
+                             clear_method=None, num_md_pages_per_cluster_ratio=None,
+                             md_page_size=None):
     """Construct a logical volume store.
 
     Args:
@@ -14,6 +15,7 @@ def bdev_lvol_create_lvstore(client, bdev_name, lvs_name, cluster_sz=None,
         cluster_sz: cluster size of the logical volume store in bytes (optional)
         clear_method: Change clear method for data region. Available: none, unmap, write_zeroes (optional)
         num_md_pages_per_cluster_ratio: metadata pages per cluster (optional)
+        md_page_size: metadata page size (optional)
 
     Returns:
         UUID of created logical volume store.
@@ -25,6 +27,8 @@ def bdev_lvol_create_lvstore(client, bdev_name, lvs_name, cluster_sz=None,
         params['clear_method'] = clear_method
     if num_md_pages_per_cluster_ratio:
         params['num_md_pages_per_cluster_ratio'] = num_md_pages_per_cluster_ratio
+    if md_page_size:
+        params['md_page_size'] = md_page_size
     return client.call('bdev_lvol_create_lvstore', params)
 
 
@@ -221,6 +225,61 @@ def bdev_lvol_decouple_parent(client, name):
         'name': name,
     }
     return client.call('bdev_lvol_decouple_parent', params)
+
+
+def bdev_lvol_start_shallow_copy(client, src_lvol_name, dst_bdev_name):
+    """Start a shallow copy of an lvol over a given bdev. The status of the operation
+    can be obtained with bdev_lvol_check_shallow_copy
+
+    Args:
+        src_lvol_name: name of lvol to create a copy from
+        bdev_name: name of the bdev that acts as destination for the copy
+    """
+    params = {
+        'src_lvol_name': src_lvol_name,
+        'dst_bdev_name': dst_bdev_name
+    }
+    return client.call('bdev_lvol_start_shallow_copy', params)
+
+
+def bdev_lvol_check_shallow_copy(client, operation_id):
+    """Get shallow copy status
+
+    Args:
+        operation_id: operation identifier
+    """
+    params = {
+        'operation_id': operation_id
+    }
+    return client.call('bdev_lvol_check_shallow_copy', params)
+
+
+def bdev_lvol_set_parent(client, lvol_name, parent_name):
+    """Set the parent snapshot of a lvol
+
+    Args:
+        lvol_name: name of the lvol to set parent of
+        parent_name: name of the snapshot to become parent of lvol
+    """
+    params = {
+        'lvol_name': lvol_name,
+        'parent_name': parent_name
+    }
+    return client.call('bdev_lvol_set_parent', params)
+
+
+def bdev_lvol_set_parent_bdev(client, lvol_name, parent_name):
+    """Set the parent external snapshot of a lvol
+
+    Args:
+        lvol_name: name of the lvol to set parent of
+        parent_name: name of the external snapshot to become parent of lvol
+    """
+    params = {
+        'lvol_name': lvol_name,
+        'parent_name': parent_name
+    }
+    return client.call('bdev_lvol_set_parent_bdev', params)
 
 
 def bdev_lvol_delete_lvstore(client, uuid=None, lvs_name=None):

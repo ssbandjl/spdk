@@ -2,7 +2,7 @@
  *   Copyright (C) 2023 Intel Corporation. All rights reserved.
  */
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "common/lib/ut_multithread.c"
 #include "unit/lib/json_mock.c"
@@ -16,6 +16,7 @@ struct ut_iobuf_entry {
 	struct spdk_iobuf_channel	*ioch;
 	struct spdk_iobuf_entry		iobuf;
 	void				*buf;
+	void				*buf2;
 	uint32_t			thread_id;
 	const char			*module;
 };
@@ -381,42 +382,26 @@ iobuf(void)
 	 * ->buf pointers to different values.
 	 */
 	set_thread(0);
-	rc = spdk_iobuf_for_each_entry(&mod0_ch[0], &mod0_ch[0].large,
-				       ut_iobuf_foreach_cb, (void *)0xdeadbeef);
+	rc = spdk_iobuf_for_each_entry(&mod0_ch[0], ut_iobuf_foreach_cb, (void *)0xdeadbeef);
 	CU_ASSERT_EQUAL(rc, 0);
-	rc = spdk_iobuf_for_each_entry(&mod0_ch[0], &mod0_ch[0].small,
-				       ut_iobuf_foreach_cb, (void *)0xbeefdead);
-	CU_ASSERT_EQUAL(rc, 0);
-	rc = spdk_iobuf_for_each_entry(&mod1_ch[0], &mod1_ch[0].large,
-				       ut_iobuf_foreach_cb, (void *)0xfeedbeef);
-	CU_ASSERT_EQUAL(rc, 0);
-	rc = spdk_iobuf_for_each_entry(&mod1_ch[0], &mod1_ch[0].small,
-				       ut_iobuf_foreach_cb, (void *)0xbeeffeed);
+	rc = spdk_iobuf_for_each_entry(&mod1_ch[0], ut_iobuf_foreach_cb, (void *)0xfeedbeef);
 	CU_ASSERT_EQUAL(rc, 0);
 	set_thread(1);
-	rc = spdk_iobuf_for_each_entry(&mod0_ch[1], &mod0_ch[1].large,
-				       ut_iobuf_foreach_cb, (void *)0xcafebabe);
+	rc = spdk_iobuf_for_each_entry(&mod0_ch[1], ut_iobuf_foreach_cb, (void *)0xcafebabe);
 	CU_ASSERT_EQUAL(rc, 0);
-	rc = spdk_iobuf_for_each_entry(&mod0_ch[1], &mod0_ch[1].small,
-				       ut_iobuf_foreach_cb, (void *)0xbabecafe);
-	CU_ASSERT_EQUAL(rc, 0);
-	rc = spdk_iobuf_for_each_entry(&mod1_ch[1], &mod1_ch[1].large,
-				       ut_iobuf_foreach_cb, (void *)0xbeefcafe);
-	CU_ASSERT_EQUAL(rc, 0);
-	rc = spdk_iobuf_for_each_entry(&mod1_ch[1], &mod1_ch[1].small,
-				       ut_iobuf_foreach_cb, (void *)0xcafebeef);
+	rc = spdk_iobuf_for_each_entry(&mod1_ch[1], ut_iobuf_foreach_cb, (void *)0xbeefcafe);
 	CU_ASSERT_EQUAL(rc, 0);
 
 	/* thread 0 */
 	CU_ASSERT_PTR_EQUAL(mod0_entries[2].buf, (void *)0xdeadbeef);
-	CU_ASSERT_PTR_EQUAL(mod0_entries[3].buf, (void *)0xbeefdead);
+	CU_ASSERT_PTR_EQUAL(mod0_entries[3].buf, (void *)0xdeadbeef);
 	CU_ASSERT_PTR_EQUAL(mod1_entries[2].buf, (void *)0xfeedbeef);
-	CU_ASSERT_PTR_EQUAL(mod1_entries[3].buf, (void *)0xbeeffeed);
+	CU_ASSERT_PTR_EQUAL(mod1_entries[3].buf, (void *)0xfeedbeef);
 	/* thread 1 */
 	CU_ASSERT_PTR_EQUAL(mod0_entries[6].buf, (void *)0xcafebabe);
-	CU_ASSERT_PTR_EQUAL(mod0_entries[7].buf, (void *)0xbabecafe);
+	CU_ASSERT_PTR_EQUAL(mod0_entries[7].buf, (void *)0xcafebabe);
 	CU_ASSERT_PTR_EQUAL(mod1_entries[6].buf, (void *)0xbeefcafe);
-	CU_ASSERT_PTR_EQUAL(mod1_entries[7].buf, (void *)0xcafebeef);
+	CU_ASSERT_PTR_EQUAL(mod1_entries[7].buf, (void *)0xbeefcafe);
 
 	/* Clean everything up */
 	set_thread(0);
@@ -615,22 +600,124 @@ iobuf_cache(void)
 	free_cores();
 }
 
+static void
+ut_iobuf_get_buf2_cb(struct spdk_iobuf_entry *entry, void *buf)
+{
+	struct ut_iobuf_entry *ut_entry = SPDK_CONTAINEROF(entry, struct ut_iobuf_entry, iobuf);
+
+	CU_ASSERT_PTR_NOT_NULL(ut_entry->buf);
+	CU_ASSERT_PTR_NULL(ut_entry->buf2);
+
+	ut_entry->buf2 = buf;
+}
+
+static void
+ut_iobuf_get_buf1_cb(struct spdk_iobuf_entry *entry, void *buf)
+{
+	struct ut_iobuf_entry *ut_entry = SPDK_CONTAINEROF(entry, struct ut_iobuf_entry, iobuf);
+	void *buf2;
+
+	CU_ASSERT_PTR_NULL(ut_entry->buf);
+	CU_ASSERT_PTR_NULL(ut_entry->buf2);
+	ut_entry->buf = buf;
+
+	buf2 = spdk_iobuf_get(ut_entry->ioch, SMALL_BUFSIZE, &ut_entry->iobuf,
+			      ut_iobuf_get_buf2_cb);
+	CU_ASSERT_PTR_NULL(buf2);
+}
+
+static void
+iobuf_priority(void)
+{
+	struct spdk_iobuf_opts opts = {
+		.small_pool_count = 2,
+		.large_pool_count = 2,
+		.small_bufsize = SMALL_BUFSIZE,
+		.large_bufsize = LARGE_BUFSIZE,
+	};
+	struct ut_iobuf_entry entries[4] = {};
+	struct spdk_iobuf_channel iobuf_ch;
+	int rc, finish = 0;
+	uint32_t i;
+
+	allocate_cores(1);
+	allocate_threads(1);
+
+	set_thread(0);
+
+	/* We cannot use spdk_iobuf_set_opts(), as it won't allow us to use such small pools */
+	g_iobuf.opts = opts;
+	rc = spdk_iobuf_initialize();
+	CU_ASSERT_EQUAL(rc, 0);
+
+	rc = spdk_iobuf_register_module("ut_module");
+	CU_ASSERT_EQUAL(rc, 0);
+	rc = spdk_iobuf_channel_init(&iobuf_ch, "ut_module", 0, 0);
+	CU_ASSERT_EQUAL(rc, 0);
+
+	for (i = 0; i < SPDK_COUNTOF(entries); ++i) {
+		entries[i].ioch = &iobuf_ch;
+	}
+
+	/* Check that requests for an iobuf called from within the iobuf_get_cb are prioritized */
+	entries[0].buf = spdk_iobuf_get(&iobuf_ch, SMALL_BUFSIZE, NULL, NULL);
+	CU_ASSERT_PTR_NOT_NULL(entries[0].buf);
+	entries[1].buf = spdk_iobuf_get(&iobuf_ch, SMALL_BUFSIZE, NULL, NULL);
+	CU_ASSERT_PTR_NOT_NULL(entries[1].buf);
+
+	/* Try to acquire two iobufs twice */
+	entries[2].buf = spdk_iobuf_get(&iobuf_ch, SMALL_BUFSIZE, &entries[2].iobuf,
+					ut_iobuf_get_buf1_cb);
+	CU_ASSERT_PTR_NULL(entries[2].buf);
+	entries[3].buf = spdk_iobuf_get(&iobuf_ch, SMALL_BUFSIZE, &entries[3].iobuf,
+					ut_iobuf_get_buf1_cb);
+	CU_ASSERT_PTR_NULL(entries[3].buf);
+
+	/* Return one of the iobufs - the first entry on the wait queue should get it */
+	spdk_iobuf_put(&iobuf_ch, entries[0].buf, SMALL_BUFSIZE);
+	CU_ASSERT_PTR_NOT_NULL(entries[2].buf);
+	CU_ASSERT_PTR_NULL(entries[3].buf);
+
+	/* Return the second one, this time the same entry should get it, because it requested
+	 * inside its iobuf_get_cb */
+	spdk_iobuf_put(&iobuf_ch, entries[1].buf, SMALL_BUFSIZE);
+	CU_ASSERT_PTR_NOT_NULL(entries[2].buf2);
+	CU_ASSERT_PTR_NULL(entries[3].buf);
+
+	/* Release it again, now the last entry should finally get it */
+	spdk_iobuf_put(&iobuf_ch, entries[2].buf, SMALL_BUFSIZE);
+	spdk_iobuf_put(&iobuf_ch, entries[2].buf2, SMALL_BUFSIZE);
+	CU_ASSERT_PTR_NOT_NULL(entries[3].buf);
+	CU_ASSERT_PTR_NOT_NULL(entries[3].buf2);
+	spdk_iobuf_put(&iobuf_ch, entries[3].buf, SMALL_BUFSIZE);
+	spdk_iobuf_put(&iobuf_ch, entries[3].buf2, SMALL_BUFSIZE);
+
+	spdk_iobuf_channel_fini(&iobuf_ch);
+	poll_threads();
+
+	spdk_iobuf_finish(ut_iobuf_finish_cb, &finish);
+	poll_threads();
+
+	CU_ASSERT_EQUAL(finish, 1);
+
+	free_threads();
+	free_cores();
+}
+
 int
 main(int argc, char **argv)
 {
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("io_channel", NULL, NULL);
 	CU_ADD_TEST(suite, iobuf);
 	CU_ADD_TEST(suite, iobuf_cache);
+	CU_ADD_TEST(suite, iobuf_priority);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

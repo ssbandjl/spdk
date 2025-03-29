@@ -5,7 +5,7 @@
 
 #include "spdk/stdinc.h"
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 #include "common/lib/test_env.c"
 #include "event/reactor.c"
 #include "spdk/thread.h"
@@ -16,20 +16,25 @@
 static void
 test_create_reactor(void)
 {
-	/* See SPDK issue #3004.  Seems like a bug with gcc + asan on Fedora 38, so
-	 * we need to explicitly align the variable here.
-	 */
-	struct spdk_reactor reactor __attribute__((aligned(SPDK_CACHE_LINE_SIZE))) = {};
+	struct spdk_reactor *reactor;
+	int rc;
 
-	g_reactors = &reactor;
+	/* See SPDK issue #3004.  Seems like a bug with gcc + asan on Fedora 38, so we can't
+	 * allocate g_reactors on the stack and need to explicitly used aligned allocation here.
+	 */
+	rc = posix_memalign((void **)&reactor, SPDK_CACHE_LINE_SIZE, sizeof(*reactor));
+	SPDK_CU_ASSERT_FATAL(rc == 0);
+
+	g_reactors = reactor;
 	g_reactor_count = 1;
 
-	reactor_construct(&reactor, 0);
+	reactor_construct(reactor, 0);
 
-	CU_ASSERT(spdk_reactor_get(0) == &reactor);
+	CU_ASSERT(spdk_reactor_get(0) == reactor);
 
-	spdk_ring_free(reactor.events);
-	reactor_interrupt_fini(&reactor);
+	spdk_ring_free(reactor->events);
+	reactor_interrupt_fini(reactor);
+	free(reactor);
 	g_reactors = NULL;
 }
 
@@ -208,6 +213,8 @@ test_reschedule_thread(void)
 	CU_ASSERT(lw_thread->resched == false);
 	CU_ASSERT(TAILQ_EMPTY(&reactor->threads));
 
+	spdk_set_thread(NULL);
+
 	reactor = spdk_reactor_get(0);
 	CU_ASSERT(reactor != NULL);
 	MOCK_SET(spdk_env_get_current_core, 0);
@@ -313,7 +320,7 @@ poller_run_idle(void *ctx)
 
 	spdk_delay_us(delay_us);
 
-	return 0;
+	return SPDK_POLLER_IDLE;
 }
 
 static int
@@ -323,7 +330,7 @@ poller_run_busy(void *ctx)
 
 	spdk_delay_us(delay_us);
 
-	return 1;
+	return SPDK_POLLER_BUSY;
 }
 
 static void
@@ -388,6 +395,7 @@ test_reactor_stats(void)
 	idle2 = spdk_poller_register(poller_run_idle, (void *)300, 0);
 	CU_ASSERT(idle2 != NULL);
 
+	spdk_set_thread(NULL);
 	_reactor_run(reactor);
 
 	spdk_set_thread(thread1);
@@ -459,6 +467,7 @@ test_reactor_stats(void)
 	busy1 = spdk_poller_register(poller_run_busy, (void *)100, 0);
 	CU_ASSERT(busy1 != NULL);
 
+	spdk_set_thread(NULL);
 	_reactor_run(reactor);
 
 	spdk_set_thread(thread1);
@@ -495,7 +504,6 @@ static uint32_t
 _run_events_till_completion(uint32_t reactor_count)
 {
 	struct spdk_reactor *reactor;
-	struct spdk_thread *app_thread = spdk_thread_get_app_thread();
 	uint32_t i, events;
 	uint32_t total_events = 0;
 
@@ -507,9 +515,9 @@ _run_events_till_completion(uint32_t reactor_count)
 			MOCK_SET(spdk_env_get_current_core, i);
 			events += event_queue_run_batch(reactor);
 
-			/* Some events still require app_thread to run */
+			/* Some events require scheduling core to run */
 			MOCK_SET(spdk_env_get_current_core, g_scheduling_reactor->lcore);
-			spdk_thread_poll(app_thread, 0, 0);
+			events += event_queue_run_batch(g_scheduling_reactor);
 
 			MOCK_CLEAR(spdk_env_get_current_core);
 		}
@@ -631,6 +639,7 @@ test_scheduler(void)
 	reactor = spdk_reactor_get(0);
 	CU_ASSERT(reactor != NULL);
 	MOCK_SET(spdk_env_get_current_core, 0);
+	spdk_set_thread(NULL);
 	event_queue_run_batch(reactor);
 
 	reactor = spdk_reactor_get(0);
@@ -823,6 +832,8 @@ test_bind_thread(void)
 	}
 	CU_ASSERT(spdk_get_ticks() == current_time);
 
+	spdk_set_thread(NULL);
+
 	/* Thread on core 2 should be scheduled to core 0 */
 	reactor = spdk_reactor_get(0);
 	CU_ASSERT(reactor != NULL);
@@ -863,6 +874,7 @@ test_bind_thread(void)
 	free_cores();
 }
 
+#ifndef __FreeBSD__
 uint8_t g_curr_freq;
 
 static int
@@ -1021,7 +1033,7 @@ test_governor(void)
 
 	i = _run_events_till_completion(2);
 	/* Six runs when interrupt mode is supported, two if not. */
-	CU_ASSERT(i == 6 || i == 2);
+	CU_ASSERT(i == 7 || i == 3);
 	MOCK_SET(spdk_env_get_current_core, 0);
 
 	/* Main core should be busy more than 50% time now - frequency should be raised */
@@ -1046,7 +1058,7 @@ test_governor(void)
 
 	i = _run_events_till_completion(2);
 	/* Six runs when interrupt mode is supported, two if not. */
-	CU_ASSERT(i == 6 || i == 2);
+	CU_ASSERT(i == 7 || i == 3);
 	MOCK_SET(spdk_env_get_current_core, 0);
 
 	for (i = 0; i < 2; i++) {
@@ -1079,6 +1091,138 @@ test_governor(void)
 
 	free_cores();
 }
+#endif
+
+static void
+test_scheduler_set_isolated_core_mask(void)
+{
+	struct spdk_cpuset isolated_core_mask = {};
+	MOCK_SET(spdk_env_get_current_core, 0);
+
+	allocate_cores(3);
+
+	CU_ASSERT(spdk_reactors_init(SPDK_DEFAULT_MSG_MEMPOOL_SIZE) == 0);
+
+	spdk_cpuset_set_cpu(&g_reactor_core_mask, 0, true);
+	spdk_cpuset_set_cpu(&g_reactor_core_mask, 1, true);
+	spdk_cpuset_set_cpu(&g_reactor_core_mask, 2, true);
+
+	spdk_cpuset_set_cpu(&isolated_core_mask, 1, true);
+	spdk_cpuset_set_cpu(&isolated_core_mask, 2, true);
+	CU_ASSERT(scheduler_set_isolated_core_mask(isolated_core_mask) == true);
+
+	spdk_cpuset_zero(&isolated_core_mask);
+
+	spdk_cpuset_set_cpu(&isolated_core_mask, 4, true);
+	CU_ASSERT(scheduler_set_isolated_core_mask(isolated_core_mask) == false);
+
+	spdk_cpuset_zero(&isolated_core_mask);
+
+	spdk_cpuset_set_cpu(&isolated_core_mask, 0, true);
+	spdk_cpuset_set_cpu(&isolated_core_mask, 1, true);
+	spdk_cpuset_set_cpu(&isolated_core_mask, 4, true);
+	CU_ASSERT(scheduler_set_isolated_core_mask(isolated_core_mask) == false);
+
+	spdk_reactors_fini();
+	free_cores();
+}
+
+struct workload {
+	struct spdk_thread *thread;
+	uint64_t scheduling_period;
+
+	uint64_t busy_tsc_per_scheduling_period;
+
+	uint64_t polling_period_busy_tsc;
+	uint64_t polling_period_idle_tsc;
+};
+
+static int
+poller_run_mixed_workload(void *ctx)
+{
+	struct workload *workload = (struct workload *)ctx;
+	uint64_t curr_period_busy_tsc = spdk_thread_get_last_tsc(workload->thread) %
+					workload->scheduling_period;
+
+	if (curr_period_busy_tsc < workload->busy_tsc_per_scheduling_period) {
+		spdk_delay_us(workload->polling_period_busy_tsc);
+		return SPDK_POLLER_BUSY;
+	}
+	spdk_delay_us(workload->polling_period_idle_tsc);
+	return SPDK_POLLER_IDLE;
+}
+
+/**
+ * Test that poller_run_mixed_workload correctly mocks real poller behavior by mocking
+ * a mostly idle thread.
+ * The scheduling period is set to 1000 tsc and a total of 200 busy tsc will be
+ * consumed during the scheduling period. Then 800 tsc should be idle.
+ *
+ * Assert that the poller returns busy a few times (20) and that it returns idle
+ * many times (800) because it takes very little time to return when there is no
+ * work to do and longer to return when there is work to do.
+ *
+ */
+static void
+test_mixed_workload(void)
+{
+	struct workload workload  = {
+		.thread = NULL,
+		.scheduling_period = 1000,
+		.busy_tsc_per_scheduling_period = 200,
+		.polling_period_busy_tsc = 10,
+		.polling_period_idle_tsc = 1
+	};
+	struct spdk_poller *poller;
+	struct spdk_thread *thread;
+	struct spdk_reactor *reactor;
+	uint64_t i, busy_count, idle_count, rc;
+
+	allocate_cores(1);
+	spdk_cpuset_set_cpu(&g_reactor_core_mask, 0, true);
+
+	MOCK_SET(spdk_env_get_current_core, 0);
+	MOCK_SET(spdk_get_ticks, 0);
+	spdk_reactors_init(SPDK_DEFAULT_MSG_MEMPOOL_SIZE);
+	reactor = spdk_reactor_get(0);
+
+	thread = spdk_thread_create(NULL, &g_reactor_core_mask);
+	workload.thread = thread;
+
+	_reactor_run(reactor);
+
+	spdk_set_thread(thread);
+	poller = spdk_poller_register(poller_run_mixed_workload, (void *)&workload, 0);
+
+	busy_count = 0;
+	idle_count = 0;
+	/* Simulate 3 scheduling periods */
+	for (i = 1; i <= 3; i++) {
+		while (spdk_thread_get_last_tsc(thread) < i * workload.scheduling_period) {
+			rc = spdk_thread_poll(thread, 0, spdk_thread_get_last_tsc(thread));
+
+			if (rc == SPDK_POLLER_BUSY) {
+				busy_count++;
+			} else {
+				idle_count++;
+			}
+		}
+		CU_ASSERT(busy_count == workload.busy_tsc_per_scheduling_period / workload.polling_period_busy_tsc);
+		CU_ASSERT(idle_count == (workload.scheduling_period - workload.busy_tsc_per_scheduling_period) /
+			  workload.polling_period_idle_tsc);
+		CU_ASSERT(spdk_thread_get_last_tsc(thread) == i * workload.scheduling_period);
+		busy_count = 0;
+		idle_count = 0;
+	}
+
+	spdk_poller_unregister(&poller);
+	spdk_thread_exit(thread);
+	_reactor_run(reactor);
+	spdk_thread_destroy(thread);
+	spdk_set_thread(NULL);
+	spdk_reactors_fini();
+	free_cores();
+}
 
 int
 main(int argc, char **argv)
@@ -1086,7 +1230,6 @@ main(int argc, char **argv)
 	CU_pSuite suite = NULL;
 	unsigned int num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("app_suite", NULL, NULL);
@@ -1100,11 +1243,14 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_for_each_reactor);
 	CU_ADD_TEST(suite, test_reactor_stats);
 	CU_ADD_TEST(suite, test_scheduler);
+#ifndef __FreeBSD__
+	/* governor is only supported on Linux, so don't run this specific unit test on FreeBSD */
 	CU_ADD_TEST(suite, test_governor);
+#endif
+	CU_ADD_TEST(suite, test_scheduler_set_isolated_core_mask);
+	CU_ADD_TEST(suite, test_mixed_workload);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 
 	return num_failures;

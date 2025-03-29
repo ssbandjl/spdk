@@ -5,7 +5,7 @@
 
 #include "spdk/stdinc.h"
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "util/iov.c"
 
@@ -274,7 +274,7 @@ test_iov_one(void)
 	int iovcnt;
 	char buf[4];
 
-	spdk_iov_one(&iov, &iovcnt, buf, sizeof(buf));
+	SPDK_IOV_ONE(&iov, &iovcnt, buf, sizeof(buf));
 
 	CU_ASSERT(iov.iov_base == buf);
 	CU_ASSERT(iov.iov_len == sizeof(buf));
@@ -333,7 +333,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("iov", NULL, NULL);
@@ -347,11 +346,9 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_iov_one);
 	CU_ADD_TEST(suite, test_iov_xfer);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
 
-	CU_basic_run_tests();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 
-	num_failures = CU_get_number_of_failures();
 	CU_cleanup_registry();
 
 	return num_failures;

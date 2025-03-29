@@ -29,6 +29,8 @@ else
 	skip_run_test_with_warning "WARNING: Calsoft binaries not found, skipping test!"
 fi
 run_test "iscsi_tgt_filesystem" $rootdir/test/iscsi_tgt/filesystem/filesystem.sh
+run_test "chap_during_discovery" $rootdir/test/iscsi_tgt/chap/chap_discovery.sh
+run_test "chap_mutual_auth" $rootdir/test/iscsi_tgt/chap/chap_mutual_not_set.sh
 run_test "iscsi_tgt_reset" $rootdir/test/iscsi_tgt/reset/reset.sh
 run_test "iscsi_tgt_rpc_config" $rootdir/test/iscsi_tgt/rpc_config/rpc_config.sh
 run_test "iscsi_tgt_iscsi_lvol" $rootdir/test/iscsi_tgt/lvol/iscsi_lvol.sh
@@ -37,10 +39,12 @@ run_test "iscsi_tgt_qos" $rootdir/test/iscsi_tgt/qos/qos.sh
 run_test "iscsi_tgt_ip_migration" $rootdir/test/iscsi_tgt/ip_migration/ip_migration.sh
 run_test "iscsi_tgt_trace_record" $rootdir/test/iscsi_tgt/trace_record/trace_record.sh
 run_test "iscsi_tgt_login_redirection" $rootdir/test/iscsi_tgt/login_redirection/login_redirection.sh
+run_test "iscsi_tgt_digests" $rootdir/test/iscsi_tgt/digests/digests.sh
+run_test "iscsi_tgt_fuzz" $rootdir/test/fuzz/autofuzz_iscsi.sh --timeout=30
+run_test "iscsi_tgt_multiconnection" $rootdir/test/iscsi_tgt/multiconnection/multiconnection.sh
 
 if [ $RUN_NIGHTLY -eq 1 ]; then
 	run_test "iscsi_tgt_ext4test" $rootdir/test/iscsi_tgt/ext4test/ext4test.sh
-	run_test "iscsi_tgt_digests" $rootdir/test/iscsi_tgt/digests/digests.sh
 fi
 if [ $SPDK_TEST_RBD -eq 1 ]; then
 	if ! hash ceph; then
@@ -51,16 +55,6 @@ if [ $SPDK_TEST_RBD -eq 1 ]; then
 fi
 
 trap 'cleanup_veth_interfaces; exit 1' SIGINT SIGTERM EXIT
-
-if [ $SPDK_TEST_NVMF -eq 1 ]; then
-	# Test configure remote NVMe device from rpc and conf file
-	run_test "iscsi_tgt_fio_remote_nvme" $rootdir/test/iscsi_tgt/nvme_remote/fio_remote_nvme.sh
-fi
-
-if [ $RUN_NIGHTLY -eq 1 ]; then
-	run_test "iscsi_tgt_fuzz" $rootdir/test/iscsi_tgt/fuzz/fuzz.sh
-	run_test "iscsi_tgt_multiconnection" $rootdir/test/iscsi_tgt/multiconnection/multiconnection.sh
-fi
 
 if [ $SPDK_TEST_ISCSI_INITIATOR -eq 1 ]; then
 	run_test "iscsi_tgt_initiator" $rootdir/test/iscsi_tgt/initiator/initiator.sh

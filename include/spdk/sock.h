@@ -15,6 +15,7 @@
 #include "spdk/queue.h"
 #include "spdk/json.h"
 #include "spdk/assert.h"
+#include "spdk/thread.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,9 +49,14 @@ struct spdk_sock_request {
 	 */
 	struct __sock_request_internal {
 		TAILQ_ENTRY(spdk_sock_request)	link;
-#ifdef DEBUG
+
+		/**
+		 * curr_list is only used in DEBUG mode, but we include it in
+		 * release builds too to ensure ABI compatibility between debug
+		 * and release builds.
+		 */
 		void				*curr_list;
-#endif
+
 		uint32_t			offset;
 
 		/* Indicate if the whole req or part of it is sent with zerocopy */
@@ -231,8 +237,18 @@ struct spdk_sock_opts {
 	 * Size of the impl_opts structure.
 	 */
 	size_t impl_opts_size;
+
+	/**
+	 * Source address.  If NULL, any available address will be used.  Only valid for connect().
+	 */
+	const char *src_addr;
+
+	/**
+	 * Source port.  If zero, a random ephemeral port will be used.  Only valid for connect().
+	 */
+	uint16_t src_port;
 };
-SPDK_STATIC_ASSERT(sizeof(struct spdk_sock_opts) == 40, "Incorrect size");
+SPDK_STATIC_ASSERT(sizeof(struct spdk_sock_opts) == 56, "Incorrect size");
 
 /**
  * Initialize the default value of opts.
@@ -347,6 +363,26 @@ struct spdk_sock *spdk_sock_listen_ext(const char *ip, int port, const char *imp
  * \return a pointer to the accepted socket on success, or NULL on failure.
  */
 struct spdk_sock *spdk_sock_accept(struct spdk_sock *sock);
+
+/**
+ * Gets the name of the network interface of the local port for the socket.
+ *
+ * \param sock socket to find the interface name for
+ *
+ * \return null-terminated string containing interface name if found, NULL
+ *	   interface name could not be found
+ */
+const char *spdk_sock_get_interface_name(struct spdk_sock *sock);
+
+
+/**
+ * Gets the NUMA node ID for the network interface of the local port for the TCP socket.
+ *
+ * \param sock TCP socket to find the NUMA socket ID for
+ *
+ * \return NUMA ID, or SPDK_ENV_NUMA_ID_ANY if the NUMA ID is unknown
+ */
+int32_t spdk_sock_get_numa_id(struct spdk_sock *sock);
 
 /**
  * Close a socket.
@@ -524,7 +560,7 @@ void *spdk_sock_group_get_ctx(struct spdk_sock_group *sock_group);
  * \param cb_fn Called when the operation completes.
  * \param cb_arg Argument passed to the callback function.
  *
- * \return 0 on success, -1 on failure.
+ * \return 0 on success, -1 on failure with errno set.
  */
 int spdk_sock_group_add_sock(struct spdk_sock_group *group, struct spdk_sock *sock,
 			     spdk_sock_cb cb_fn, void *cb_arg);
@@ -535,7 +571,7 @@ int spdk_sock_group_add_sock(struct spdk_sock_group *group, struct spdk_sock *so
  * \param group Socket group.
  * \param sock Socket to remove.
  *
- * \return 0 on success, -1 on failure.
+ * \return 0 on success, -1 on failure with errno set.
  */
 int spdk_sock_group_remove_sock(struct spdk_sock_group *group, struct spdk_sock *sock);
 
@@ -639,6 +675,39 @@ const char *spdk_sock_get_default_impl(void);;
  * \param w JSON write context
  */
 void spdk_sock_write_config_json(struct spdk_json_write_ctx *w);
+
+/**
+ * Register an spdk_interrupt with specific event types on the current thread for the given socket group.
+ *
+ * The provided function will be called any time one of specified event types triggers on
+ * the associated file descriptor.
+ * Event types argument is a bit mask composed by ORing together
+ * enum spdk_interrupt_event_types values.
+ *
+ * \param group Socket group.
+ * \param events Event notification types.
+ * \param fn Called each time there are events in spdk_interrupt.
+ * \param arg Function argument for fn.
+ * \param name Human readable name for the spdk_interrupt.
+ *
+ * \return 0 on success or non-zero on failure.
+ */
+int spdk_sock_group_register_interrupt(struct spdk_sock_group *group, uint32_t events,
+				       spdk_interrupt_fn fn, void *arg, const char *name);
+
+/*
+ * \brief Register an spdk_interrupt on the current thread for the given socket group
+ * and with setting its name to the string of the spdk_interrupt function name.
+ */
+#define SPDK_SOCK_GROUP_REGISTER_INTERRUPT(sock, events, fn, arg)	\
+	spdk_sock_group_register_interrupt(sock, events, fn, arg, #fn)
+
+/**
+ * Unregister an spdk_interrupt for the given socket group from the current thread.
+ *
+ * \param group Socket group.
+ */
+void spdk_sock_group_unregister_interrupt(struct spdk_sock_group *group);
 
 #ifdef __cplusplus
 }

@@ -7,7 +7,7 @@
 
 #include "spdk/endian.h"
 #include "spdk/scsi.h"
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "CUnit/Basic.h"
 
@@ -385,6 +385,7 @@ underflow_for_read_transfer_test(void)
 	iscsi_task_set_pdu(&task, pdu);
 	task.parent = NULL;
 
+	task.scsi.iov.iov_base = (void *)0xF0000000;
 	task.scsi.iovs = &task.scsi.iov;
 	task.scsi.iovcnt = 1;
 	task.scsi.length = 512;
@@ -515,6 +516,7 @@ underflow_for_request_sense_test(void)
 	iscsi_task_set_pdu(&task, pdu1);
 	task.parent = NULL;
 
+	task.scsi.iov.iov_base = (void *)0xF000000;
 	task.scsi.iovs = &task.scsi.iov;
 	task.scsi.iovcnt = 1;
 	task.scsi.length = 512;
@@ -606,6 +608,7 @@ underflow_for_check_condition_test(void)
 	iscsi_task_set_pdu(&task, pdu);
 	task.parent = NULL;
 
+	task.scsi.iov.iov_base = (void *)0xF0000000;
 	task.scsi.iovs = &task.scsi.iov;
 	task.scsi.iovcnt = 1;
 	task.scsi.length = 512;
@@ -2593,7 +2596,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("iscsi_suite", NULL, NULL);
@@ -2623,9 +2625,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, data_out_pdu_sequence_test);
 	CU_ADD_TEST(suite, immediate_data_and_data_out_pdu_sequence_test);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

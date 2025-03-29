@@ -25,8 +25,10 @@ disclaimer() {
 			# fail on most calls so simply ignore its failures.
 			sub() { subscription-manager "$@" || :; }
 			;;
-
-		*) ;;
+		rocky)
+			[[ $VERSION_ID == 8* ]] || return 0
+			yum() { "$(type -P yum)" --setopt=skip_if_unavailable=True "$@"; }
+			;;
 	esac
 }
 
@@ -100,7 +102,8 @@ fi
 
 yum install -y gcc gcc-c++ make CUnit-devel libaio-devel openssl-devel \
 	libuuid-devel libiscsi-devel ncurses-devel json-c-devel libcmocka-devel \
-	clang clang-devel python3-pip
+	clang clang-devel python3-pip unzip keyutils keyutils-libs-devel fuse3-devel patchelf \
+	pkgconfig
 
 # Minimal install
 # workaround for arm: ninja fails with dep on skbuild python module
@@ -141,6 +144,9 @@ pip3 install meson
 pip3 install pyelftools
 pip3 install ijson
 pip3 install python-magic
+pip3 install Jinja2
+pip3 install pandas
+pip3 install tabulate
 if ! [[ $ID == centos && $VERSION_ID == 7 ]]; then
 	# Problem with modules compilation on Centos7
 	pip3 install grpcio
@@ -172,15 +178,15 @@ if [[ $INSTALL_DEV_TOOLS == "true" ]]; then
 		devtool_pkgs+=(python-pycodestyle astyle lcov ShellCheck)
 	fi
 
+	if [[ $ID == fedora ]]; then
+		devtool_pkgs+=(rubygem-{bundler,rake})
+	fi
+
 	yum install -y "${devtool_pkgs[@]}"
 fi
 if [[ $INSTALL_PMEM == "true" ]]; then
 	# Additional dependencies for building pmem based backends
 	yum install -y libpmemobj-devel || true
-fi
-if [[ $INSTALL_FUSE == "true" ]]; then
-	# Additional dependencies for FUSE and NVMe-CUSE
-	yum install -y fuse3-devel
 fi
 if [[ $INSTALL_RBD == "true" ]]; then
 	# Additional dependencies for RBD bdev in NVMe over Fabrics
@@ -206,4 +212,15 @@ fi
 if [[ $INSTALL_AVAHI == "true" ]]; then
 	# Additional dependencies for Avahi
 	yum install -y avahi-devel
+fi
+if [[ $INSTALL_IDXD == "true" ]]; then
+	# accel-config-devel is required for kernel IDXD implementation used in DSA accel module
+	if [[ $ID == centos && $VERSION_ID == 7* ]]; then
+		echo "Installation of IDXD dependencies not supported under ${ID}${VERSION_ID}"
+	else
+		yum install -y accel-config-devel
+	fi
+fi
+if [[ $INSTALL_LZ4 == "true" ]]; then
+	yum install -y lz4-devel
 fi

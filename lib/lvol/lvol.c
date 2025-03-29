@@ -217,7 +217,7 @@ load_next_lvol(void *cb_arg, struct spdk_blob *blob, int lvolerrno)
 		} else {
 			TAILQ_FOREACH_SAFE(lvol, &lvs->lvols, link, tmp) {
 				TAILQ_REMOVE(&lvs->lvols, lvol, link);
-				free(lvol);
+				lvol_free(lvol);
 			}
 			lvs_free(lvs);
 			spdk_bs_unload(bs, bs_unload_with_error_cb, req);
@@ -647,12 +647,13 @@ lvs_opts_copy(const struct spdk_lvs_opts *src, struct spdk_lvs_opts *dst)
 	SET_FIELD(num_md_pages_per_cluster_ratio);
 	SET_FIELD(opts_size);
 	SET_FIELD(esnap_bs_dev_create);
+	SET_FIELD(md_page_size);
 
 	dst->opts_size = src->opts_size;
 
 	/* You should not remove this statement, but need to update the assert statement
 	 * if you add a new field, and also add a corresponding SET_FIELD statement */
-	SPDK_STATIC_ASSERT(sizeof(struct spdk_lvs_opts) == 88, "Incorrect size");
+	SPDK_STATIC_ASSERT(sizeof(struct spdk_lvs_opts) == 92, "Incorrect size");
 
 #undef FIELD_OK
 #undef SET_FIELD
@@ -669,6 +670,7 @@ setup_lvs_opts(struct spdk_bs_opts *bs_opts, struct spdk_lvs_opts *o, uint32_t t
 	bs_opts->cluster_sz = o->cluster_sz;
 	bs_opts->clear_method = (enum bs_clear_method)o->clear_method;
 	bs_opts->num_md_pages = (o->num_md_pages_per_cluster_ratio * total_clusters) / 100;
+	bs_opts->md_page_size = o->md_page_size;
 	bs_opts->esnap_bs_dev_create = o->esnap_bs_dev_create;
 	bs_opts->esnap_ctx = esnap_ctx;
 	snprintf(bs_opts->bstype.bstype, sizeof(bs_opts->bstype.bstype), "LVOLSTORE");
@@ -683,7 +685,7 @@ spdk_lvs_init(struct spdk_bs_dev *bs_dev, struct spdk_lvs_opts *o,
 	struct spdk_bs_opts opts = {};
 	struct spdk_lvs_opts lvs_opts;
 	uint32_t total_clusters;
-	int rc;
+	int rc, len;
 
 	if (bs_dev == NULL) {
 		SPDK_ERRLOG("Blobstore device does not exist\n");
@@ -701,9 +703,9 @@ spdk_lvs_init(struct spdk_bs_dev *bs_dev, struct spdk_lvs_opts *o,
 		return -EINVAL;
 	}
 
-	if (lvs_opts.cluster_sz < bs_dev->blocklen) {
-		SPDK_ERRLOG("Cluster size %" PRIu32 " is smaller than blocklen %" PRIu32 "\n",
-			    lvs_opts.cluster_sz, bs_dev->blocklen);
+	if (lvs_opts.cluster_sz < bs_dev->blocklen || (lvs_opts.cluster_sz % bs_dev->blocklen) != 0) {
+		SPDK_ERRLOG("Cluster size %" PRIu32 " is smaller than blocklen %" PRIu32
+			    "Or not an integral multiple\n", lvs_opts.cluster_sz, bs_dev->blocklen);
 		return -EINVAL;
 	}
 	total_clusters = bs_dev->blockcnt / (lvs_opts.cluster_sz / bs_dev->blocklen);
@@ -716,14 +718,9 @@ spdk_lvs_init(struct spdk_bs_dev *bs_dev, struct spdk_lvs_opts *o,
 
 	setup_lvs_opts(&opts, o, total_clusters, lvs);
 
-	if (strnlen(lvs_opts.name, SPDK_LVS_NAME_MAX) == SPDK_LVS_NAME_MAX) {
-		SPDK_ERRLOG("Name has no null terminator.\n");
-		lvs_free(lvs);
-		return -EINVAL;
-	}
-
-	if (strnlen(lvs_opts.name, SPDK_LVS_NAME_MAX) == 0) {
-		SPDK_ERRLOG("No name specified.\n");
+	len = strnlen(lvs_opts.name, SPDK_LVS_NAME_MAX);
+	if (len == 0 || len == SPDK_LVS_NAME_MAX) {
+		SPDK_ERRLOG("Name must be between 1 and %d characters\n", SPDK_LVS_NAME_MAX - 1);
 		lvs_free(lvs);
 		return -EINVAL;
 	}
@@ -993,16 +990,15 @@ lvol_close_blob_cb(void *cb_arg, int lvolerrno)
 
 	if (lvolerrno < 0) {
 		SPDK_ERRLOG("Could not close blob on lvol\n");
-		lvol_free(lvol);
 		goto end;
 	}
 
 	lvol->ref_count--;
-	lvol->action_in_progress = false;
 	lvol->blob = NULL;
 	SPDK_INFOLOG(lvol, "Lvol %s closed\n", lvol->unique_id);
 
 end:
+	lvol->action_in_progress = false;
 	req->cb_fn(req->cb_arg, lvolerrno);
 	free(req);
 }
@@ -1060,7 +1056,7 @@ lvol_create_open_cb(void *cb_arg, struct spdk_blob *blob, int lvolerrno)
 	TAILQ_REMOVE(&req->lvol->lvol_store->pending_lvols, req->lvol, link);
 
 	if (lvolerrno < 0) {
-		free(lvol);
+		lvol_free(lvol);
 		req->cb_fn(req->cb_arg, NULL, lvolerrno);
 		free(req);
 		return;
@@ -1087,7 +1083,7 @@ lvol_create_cb(void *cb_arg, spdk_blob_id blobid, int lvolerrno)
 
 	if (lvolerrno < 0) {
 		TAILQ_REMOVE(&req->lvol->lvol_store->pending_lvols, req->lvol, link);
-		free(req->lvol);
+		lvol_free(req->lvol);
 		assert(req->cb_fn != NULL);
 		req->cb_fn(req->cb_arg, NULL, lvolerrno);
 		free(req);
@@ -1575,8 +1571,6 @@ spdk_lvol_destroy(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn, void *cb_
 		return;
 	}
 
-	lvol->action_in_progress = true;
-
 	req = calloc(1, sizeof(*req));
 	if (!req) {
 		SPDK_ERRLOG("Cannot alloc memory for lvol request pointer\n");
@@ -1600,6 +1594,8 @@ spdk_lvol_destroy(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn, void *cb_
 		cb_fn(cb_arg, -EBUSY);
 		return;
 	}
+
+	lvol->action_in_progress = true;
 
 	spdk_bs_delete_blob(bs, lvol->blob_id, lvol_delete_blob_cb, req);
 }
@@ -1626,8 +1622,6 @@ spdk_lvol_close(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn, void *cb_ar
 		return;
 	}
 
-	lvol->action_in_progress = true;
-
 	req = calloc(1, sizeof(*req));
 	if (!req) {
 		SPDK_ERRLOG("Cannot alloc memory for lvol request pointer\n");
@@ -1638,6 +1632,8 @@ spdk_lvol_close(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn, void *cb_ar
 	req->cb_fn = cb_fn;
 	req->cb_arg = cb_arg;
 	req->lvol = lvol;
+
+	lvol->action_in_progress = true;
 
 	spdk_blob_close(lvol->blob, lvol_close_blob_cb, req);
 }
@@ -1735,6 +1731,39 @@ spdk_lvol_decouple_parent(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn, v
 				     lvol_inflate_cb, req);
 }
 
+static void
+lvs_grow_live_cb(void *cb_arg, int lvolerrno)
+{
+	struct spdk_lvs_req *req = (struct spdk_lvs_req *)cb_arg;
+
+	if (req->cb_fn) {
+		req->cb_fn(req->cb_arg, lvolerrno);
+	}
+	free(req);
+	return;
+}
+
+void
+spdk_lvs_grow_live(struct spdk_lvol_store *lvs, spdk_lvs_op_complete cb_fn, void *cb_arg)
+{
+	struct spdk_lvs_req *req;
+
+	req = calloc(1, sizeof(*req));
+	if (req == NULL) {
+		SPDK_ERRLOG("Cannot alloc memory for request structure\n");
+		if (cb_fn) {
+			cb_fn(cb_arg, -ENOMEM);
+		}
+		return;
+	}
+
+	req->cb_fn = cb_fn;
+	req->cb_arg = cb_arg;
+	req->lvol_store = lvs;
+
+	spdk_bs_grow_live(lvs->blobstore, lvs_grow_live_cb, req);
+}
+
 void
 spdk_lvs_grow(struct spdk_bs_dev *bs_dev, spdk_lvs_op_with_handle_complete cb_fn, void *cb_arg)
 {
@@ -1796,7 +1825,7 @@ lvs_esnap_bs_dev_create(void *bs_ctx, void *blob_ctx, struct spdk_blob *blob,
 	spdk_blob_id		blob_id = spdk_blob_get_id(blob);
 
 	if (lvs == NULL) {
-		if (lvol == NULL) {
+		if (lvol == NULL || lvol->lvol_store == NULL) {
 			SPDK_ERRLOG("Blob 0x%" PRIx64 ": no lvs context nor lvol context\n",
 				    blob_id);
 			return -EINVAL;
@@ -2209,4 +2238,193 @@ spdk_lvol_is_degraded(const struct spdk_lvol *lvol)
 		return true;
 	}
 	return spdk_blob_is_degraded(blob);
+}
+
+static void
+lvol_shallow_copy_cb(void *cb_arg, int lvolerrno)
+{
+	struct spdk_lvol_copy_req *req = cb_arg;
+	struct spdk_lvol *lvol = req->lvol;
+
+	spdk_bs_free_io_channel(req->channel);
+
+	if (lvolerrno < 0) {
+		SPDK_ERRLOG("Could not make a shallow copy of lvol %s, error %d\n", lvol->unique_id, lvolerrno);
+	}
+
+	req->cb_fn(req->cb_arg, lvolerrno);
+	free(req);
+}
+
+int
+spdk_lvol_shallow_copy(struct spdk_lvol *lvol, struct spdk_bs_dev *ext_dev,
+		       spdk_blob_shallow_copy_status status_cb_fn, void *status_cb_arg,
+		       spdk_lvol_op_complete cb_fn, void *cb_arg)
+{
+	struct spdk_lvol_copy_req *req;
+	spdk_blob_id blob_id;
+	int rc;
+
+	assert(cb_fn != NULL);
+
+	if (lvol == NULL) {
+		SPDK_ERRLOG("lvol must not be NULL\n");
+		return -EINVAL;
+	}
+
+	assert(lvol->lvol_store->thread == spdk_get_thread());
+
+	if (ext_dev == NULL) {
+		SPDK_ERRLOG("lvol %s shallow copy, ext_dev must not be NULL\n", lvol->unique_id);
+		return -EINVAL;
+	}
+
+	req = calloc(1, sizeof(*req));
+	if (!req) {
+		SPDK_ERRLOG("lvol %s shallow copy, cannot alloc memory for lvol request\n", lvol->unique_id);
+		return -ENOMEM;
+	}
+
+	req->lvol = lvol;
+	req->cb_fn = cb_fn;
+	req->cb_arg = cb_arg;
+	req->channel = spdk_bs_alloc_io_channel(lvol->lvol_store->blobstore);
+	if (req->channel == NULL) {
+		SPDK_ERRLOG("lvol %s shallow copy, cannot alloc io channel for lvol request\n", lvol->unique_id);
+		free(req);
+		return -ENOMEM;
+	}
+
+	blob_id = spdk_blob_get_id(lvol->blob);
+
+	rc = spdk_bs_blob_shallow_copy(lvol->lvol_store->blobstore, req->channel, blob_id, ext_dev,
+				       status_cb_fn, status_cb_arg, lvol_shallow_copy_cb, req);
+
+	if (rc < 0) {
+		SPDK_ERRLOG("Could not make a shallow copy of lvol %s\n", lvol->unique_id);
+		spdk_bs_free_io_channel(req->channel);
+		free(req);
+	}
+
+	return rc;
+}
+
+static void
+lvol_set_parent_cb(void *cb_arg, int lvolerrno)
+{
+	struct spdk_lvol_req *req = cb_arg;
+
+	if (lvolerrno < 0) {
+		SPDK_ERRLOG("could not set parent of lvol %s, error %d\n", req->lvol->name, lvolerrno);
+	}
+
+	req->cb_fn(req->cb_arg, lvolerrno);
+	free(req);
+}
+
+void
+spdk_lvol_set_parent(struct spdk_lvol *lvol, struct spdk_lvol *snapshot,
+		     spdk_lvol_op_complete cb_fn, void *cb_arg)
+{
+	struct spdk_lvol_req *req;
+	spdk_blob_id blob_id, snapshot_id;
+
+	assert(cb_fn != NULL);
+
+	if (lvol == NULL) {
+		SPDK_ERRLOG("lvol must not be NULL\n");
+		cb_fn(cb_arg, -EINVAL);
+		return;
+	}
+
+	if (snapshot == NULL) {
+		SPDK_ERRLOG("snapshot must not be NULL\n");
+		cb_fn(cb_arg, -EINVAL);
+		return;
+	}
+
+	req = calloc(1, sizeof(*req));
+	if (!req) {
+		SPDK_ERRLOG("cannot alloc memory for lvol request pointer\n");
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+
+	req->lvol = lvol;
+	req->cb_fn = cb_fn;
+	req->cb_arg = cb_arg;
+
+	blob_id = spdk_blob_get_id(lvol->blob);
+	snapshot_id = spdk_blob_get_id(snapshot->blob);
+
+	spdk_bs_blob_set_parent(lvol->lvol_store->blobstore, blob_id, snapshot_id,
+				lvol_set_parent_cb, req);
+}
+
+static void
+lvol_set_external_parent_cb(void *cb_arg, int lvolerrno)
+{
+	struct spdk_lvol_bs_dev_req *req = cb_arg;
+
+	if (lvolerrno < 0) {
+		SPDK_ERRLOG("could not set external parent of lvol %s, error %d\n", req->lvol->name, lvolerrno);
+		req->bs_dev->destroy(req->bs_dev);
+	}
+
+	req->cb_fn(req->cb_arg, lvolerrno);
+	free(req);
+}
+
+void
+spdk_lvol_set_external_parent(struct spdk_lvol *lvol, const void *esnap_id, uint32_t esnap_id_len,
+			      spdk_lvol_op_complete cb_fn, void *cb_arg)
+{
+	struct spdk_lvol_bs_dev_req *req;
+	struct spdk_bs_dev *bs_dev;
+	spdk_blob_id blob_id;
+	int rc;
+
+	assert(cb_fn != NULL);
+
+	if (lvol == NULL) {
+		SPDK_ERRLOG("lvol must not be NULL\n");
+		cb_fn(cb_arg, -EINVAL);
+		return;
+	}
+
+	if (esnap_id == NULL) {
+		SPDK_ERRLOG("snapshot must not be NULL\n");
+		cb_fn(cb_arg, -EINVAL);
+		return;
+	}
+
+	if (esnap_id_len == sizeof(lvol->uuid_str) &&
+	    memcmp(esnap_id, lvol->uuid_str, esnap_id_len) == 0) {
+		SPDK_ERRLOG("lvol %s and esnap have the same UUID\n", lvol->name);
+		cb_fn(cb_arg, -EINVAL);
+		return;
+	}
+
+	rc = lvs_esnap_bs_dev_create(lvol->lvol_store, lvol, lvol->blob, esnap_id, esnap_id_len, &bs_dev);
+	if (rc < 0) {
+		cb_fn(cb_arg, rc);
+		return;
+	}
+
+	req = calloc(1, sizeof(*req));
+	if (!req) {
+		SPDK_ERRLOG("cannot alloc memory for lvol request pointer\n");
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+
+	req->lvol = lvol;
+	req->bs_dev = bs_dev;
+	req->cb_fn = cb_fn;
+	req->cb_arg = cb_arg;
+
+	blob_id = spdk_blob_get_id(lvol->blob);
+
+	spdk_bs_blob_set_external_parent(lvol->lvol_store->blobstore, blob_id, bs_dev, esnap_id,
+					 esnap_id_len, lvol_set_external_parent_cb, req);
 }

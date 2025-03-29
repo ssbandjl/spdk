@@ -294,7 +294,7 @@ get_line(char *buf, int buf_size, FILE *f, bool secret)
 	}
 
 	if (secret) {
-		ret = tcsetattr(STDIN_FILENO, TCSAFLUSH, &default_attr); /* restore default confing */
+		ret = tcsetattr(STDIN_FILENO, TCSAFLUSH, &default_attr); /* restore default config */
 		if (ret) {
 			return NULL;
 		}
@@ -1607,6 +1607,7 @@ main(int argc, char **argv)
 		return rc;
 	}
 
+	opts.opts_size = sizeof(opts);
 	spdk_env_opts_init(&opts);
 	opts.name = "nvme_manage";
 	opts.core_mask = "0x1";

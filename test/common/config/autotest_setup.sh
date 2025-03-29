@@ -13,7 +13,7 @@ sudo() {
 }
 
 set -e
-shopt -s extglob
+shopt -s extglob nullglob
 
 UPGRADE=false
 INSTALL=false
@@ -28,11 +28,11 @@ function usage() {
 	echo "This script is intended to automate the environment setup for a linux virtual machine."
 	echo "Please run this script as your regular user. The script will make calls to sudo as needed."
 	echo ""
-	echo "./vm_setup.sh"
+	echo "${0##*/}"
 	echo "  -h --help"
 	echo "  -u --upgrade Run $package_manager upgrade"
 	echo "  -i --install-deps Install $package_manager based dependencies"
-	echo "  -t --test-conf List of test configurations to enable (${CONF},irdma,lcov,bpftrace)"
+	echo "  -t --test-conf List of test configurations to enable (${CONF},irdma,lcov,bpftrace,doxygen)"
 	echo "  -c --conf-path Path to configuration file"
 	echo "  -d --dir-git Path to where git sources should be saved"
 	echo "  -s --disable-tsocks Disable use of tsocks"
@@ -82,15 +82,6 @@ function detect_package_manager() {
 vmsetupdir=$(readlink -f "$(dirname "$0")")
 rootdir=$(readlink -f "$vmsetupdir/../../../")
 source "$rootdir/scripts/common.sh"
-
-if [[ ${0##*/} == vm_setup.sh ]]; then
-	cat <<- DEPRECATED >&2
-		Running this script as ${0##*/} is deprecated and support for it will be removed in the future.
-
-		Please, use $vmsetupdir/autotest_setup.sh instead.
-
-	DEPRECATED
-fi
 
 set_os_id_version
 source "$vmsetupdir/pkgdep/git"

@@ -104,7 +104,7 @@ get_error_log_page_completion(void *arg, const struct spdk_nvme_cpl *cpl)
 	}
 
 	/* TODO: do handling (print?) of error log page */
-	printf("Error Informaton Log Page received.\n");
+	printf("Error Information Log Page received.\n");
 	g_test_done = true;
 }
 
@@ -279,6 +279,7 @@ main(int argc, char **argv)
 	struct spdk_env_opts opts;
 	struct spdk_nvme_detach_ctx *detach_ctx = NULL;
 
+	opts.opts_size = sizeof(opts);
 	spdk_env_opts_init(&opts);
 	opts.name = "doorbell_aers";
 	opts.shm_id = 0;

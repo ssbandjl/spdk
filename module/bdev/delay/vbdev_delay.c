@@ -506,13 +506,11 @@ static void
 _delay_write_conf_values(struct vbdev_delay *delay_node, struct spdk_json_write_ctx *w)
 {
 	struct spdk_uuid *uuid = &delay_node->delay_bdev.uuid;
-	char uuid_str[SPDK_UUID_STRING_LEN];
 
 	spdk_json_write_named_string(w, "name", spdk_bdev_get_name(&delay_node->delay_bdev));
 	spdk_json_write_named_string(w, "base_bdev_name", spdk_bdev_get_name(delay_node->base_bdev));
 	if (!spdk_uuid_is_null(uuid)) {
-		spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), uuid);
-		spdk_json_write_named_string(w, "uuid", uuid_str);
+		spdk_json_write_named_uuid(w, "uuid", uuid);
 	}
 	spdk_json_write_named_int64(w, "avg_read_latency",
 				    delay_node->average_read_latency_ticks * SPDK_SEC_TO_USEC / spdk_get_ticks_hz());
@@ -633,10 +631,7 @@ vbdev_delay_insert_association(const char *bdev_name, const char *vbdev_name,
 	assoc->p99_read_latency = p99_read_latency;
 	assoc->avg_write_latency = avg_write_latency;
 	assoc->p99_write_latency = p99_write_latency;
-
-	if (uuid) {
-		spdk_uuid_copy(&assoc->uuid, uuid);
-	}
+	spdk_uuid_copy(&assoc->uuid, uuid);
 
 	TAILQ_INSERT_TAIL(&g_bdev_associations, assoc, link);
 
@@ -816,6 +811,13 @@ vbdev_delay_register(const char *bdev_name)
 		delay_node->delay_bdev.optimal_io_boundary = bdev->optimal_io_boundary;
 		delay_node->delay_bdev.blocklen = bdev->blocklen;
 		delay_node->delay_bdev.blockcnt = bdev->blockcnt;
+
+		delay_node->delay_bdev.md_interleave = bdev->md_interleave;
+		delay_node->delay_bdev.md_len = bdev->md_len;
+		delay_node->delay_bdev.dif_type = bdev->dif_type;
+		delay_node->delay_bdev.dif_is_head_of_md = bdev->dif_is_head_of_md;
+		delay_node->delay_bdev.dif_check_flags = bdev->dif_check_flags;
+		delay_node->delay_bdev.dif_pi_format = bdev->dif_pi_format;
 
 		delay_node->delay_bdev.ctxt = delay_node;
 		delay_node->delay_bdev.fn_table = &vbdev_delay_fn_table;

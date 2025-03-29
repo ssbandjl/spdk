@@ -151,8 +151,10 @@ def setup_nvme_disk(libvirt, disk, index)
   fdp_subsys_id = ""
   ms = ""
 
+  addr = 0x10 + index
+
   # Define controller
-  nvme_controller = "nvme,id=#{nvme_disk_id},serial=1234#{index}"
+  nvme_controller = "nvme,id=#{nvme_disk_id},serial=1234#{index},addr=0x#{addr.to_s(16)}"
 
   # For the FDP, we need to hook our nvme into a dedicated subsystem
   if !nvme_fdp[index].nil? && nvme_fdp[index] != ""
@@ -257,7 +259,7 @@ def deploy_test_vm(config, distro, plugins_sync_backend)
   make_spdk_local_copy_of_nfs(config,distro) if plugins_sync_backend[:type] == :nfs
 
   config.vm.provision "shell" do |setup|
-    setup.inline = "/home/vagrant/spdk_repo/spdk/test/common/config/vm_setup.sh"
+    setup.inline = "/home/vagrant/spdk_repo/spdk/test/common/config/autotest_setup.sh"
     setup.privileged = false
     setup.args = ["-u", "-i"]
   end
@@ -292,6 +294,7 @@ def setup_libvirt(config, vmcpu, vmram, distro)
     libvirt.memory = vmram
     libvirt.cpus = vmcpu
     libvirt.video_type = "cirrus"
+    libvirt.nic_model_type = (ENV['NIC_MODEL'] || "virtio")
 
     if (distro.include?("freebsd"))
       # generic/freebsd boxes need to be explicitly run with SCSI bus,

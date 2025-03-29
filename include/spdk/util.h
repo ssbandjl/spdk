@@ -36,6 +36,12 @@ extern "C" {
  */
 #define SPDK_SIZEOF_MEMBER(type, member) (sizeof(((type *)0)->member))
 
+/**
+ * Get the number of elements in an array of a struct member
+ */
+#define SPDK_COUNTOF_MEMBER(type, member) (SPDK_COUNTOF(((type *)0)->member))
+
+#define SPDK_SEC_TO_MSEC 1000ULL
 #define SPDK_SEC_TO_USEC 1000000ULL
 #define SPDK_SEC_TO_NSEC 1000000000ULL
 
@@ -58,6 +64,29 @@ extern "C" {
  */
 #define SPDK_ALIGN_CEIL(val, align) \
 	SPDK_ALIGN_FLOOR(((val) + ((__typeof__(val)) (align) - 1)), align)
+
+#define SPDK_BIT(n) (1ul << (n))
+
+/**
+ * Check if a given field is valid in a structure with size tracking. The third
+ * parameter is optional and can be used to specify the size of the object.  If
+ * unset, (obj)->size will be used by default.
+ */
+#define SPDK_FIELD_VALID(obj, field, ...) \
+	_SPDK_FIELD_VALID(obj, field, ## __VA_ARGS__, (obj)->size)
+
+#define _SPDK_FIELD_VALID(obj, field, size, ...) \
+	((size) >= (offsetof(__typeof__(*(obj)), field) + sizeof((obj)->field)))
+/**
+ * Get a field from a structure with size tracking.  The fourth parameter is
+ * optional and can be used to specify the size of the object.  If unset,
+ * (obj)->size will be used by default.
+ */
+#define SPDK_GET_FIELD(obj, field, defval, ...) \
+	_SPDK_GET_FIELD(obj, field, defval, ## __VA_ARGS__, (obj)->size)
+
+#define _SPDK_GET_FIELD(obj, field, defval, size, ...) \
+	(SPDK_FIELD_VALID(obj, field, size) ? (obj)->field : (defval))
 
 uint32_t spdk_u32log2(uint32_t x);
 
@@ -184,8 +213,11 @@ spdk_iov_memset(struct iovec *iovs, int iovcnt, int c);
 /**
  * Initialize an iovec with just the single given buffer.
  */
-void
-spdk_iov_one(struct iovec *iov, int *iovcnt, void *buf, size_t buflen);
+#define SPDK_IOV_ONE(piov, piovcnt, buf, buflen) do {	\
+	(piov)->iov_base = (buf);			\
+	(piov)->iov_len = (buflen);			\
+	*(piovcnt) = 1;					\
+} while (0)
 
 /**
  * Copy the data described by the source iovec to the destination iovec.

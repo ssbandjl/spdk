@@ -50,7 +50,7 @@ class UINode(ConfigNode):
             return result
         finally:
             if self.shell.interactive and\
-                command in ["create", "delete", "delete_all", "add_initiator",
+                command in ["create", "start", "delete", "delete_all", "add_initiator",
                             "allow_any_host", "bdev_split_create", "add_lun",
                             "iscsi_target_node_add_pg_ig_maps", "remove_target", "add_secret",
                             "bdev_split_delete", "delete_secret_all",
@@ -81,6 +81,7 @@ class UIBdevs(UINode):
         UIVirtioScsiBdev(self)
         UIRaidBdev(self)
         UIUringBdev(self)
+        UICompressBdev(self)
 
 
 class UILvolStores(UINode):
@@ -675,16 +676,20 @@ class UIVhostScsi(UIVhost):
         for ctrlr in self.get_root().vhost_get_controllers(ctrlr_type=self.name):
             UIVhostScsiCtrlObj(ctrlr, self)
 
-    def ui_command_create(self, name, cpumask=None):
+    def ui_command_create(self, name, delay=None, cpumask=None):
         """
         Create a Vhost SCSI controller.
 
         Arguments:
         name - Controller name.
+        delay - Optional. whether delay starting controller or not.
+                Default: False.
         cpumask - Optional. Integer to specify mask of CPUs to use.
                   Default: 1.
         """
+        delay = self.ui_eval_param(delay, "bool", False)
         self.get_root().vhost_create_scsi_controller(ctrlr=name,
+                                                     delay=delay,
                                                      cpumask=cpumask)
 
 
@@ -712,6 +717,15 @@ class UIVhostScsiCtrlObj(UIVhostCtrl):
         self._children = set([])
         for lun in self.ctrlr.backend_specific["scsi"]:
             UIVhostTargetObj(lun, self)
+
+    def ui_command_start(self, name):
+        """
+        Start a Vhost SCSI controller.
+
+        Arguments:
+        name - Controller name.
+        """
+        self.get_root().vhost_start_scsi_controller(ctrlr=name)
 
     def ui_command_remove_target(self, target_num):
         """
@@ -834,7 +848,7 @@ class UIUringBdev(UIBdev):
     def delete(self, name):
         self.get_root().bdev_uring_delete(name=name)
 
-    def ui_command_create(self, filename, name, block_size):
+    def ui_command_create(self, filename, name, block_size, uuid=None):
         """
         Construct a uring bdev.
 
@@ -842,12 +856,14 @@ class UIUringBdev(UIBdev):
         filename - Path to device or file.
         name - Name to use for bdev.
         block_size - Integer, block size to use when constructing bdev.
+        uuid: UUID of block device (optional)
         """
 
         block_size = self.ui_eval_param(block_size, "number", None)
         ret_name = self.get_root().bdev_uring_create(filename=filename,
                                                      name=name,
-                                                     block_size=int(block_size))
+                                                     block_size=int(block_size),
+                                                     uuid=uuid)
         self.shell.log.info(ret_name)
 
     def ui_command_delete(self, name):
@@ -856,5 +872,45 @@ class UIUringBdev(UIBdev):
 
         Arguments:
         name - uring bdev name
+        """
+        self.delete(name)
+
+
+class UICompressBdev(UIBdev):
+    def __init__(self, parent):
+        UIBdev.__init__(self, "compress", parent)
+
+    def delete(self, name):
+        self.get_root().bdev_compress_delete(name=name)
+
+    def ui_command_create(self, base_bdev_name, pm_path, lb_size=None, comp_algo=None, comp_level=None):
+        """
+        Construct a compress bdev.
+
+        Arguments:
+        base_bdev_name - Name of the base bdev.
+        pm_path - Path to persistent memory.
+        lb_size - Optional argument. Integer, compressed vol logical block size (optional, if used must be 512 or 4096).
+        comp_algo - Optional argument. Compression algorithm, (deflate, lz4). Default is deflate.
+        comp_level - Optional argument. Integer, compression algorithm level. if algo == deflate, level ranges from 0 to 3.
+                     if algo == lz4, level ranges from 1 to 65537
+        """
+
+        lb_size = self.ui_eval_param(lb_size, "number", None)
+        comp_level = self.ui_eval_param(comp_level, "number", None)
+        ret_name = self.get_root().create_compress_bdev(base_bdev_name=base_bdev_name,
+                                                        pm_path=pm_path,
+                                                        lb_size=lb_size,
+                                                        comp_algo=comp_algo,
+                                                        comp_level=comp_level)
+
+        self.shell.log.info(ret_name)
+
+    def ui_command_delete(self, name):
+        """
+        Deletes compress bdev from configuration.
+
+        Arguments:
+        name - Is a unique identifier of the compress bdev to be deleted - UUID number or name alias.
         """
         self.delete(name)

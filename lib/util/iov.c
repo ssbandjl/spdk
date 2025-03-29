@@ -4,6 +4,7 @@
  */
 
 #include "spdk/util.h"
+#include "spdk/log.h"
 
 void
 spdk_iov_memset(struct iovec *iovs, int iovcnt, int c)
@@ -16,14 +17,6 @@ spdk_iov_memset(struct iovec *iovs, int iovcnt, int c)
 		memset(iov->iov_base, c, iov->iov_len);
 		iov_idx++;
 	}
-}
-
-void
-spdk_iov_one(struct iovec *iov, int *iovcnt, void *buf, size_t buflen)
-{
-	iov->iov_base = buf;
-	iov->iov_len = buflen;
-	*iovcnt = 1;
 }
 
 size_t

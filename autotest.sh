@@ -47,7 +47,10 @@ if [ $(uname -s) = Linux ]; then
 		"$udevadm" monitor --property &> "$output_dir/udev.log" &
 		udevadm_pid=$!
 	fi
+
 fi
+
+start_monitor_resources
 
 trap "autotest_cleanup || :; exit 1" SIGINT SIGTERM EXIT
 
@@ -62,24 +65,11 @@ cd $src
 freebsd_update_contigmem_mod
 freebsd_set_maxsock_buf
 
-# lcov takes considerable time to process clang coverage.
-# Disabling lcov allow us to do this.
-# More information: https://github.com/spdk/spdk/issues/1693
-CC_TYPE=$(grep CC_TYPE mk/cc.mk)
-if hash lcov && ! [[ "$CC_TYPE" == *"clang"* ]]; then
-	export LCOV_OPTS="
-		--rc lcov_branch_coverage=1
-		--rc lcov_function_coverage=1
-		--rc genhtml_branch_coverage=1
-		--rc genhtml_function_coverage=1
-		--rc genhtml_legend=1
-		--rc geninfo_all_blocks=1
-		"
-	export LCOV="lcov $LCOV_OPTS --no-external"
+if [[ $CONFIG_COVERAGE == y ]]; then
 	# Print lcov version to log
-	$LCOV -v
+	$LCOV --version
 	# zero out coverage data
-	$LCOV -q -c -i -t "Baseline" -d $src -o $out/cov_base.info
+	$LCOV -q -c --no-external -i -t "Baseline" -d $src -o $out/cov_base.info
 fi
 
 # Make sure the disks are clean (no leftover partition tables)
@@ -104,7 +94,7 @@ fi
 # Delete all leftover lvols and gpt partitions
 # Matches both /dev/nvmeXnY on Linux and /dev/nvmeXnsY on BSD
 # Filter out nvme with partitions - the "p*" suffix
-for dev in $(ls /dev/nvme*n* | grep -v p || true); do
+for dev in /dev/nvme*n!(*p*); do
 	# Skip zoned devices as non-sequential IO will always fail
 	[[ -z ${zoned_devs["${dev##*/}"]} ]] || continue
 	if ! block_in_use "$dev"; then
@@ -118,7 +108,7 @@ if ! xtrace_disable_per_cmd reap_spdk_processes; then
 	echo "WARNING: Lingering SPDK processes were detected. Testing environment may be unstable" >&2
 fi
 
-if [ $(uname -s) = Linux ]; then
+if [[ $(uname -s) == Linux && $SPDK_TEST_SETUP -eq 1 ]]; then
 	run_test "setup.sh" "$rootdir/test/setup/test-setup.sh"
 fi
 
@@ -158,28 +148,47 @@ if [ $SPDK_RUN_FUNCTIONAL_TEST -eq 1 ]; then
 	fi
 	timing_enter lib
 
+	if [[ $SPDK_TEST_URING -eq 1 ]]; then
+		export SPDK_SOCK_IMPL_DEFAULT="uring"
+	fi
+
 	run_test "env" $rootdir/test/env/env.sh
 	run_test "rpc" $rootdir/test/rpc/rpc.sh
+	run_test "skip_rpc" $rootdir/test/rpc/skip_rpc.sh
 	run_test "rpc_client" $rootdir/test/rpc_client/rpc_client.sh
 	run_test "json_config" $rootdir/test/json_config/json_config.sh
 	run_test "json_config_extra_key" $rootdir/test/json_config/json_config_extra_key.sh
 	run_test "alias_rpc" $rootdir/test/json_config/alias_rpc/alias_rpc.sh
-	run_test "spdkcli_tcp" $rootdir/test/spdkcli/tcp.sh
+
+	if [[ $SPDK_JSONRPC_GO_CLIENT -eq 0 ]]; then
+		run_test "spdkcli_tcp" $rootdir/test/spdkcli/tcp.sh
+	fi
+
 	run_test "dpdk_mem_utility" $rootdir/test/dpdk_memory_utility/test_dpdk_mem_info.sh
 	run_test "event" $rootdir/test/event/event.sh
 	run_test "thread" $rootdir/test/thread/thread.sh
-	run_test "accel" $rootdir/test/accel/accel.sh
+
+	if [[ $SPDK_TEST_ACCEL -eq 1 ]]; then
+		run_test "accel" $rootdir/test/accel/accel.sh
+		run_test "accel_rpc" $rootdir/test/accel/accel_rpc.sh
+	fi
+
 	run_test "app_cmdline" $rootdir/test/app/cmdline.sh
 	run_test "version" $rootdir/test/app/version.sh
 
 	if [ $SPDK_TEST_BLOCKDEV -eq 1 ]; then
 		run_test "blockdev_general" $rootdir/test/bdev/blockdev.sh
-		run_test "bdev_raid" $rootdir/test/bdev/bdev_raid.sh
 		run_test "bdevperf_config" $rootdir/test/bdev/bdevperf/test_config.sh
 		if [[ $(uname -s) == Linux ]]; then
 			run_test "reactor_set_interrupt" $rootdir/test/interrupt/reactor_set_interrupt.sh
 			run_test "reap_unregistered_poller" $rootdir/test/interrupt/reap_unregistered_poller.sh
 		fi
+	fi
+
+	if [[ $SPDK_TEST_RAID -eq 1 ]]; then
+		run_test "bdev_raid" $rootdir/test/bdev/bdev_raid.sh
+		run_test "spdkcli_raid" $rootdir/test/spdkcli/raid.sh
+		run_test "blockdev_raid5f" $rootdir/test/bdev/blockdev.sh "raid5f"
 	fi
 
 	if [[ $(uname -s) == Linux ]]; then
@@ -226,10 +235,8 @@ if [ $SPDK_RUN_FUNCTIONAL_TEST -eq 1 ]; then
 
 		run_test "nvme_rpc" $rootdir/test/nvme/nvme_rpc.sh
 		run_test "nvme_rpc_timeouts" $rootdir/test/nvme/nvme_rpc_timeouts.sh
-		# Only test hotplug without ASAN enabled. Since if it is
-		# enabled, it catches SEGV earlier than our handler which
-		# breaks the hotplug logic.
-		if [ $SPDK_RUN_ASAN -eq 0 ] && [ $(uname -s) = Linux ]; then
+
+		if [ $(uname -s) = Linux ]; then
 			run_test "sw_hotplug" $rootdir/test/nvme/sw_hotplug.sh
 		fi
 
@@ -238,6 +245,11 @@ if [ $SPDK_RUN_FUNCTIONAL_TEST -eq 1 ]; then
 			run_test "blockdev_xnvme" $rootdir/test/bdev/blockdev.sh "xnvme"
 			# Run ublk with xnvme since they have similar kernel dependencies
 			run_test "ublk" $rootdir/test/ublk/ublk.sh
+			run_test "ublk_recovery" $rootdir/test/ublk/ublk_recovery.sh
+		fi
+
+		if [[ $SPDK_TEST_NVME_INTERRUPT -eq 1 ]]; then
+			run_test "nvme_interrupt" "$rootdir/test/nvme/interrupt.sh"
 		fi
 	fi
 
@@ -250,9 +262,6 @@ if [ $SPDK_RUN_FUNCTIONAL_TEST -eq 1 ]; then
 	if [ $SPDK_TEST_ISCSI -eq 1 ]; then
 		run_test "iscsi_tgt" $rootdir/test/iscsi_tgt/iscsi_tgt.sh
 		run_test "spdkcli_iscsi" $rootdir/test/spdkcli/iscsi.sh
-
-		# Run raid spdkcli test under iSCSI since blockdev tests run on systems that can't run spdkcli yet
-		run_test "spdkcli_raid" $rootdir/test/spdkcli/raid.sh
 	fi
 
 	if [ $SPDK_TEST_BLOBFS -eq 1 ]; then
@@ -279,6 +288,12 @@ if [ $SPDK_RUN_FUNCTIONAL_TEST -eq 1 ]; then
 			fi
 			run_test "nvmf_dif" $rootdir/test/nvmf/target/dif.sh
 			run_test "nvmf_abort_qd_sizes" $rootdir/test/nvmf/target/abort_qd_sizes.sh
+			# The keyring tests utilize NVMe/TLS
+			run_test "keyring_file" "$rootdir/test/keyring/file.sh"
+			if [[ "$CONFIG_HAVE_KEYUTILS" == y ]]; then
+				run_test "keyring_linux" "$rootdir/scripts/keyctl-session-wrapper" \
+					"$rootdir/test/keyring/linux.sh"
+			fi
 		elif [ "$SPDK_TEST_NVMF_TRANSPORT" = "fc" ]; then
 			run_test "nvmf_fc" $rootdir/test/nvmf/nvmf.sh --transport=$SPDK_TEST_NVMF_TRANSPORT
 			run_test "spdkcli_nvmf_fc" $rootdir/test/spdkcli/nvmf.sh
@@ -288,12 +303,17 @@ if [ $SPDK_RUN_FUNCTIONAL_TEST -eq 1 ]; then
 		fi
 	fi
 
+	# For vfio_user and vhost tests We need to make sure entire HUGEMEM default
+	# goes to a single node as we share hugepages with qemu instance(s) and we
+	# cannot split it across all numa nodes without making sure there's enough
+	# memory available.
+
 	if [ $SPDK_TEST_VHOST -eq 1 ]; then
-		run_test "vhost" $rootdir/test/vhost/vhost.sh
+		HUGENODE=0 run_test "vhost" $rootdir/test/vhost/vhost.sh --iso
 	fi
 
 	if [ $SPDK_TEST_VFIOUSER_QEMU -eq 1 ]; then
-		run_test "vfio_user_qemu" $rootdir/test/vfio_user/vfio_user.sh
+		HUGENODE=0 run_test "vfio_user_qemu" $rootdir/test/vfio_user/vfio_user.sh --iso
 	fi
 
 	if [ $SPDK_TEST_LVOL -eq 1 ]; then
@@ -355,8 +375,10 @@ if [ $SPDK_RUN_FUNCTIONAL_TEST -eq 1 ]; then
 		run_test "llvm_fuzz" $rootdir/test/fuzz/llvm.sh
 	fi
 
-	if [[ $SPDK_TEST_RAID5 -eq 1 ]]; then
-		run_test "blockdev_raid5f" $rootdir/test/bdev/blockdev.sh "raid5f"
+	if [[ $SPDK_TEST_ACCEL_MLX5 -eq 1 ]]; then
+		run_test "accel_mlx5_crypto" $rootdir/test/accel/mlx5/accel_mlx5_crypto.sh
+		run_test "accel_mlx5_copy" $rootdir/test/accel/mlx5/accel_mlx5_copy.sh
+		run_test "accel_mlx5_crc32c" $rootdir/test/accel/mlx5/accel_mlx5_crc32c.sh
 	fi
 fi
 
@@ -371,12 +393,15 @@ chmod a+r $output_dir/timing.txt
 
 [[ -f "$output_dir/udev.log" ]] && rm -f "$output_dir/udev.log"
 
-if hash lcov && ! [[ "$CC_TYPE" == *"clang"* ]]; then
+if [[ $CONFIG_COVERAGE == y ]]; then
 	# generate coverage data and combine with baseline
-	$LCOV -q -c -d $src -t "$(hostname)" -o $out/cov_test.info
+	$LCOV -q -c --no-external -d $src -t "$(hostname)" -o $out/cov_test.info
 	$LCOV -q -a $out/cov_base.info -a $out/cov_test.info -o $out/cov_total.info
 	$LCOV -q -r $out/cov_total.info '*/dpdk/*' -o $out/cov_total.info
-	$LCOV -q -r $out/cov_total.info '/usr/*' -o $out/cov_total.info
+	# C++ headers in /usr can sometimes generate data even when specifying
+	# --no-external, so remove them. But we need to add an ignore-errors
+	# flag to squash warnings on systems where they don't generate data.
+	$LCOV -q -r $out/cov_total.info --ignore-errors unused,unused '/usr/*' -o $out/cov_total.info
 	$LCOV -q -r $out/cov_total.info '*/examples/vmd/*' -o $out/cov_total.info
 	$LCOV -q -r $out/cov_total.info '*/app/spdk_lspci/*' -o $out/cov_total.info
 	$LCOV -q -r $out/cov_total.info '*/app/spdk_top/*' -o $out/cov_total.info

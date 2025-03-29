@@ -3,7 +3,7 @@
  */
 
 #include "spdk/stdinc.h"
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 #include "common/lib/test_env.c"
 #include "nvmf/vfio_user.c"
 #include "nvmf/transport.c"
@@ -13,15 +13,13 @@ DEFINE_STUB(spdk_nvmf_ctrlr_get_regs, const struct spdk_nvmf_registers *,
 DEFINE_STUB(spdk_mem_register, int, (void *vaddr, size_t len), 0);
 DEFINE_STUB(spdk_mem_unregister, int, (void *vaddr, size_t len), 0);
 DEFINE_STUB_V(spdk_nvmf_request_exec, (struct spdk_nvmf_request *req));
-DEFINE_STUB_V(spdk_nvmf_request_exec_fabrics, (struct spdk_nvmf_request *req));
 DEFINE_STUB(spdk_nvmf_request_complete, int, (struct spdk_nvmf_request *req), 0);
 DEFINE_STUB_V(spdk_nvmf_tgt_new_qpair, (struct spdk_nvmf_tgt *tgt, struct spdk_nvmf_qpair *qpair));
 DEFINE_STUB(nvmf_ctrlr_abort_request, int, (struct spdk_nvmf_request *req), 0);
-DEFINE_STUB(spdk_nvmf_qpair_disconnect, int, (struct spdk_nvmf_qpair *qpair,
-		nvmf_qpair_disconnect_cb cb_fn, void *ctx), 0);
+DEFINE_STUB(spdk_nvmf_qpair_disconnect, int, (struct spdk_nvmf_qpair *qpair), 0);
 DEFINE_STUB(spdk_nvmf_subsystem_get_nqn, const char *,
 	    (const struct spdk_nvmf_subsystem *subsystem), NULL);
-DEFINE_STUB(spdk_bdev_get_block_size, uint32_t, (const struct spdk_bdev *bdev), 512);
+DEFINE_STUB(spdk_bdev_desc_get_block_size, uint32_t, (struct spdk_bdev_desc *desc), 512);
 DEFINE_STUB(spdk_nvmf_subsystem_pause, int, (struct spdk_nvmf_subsystem *subsystem,
 		uint32_t nsid, spdk_nvmf_subsystem_state_change_done cb_fn, void *cb_arg), 0);
 DEFINE_STUB(spdk_nvmf_subsystem_resume, int, (struct spdk_nvmf_subsystem *subsystem,
@@ -42,9 +40,10 @@ DEFINE_STUB(spdk_nvmf_ctrlr_save_migr_data, int, (struct spdk_nvmf_ctrlr *ctrlr,
 DEFINE_STUB(spdk_nvmf_ctrlr_restore_migr_data, int, (struct spdk_nvmf_ctrlr *ctrlr,
 		const struct spdk_nvmf_ctrlr_migr_data *data), 0);
 DEFINE_STUB(spdk_mempool_lookup, struct spdk_mempool *, (const char *name), NULL);
+DEFINE_STUB(nvmf_subsystem_gen_cntlid, uint16_t, (struct spdk_nvmf_subsystem *subsystem), 1)
 
 static void *
-gpa_to_vva(void *prv, uint64_t addr, uint64_t len, int prot)
+gpa_to_vva(void *prv, uint64_t addr, uint64_t len, uint32_t flags)
 {
 	return (void *)(uintptr_t)addr;
 }
@@ -254,7 +253,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("vfio_user", NULL, NULL);
@@ -263,9 +261,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_nvme_cmd_map_sgls);
 	CU_ADD_TEST(suite, test_nvmf_vfio_user_create_destroy);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

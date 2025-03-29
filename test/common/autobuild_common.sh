@@ -35,7 +35,7 @@ _llvm_precompile() {
 	export CC=clang-$clang_num
 	export CXX=clang++-$clang_num
 
-	fuzzer_libs=(/usr/lib*/clang/"$clang_num"/lib/linux/libclang_rt.fuzzer_no_main-x86_64.a)
+	fuzzer_libs=(/usr/lib*/clang/@("$clang_num"|"$clang_version")/lib/*linux*/libclang_rt.fuzzer_no_main?(-x86_64).a)
 	fuzzer_lib=${fuzzer_libs[0]}
 	[[ -e $fuzzer_lib ]]
 
@@ -97,14 +97,21 @@ _build_native_dpdk() {
 	# the drivers we use
 	# net/i40e driver is not really needed by us, but it's built as a workaround
 	# for DPDK issue: https://bugs.dpdk.org/show_bug.cgi?id=576
-	DPDK_DRIVERS=("bus" "bus/pci" "bus/vdev" "mempool/ring" "net/i40e" "net/i40e/base")
-
+	DPDK_DRIVERS=("bus" "bus/pci" "bus/vdev" "mempool/ring" "net/i40e" "net/i40e/base"
+		"power/acpi" "power/amd_pstate" "power/cppc" "power/intel_pstate"
+		"power/intel_uncore" "power/kvm_vm")
 	local mlx5_libs_added="n"
 	if [[ "$SPDK_TEST_CRYPTO" -eq 1 || "$SPDK_TEST_SMA" -eq 1 ]]; then
 		intel_ipsec_mb_ver=v0.54
 		intel_ipsec_mb_drv=crypto/aesni_mb
 		intel_ipsec_lib=""
-		if ge "$dpdk_ver" 21.11.0; then
+		if ge "$dpdk_ver" 24.11.0; then
+			# Starting from 24.11.0, the minimum supported version of intel-ipsec-mb is
+			# v1.5.
+			intel_ipsec_mb_ver=v1.5
+			intel_ipsec_mb_drv=crypto/ipsec_mb
+			intel_ipsec_lib=lib
+		elif ge "$dpdk_ver" 21.11.0; then
 			# Minimum supported version of intel-ipsec-mb, for DPDK >= 21.11, is 1.0.
 			# Source of the aesni_mb driver was moved to ipsec_mb. .{h,so,a} were moved
 			# to ./lib.
@@ -171,17 +178,13 @@ _build_native_dpdk() {
 			patch -p1 < "$rootdir/test/common/config/pkgdep/patches/dpdk/20.11/dpdk_qat.patch"
 		else
 			patch -p1 < "$rootdir/test/common/config/pkgdep/patches/dpdk/21.11+/dpdk_qat.patch"
-
-			if lt $dpdk_ver 23.03.0; then
-				# Commit https://review.spdk.io/gerrit/c/spdk/dpdk/+/16828 is required for DPDK <23.03.0
-				patch -p1 < "$rootdir/test/common/config/pkgdep/patches/dpdk/21.11+/dpdk_rte_thash_gfni.patch"
-			fi
-
-			# Commit https://review.spdk.io/gerrit/c/spdk/dpdk/+/16134 is required for DPDK 22.11+
-			if ge $dpdk_ver 22.11.0 && lt $dpdk_ver 23.03.0; then
-				patch -p1 < "$rootdir/test/common/config/pkgdep/patches/dpdk/22.11+/dpdk_ipsec_mb.patch"
-			fi
 		fi
+	fi
+	if lt "$dpdk_ver" 24.07.0; then
+		patch -p1 < "$rootdir/test/common/config/pkgdep/patches/dpdk/24.03/pcapng-add-memcpy-check.patch"
+	fi
+	if ge "$dpdk_ver" 24.07.0; then
+		patch -p1 < "$rootdir/test/common/config/pkgdep/patches/dpdk/24.07/uio-open-in-primary.patch"
 	fi
 
 	dpdk_kmods="false"
@@ -194,15 +197,22 @@ _build_native_dpdk() {
 		-Dc_link_args="$dpdk_ldflags" -Dc_args="$dpdk_cflags" \
 		-Dmachine=native -Denable_drivers=$(printf "%s," "${DPDK_DRIVERS[@]}")
 	ninja -C "$external_dpdk_base_dir/build-tmp" $MAKEFLAGS
-	ninja -C "$external_dpdk_base_dir/build-tmp" $MAKEFLAGS install
 
 	if [[ $(uname -s) == "FreeBSD" ]]; then
+		# Under FreeBSD, install requires root privileges since it also attempts to install
+		# requested drivers under /boot.
+		sudo -E ninja -C "$external_dpdk_base_dir/build-tmp" $MAKEFLAGS install
+		# Sanitize ownership of the target directory post sudo above
+		sudo chown -R "$USER" "$external_dpdk_base_dir"
 		# Make sure kernel modules are available for freebsd_update_contigmem_mod() to fetch
 		mapfile -t drivers < <(find "$external_dpdk_base_dir/build-tmp" -name '*.ko')
 		if ((${#drivers[@]} > 0)); then
 			mkdir -p "$external_dpdk_dir/kmod"
 			cp -f "${drivers[@]}" "$external_dpdk_dir/kmod/"
 		fi
+	else
+		ninja -C "$external_dpdk_base_dir/build-tmp" $MAKEFLAGS install
+
 	fi
 
 	# Save this path. In tests are run using autorun.sh then autotest.sh
@@ -268,7 +278,7 @@ _scanbuild_make() {
 			be updated with proper flags to build these files, or exceptions need
 			to be added to test/common/skipped_build_files.txt
 
-			$(<"$out/unbuilt_c_files.txt")
+			$(< "$out/unbuilt_c_files.txt")
 		ERROR
 		pass=false
 	fi
@@ -308,7 +318,7 @@ test_make_uninstall() {
 	# Create empty file to check if it is not deleted by target uninstall
 	touch "$SPDK_WORKSPACE/usr/lib/sample_xyz.a"
 	$MAKE $MAKEFLAGS uninstall DESTDIR="$SPDK_WORKSPACE" prefix=/usr
-	if [[ $(find "$SPDK_WORKSPACE/usr" -maxdepth 1 -mindepth 1 | wc -l) -ne 2 ]] || [[ $(find "$SPDK_WORKSPACE/usr/lib/" -maxdepth 1 -mindepth 1 | wc -l) -ne 1 ]]; then
+	if [[ $(find "$SPDK_WORKSPACE/usr" -type f -print | wc -l) -ne 1 ]]; then
 		ls -lR "$SPDK_WORKSPACE"
 		echo "Make uninstall failed"
 		exit 1
@@ -330,6 +340,8 @@ _build_doc() {
 			# https://github.com/doxygen/doxygen/issues/9552 and
 			# https://github.com/doxygen/doxygen/issues/9678
 			grep -vE '\\ifile|@param'
+		else
+			cat -
 		fi < "$out/doxygen.log" && echo "Doxygen errors found!" && return 1
 
 		echo "Doxygen $doxygenv detected. No warnings except false positives, continuing the test"
@@ -357,7 +369,7 @@ check_format() {
 }
 
 check_so_deps() {
-	run_test "autobuild_check_so_deps" "$rootdir/test/make/check_so_deps.sh" "$spdk_conf"
+	run_test "autobuild_check_so_deps" "$rootdir/test/make/check_so_deps.sh" -c "$spdk_conf" -a "$SPDK_ABI_DIR"
 }
 
 external_code() {
@@ -375,6 +387,8 @@ build_files() {
 	run_test "autobuild_header_dependency_check" header_dependency_check
 	run_test "autobuild_make_install" test_make_install
 	run_test "autobuild_make_uninstall" test_make_uninstall
+	$MAKE clean
+	run_test "autobuild_generated_files_check_post_clean" porcelain_check
 }
 
 build_doc() {
@@ -439,6 +453,42 @@ build_packaging() {
 	run_test "packaging" "$rootdir/test/packaging/packaging.sh"
 }
 
+_build_release() (
+	local jobs LD
+
+	if [[ -n $SPDK_TEST_NATIVE_DPDK && -e /tmp/spdk-ld-path ]]; then
+		source /tmp/spdk-ld-path
+	fi
+
+	if [[ $CC == *clang* ]]; then
+		jobs=$(($(nproc) / 2))
+		case "$(uname -s)" in
+			Linux)
+				# ld.gold is shipped by default with binutils under most of the Linux distros.
+				# But just in case, look for ld.lld as it's still better suited for the LTO
+				# build under clang.
+				if ! LD=$(type -P ld.lld); then
+					LD=ld.gold LDFLAGS="-Wl,--threads,--thread-count=$jobs" MAKEFLAGS="-j$jobs"
+				fi
+				export LD LDFLAGS MAKEFLAGS
+				;;
+			FreeBSD) # Default compiler which does support LTO, set it explicitly for visibility
+				export LD=ld.lld ;;
+		esac
+	fi
+
+	"$rootdir/configure" $config_params \
+		--disable-debug \
+		--disable-unit-tests \
+		--enable-lto
+
+	$MAKE -C "$rootdir" $MAKEFLAGS
+)
+
+build_release() {
+	run_test "build_release" _build_release
+}
+
 out=$output_dir
 SPDK_WORKSPACE=$(mktemp -dt "spdk_$(date +%s).XXXXXX")
 
@@ -457,3 +507,6 @@ scanbuild_exclude+=" --exclude $rootdir/xnvme --exclude /tmp"
 
 scanbuild="scan-build -o $output_dir/scan-build-tmp $scanbuild_exclude --status-bugs"
 config_params=$(get_config_params)
+
+start_monitor_resources
+trap 'stop_monitor_resources' EXIT

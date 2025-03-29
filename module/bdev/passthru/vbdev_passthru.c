@@ -48,6 +48,7 @@ SPDK_BDEV_MODULE_REGISTER(passthru, &passthru_if)
 struct bdev_names {
 	char			*vbdev_name;
 	char			*bdev_name;
+	struct spdk_uuid	uuid;
 	TAILQ_ENTRY(bdev_names)	link;
 };
 static TAILQ_HEAD(, bdev_names) g_bdev_names = TAILQ_HEAD_INITIALIZER(g_bdev_names);
@@ -223,6 +224,7 @@ pt_init_ext_io_opts(struct spdk_bdev_io *bdev_io, struct spdk_bdev_ext_io_opts *
 	opts->memory_domain = bdev_io->u.bdev.memory_domain;
 	opts->memory_domain_ctx = bdev_io->u.bdev.memory_domain_ctx;
 	opts->metadata = bdev_io->u.bdev.md_buf;
+	opts->dif_check_flags_exclude_mask = ~bdev_io->u.bdev.dif_check_flags;
 }
 
 /* Callback for getting a buf from the bdev pool in the event that the caller passed
@@ -406,11 +408,16 @@ vbdev_passthru_config_json(struct spdk_json_write_ctx *w)
 	struct vbdev_passthru *pt_node;
 
 	TAILQ_FOREACH(pt_node, &g_pt_nodes, link) {
+		const struct spdk_uuid *uuid = spdk_bdev_get_uuid(&pt_node->pt_bdev);
+
 		spdk_json_write_object_begin(w);
 		spdk_json_write_named_string(w, "method", "bdev_passthru_create");
 		spdk_json_write_named_object_begin(w, "params");
 		spdk_json_write_named_string(w, "base_bdev_name", spdk_bdev_get_name(pt_node->base_bdev));
 		spdk_json_write_named_string(w, "name", spdk_bdev_get_name(&pt_node->pt_bdev));
+		if (!spdk_uuid_is_null(uuid)) {
+			spdk_json_write_named_uuid(w, "uuid", uuid);
+		}
 		spdk_json_write_object_end(w);
 		spdk_json_write_object_end(w);
 	}
@@ -449,7 +456,8 @@ pt_bdev_ch_destroy_cb(void *io_device, void *ctx_buf)
 /* Create the passthru association from the bdev and vbdev name and insert
  * on the global list. */
 static int
-vbdev_passthru_insert_name(const char *bdev_name, const char *vbdev_name)
+vbdev_passthru_insert_name(const char *bdev_name, const char *vbdev_name,
+			   const struct spdk_uuid *uuid)
 {
 	struct bdev_names *name;
 
@@ -481,6 +489,7 @@ vbdev_passthru_insert_name(const char *bdev_name, const char *vbdev_name)
 		return -ENOMEM;
 	}
 
+	spdk_uuid_copy(&name->uuid, uuid);
 	TAILQ_INSERT_TAIL(&g_bdev_names, name, link);
 
 	return 0;
@@ -629,15 +638,20 @@ vbdev_passthru_register(const char *bdev_name)
 		bdev = spdk_bdev_desc_get_bdev(pt_node->base_desc);
 		pt_node->base_bdev = bdev;
 
-		/* Generate UUID based on namespace UUID + base bdev UUID. */
-		rc = spdk_uuid_generate_sha1(&pt_node->pt_bdev.uuid, &ns_uuid,
-					     (const char *)&pt_node->base_bdev->uuid, sizeof(struct spdk_uuid));
-		if (rc) {
-			SPDK_ERRLOG("Unable to generate new UUID for passthru bdev\n");
-			spdk_bdev_close(pt_node->base_desc);
-			free(pt_node->pt_bdev.name);
-			free(pt_node);
-			break;
+		if (!spdk_uuid_is_null(&name->uuid)) {
+			/* Use the configured UUID */
+			spdk_uuid_copy(&pt_node->pt_bdev.uuid, &name->uuid);
+		} else {
+			/* Generate UUID based on namespace UUID + base bdev UUID. */
+			rc = spdk_uuid_generate_sha1(&pt_node->pt_bdev.uuid, &ns_uuid,
+						     (const char *)&pt_node->base_bdev->uuid, sizeof(struct spdk_uuid));
+			if (rc) {
+				SPDK_ERRLOG("Unable to generate new UUID for passthru bdev\n");
+				spdk_bdev_close(pt_node->base_desc);
+				free(pt_node->pt_bdev.name);
+				free(pt_node);
+				break;
+			}
 		}
 
 		/* Copy some properties from the underlying base bdev. */
@@ -652,6 +666,7 @@ vbdev_passthru_register(const char *bdev_name)
 		pt_node->pt_bdev.dif_type = bdev->dif_type;
 		pt_node->pt_bdev.dif_is_head_of_md = bdev->dif_is_head_of_md;
 		pt_node->pt_bdev.dif_check_flags = bdev->dif_check_flags;
+		pt_node->pt_bdev.dif_pi_format = bdev->dif_pi_format;
 
 		/* This is the context that is passed to us when the bdev
 		 * layer calls in so we'll save our pt_bdev node here.
@@ -701,14 +716,15 @@ vbdev_passthru_register(const char *bdev_name)
 
 /* Create the passthru disk from the given bdev and vbdev name. */
 int
-bdev_passthru_create_disk(const char *bdev_name, const char *vbdev_name)
+bdev_passthru_create_disk(const char *bdev_name, const char *vbdev_name,
+			  const struct spdk_uuid *uuid)
 {
 	int rc;
 
 	/* Insert the bdev name into our global name list even if it doesn't exist yet,
 	 * it may show up soon...
 	 */
-	rc = vbdev_passthru_insert_name(bdev_name, vbdev_name);
+	rc = vbdev_passthru_insert_name(bdev_name, vbdev_name, uuid);
 	if (rc) {
 		return rc;
 	}

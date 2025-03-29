@@ -23,6 +23,9 @@ struct spdk_nvmf_transport_poll_group *nvmf_transport_get_optimal_poll_group(
 
 void nvmf_transport_poll_group_destroy(struct spdk_nvmf_transport_poll_group *group);
 
+void nvmf_transport_poll_group_pause(struct spdk_nvmf_transport_poll_group *group);
+void nvmf_transport_poll_group_resume(struct spdk_nvmf_transport_poll_group *group);
+
 int nvmf_transport_poll_group_add(struct spdk_nvmf_transport_poll_group *group,
 				  struct spdk_nvmf_qpair *qpair);
 
@@ -58,5 +61,7 @@ int nvmf_request_get_stripped_buffers(struct spdk_nvmf_request *req,
 				      struct spdk_nvmf_transport_poll_group *group,
 				      struct spdk_nvmf_transport *transport,
 				      uint32_t length);
+
+bool nvmf_request_get_buffers_abort(struct spdk_nvmf_request *req);
 
 #endif /* SPDK_NVMF_TRANSPORT_H */

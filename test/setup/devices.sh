@@ -7,9 +7,6 @@ testdir=$(readlink -f "$(dirname "$0")")
 rootdir=$(readlink -f "$testdir/../../")
 source "$testdir/common.sh"
 
-shopt -s nullglob
-shopt -s extglob
-
 cleanup() {
 	cleanup_nvme
 	cleanup_dm
@@ -61,7 +58,7 @@ verify() {
 
 	local pci status
 	while read -r pci _ _ status; do
-		if [[ $pci == "$dev" && \
+		if [[ $pci == "$dev" &&
 			$status == *"Active devices: "*"$mounts"* ]]; then
 			found=1
 		fi

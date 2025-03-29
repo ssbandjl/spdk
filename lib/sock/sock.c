@@ -11,6 +11,9 @@
 #include "spdk/log.h"
 #include "spdk/env.h"
 #include "spdk/util.h"
+#include "spdk/trace.h"
+#include "spdk/thread.h"
+#include "spdk_internal/trace_defs.h"
 
 #define SPDK_SOCK_DEFAULT_PRIORITY 0
 #define SPDK_SOCK_DEFAULT_ZCOPY true
@@ -230,6 +233,26 @@ spdk_sock_getaddr(struct spdk_sock *sock, char *saddr, int slen, uint16_t *sport
 }
 
 const char *
+spdk_sock_get_interface_name(struct spdk_sock *sock)
+{
+	if (sock->net_impl->get_interface_name) {
+		return sock->net_impl->get_interface_name(sock);
+	} else {
+		return NULL;
+	}
+}
+
+int32_t
+spdk_sock_get_numa_id(struct spdk_sock *sock)
+{
+	if (sock->net_impl->get_numa_id) {
+		return sock->net_impl->get_numa_id(sock);
+	} else {
+		return SPDK_ENV_NUMA_ID_ANY;
+	}
+}
+
+const char *
 spdk_sock_get_impl_name(struct spdk_sock *sock)
 {
 	return sock->net_impl->name;
@@ -258,6 +281,14 @@ spdk_sock_get_default_opts(struct spdk_sock_opts *opts)
 
 	if (SPDK_SOCK_OPTS_FIELD_OK(opts, impl_opts_size)) {
 		opts->impl_opts_size = 0;
+	}
+
+	if (SPDK_SOCK_OPTS_FIELD_OK(opts, src_addr)) {
+		opts->src_addr = NULL;
+	}
+
+	if (SPDK_SOCK_OPTS_FIELD_OK(opts, src_port)) {
+		opts->src_port = 0;
 	}
 }
 
@@ -292,8 +323,16 @@ sock_init_opts(struct spdk_sock_opts *opts, struct spdk_sock_opts *opts_user)
 		opts->impl_opts = opts_user->impl_opts;
 	}
 
-	if (SPDK_SOCK_OPTS_FIELD_OK(opts, impl_opts)) {
+	if (SPDK_SOCK_OPTS_FIELD_OK(opts, impl_opts_size)) {
 		opts->impl_opts_size = opts_user->impl_opts_size;
+	}
+
+	if (SPDK_SOCK_OPTS_FIELD_OK(opts, src_addr)) {
+		opts->src_addr = opts_user->src_addr;
+	}
+
+	if (SPDK_SOCK_OPTS_FIELD_OK(opts, src_port)) {
+		opts->src_port = opts_user->src_port;
 	}
 }
 
@@ -908,24 +947,9 @@ spdk_sock_write_config_json(struct spdk_json_write_ctx *w)
 }
 
 void
-spdk_net_impl_register(struct spdk_net_impl *impl, int priority)
+spdk_net_impl_register(struct spdk_net_impl *impl)
 {
-	struct spdk_net_impl *cur, *prev;
-
-	impl->priority = priority;
-	prev = NULL;
-	STAILQ_FOREACH(cur, &g_net_impls, link) {
-		if (impl->priority > cur->priority) {
-			break;
-		}
-		prev = cur;
-	}
-
-	if (prev) {
-		STAILQ_INSERT_AFTER(&g_net_impls, prev, impl, link);
-	} else {
-		STAILQ_INSERT_HEAD(&g_net_impls, impl, link);
-	}
+	STAILQ_INSERT_HEAD(&g_net_impls, impl, link);
 }
 
 int
@@ -963,18 +987,77 @@ spdk_sock_set_default_impl(const char *impl_name)
 const char *
 spdk_sock_get_default_impl(void)
 {
-	struct spdk_net_impl *impl = NULL;
-
 	if (g_default_impl) {
 		return g_default_impl->name;
-	}
-
-	impl = STAILQ_FIRST(&g_net_impls);
-	if (impl) {
-		return impl->name;
 	}
 
 	return NULL;
 }
 
+int
+spdk_sock_group_register_interrupt(struct spdk_sock_group *group, uint32_t events,
+				   spdk_interrupt_fn fn,
+				   void *arg, const char *name)
+{
+	struct spdk_sock_group_impl *group_impl = NULL;
+	int rc;
+
+	assert(group != NULL);
+	assert(fn != NULL);
+
+	STAILQ_FOREACH_FROM(group_impl, &group->group_impls, link) {
+		rc = group_impl->net_impl->group_impl_register_interrupt(group_impl, events, fn, arg, name);
+		if (rc != 0) {
+			return rc;
+		}
+	}
+
+	return 0;
+}
+
+void
+spdk_sock_group_unregister_interrupt(struct spdk_sock_group *group)
+{
+	struct spdk_sock_group_impl *group_impl = NULL;
+
+	assert(group != NULL);
+
+	STAILQ_FOREACH_FROM(group_impl, &group->group_impls, link) {
+		group_impl->net_impl->group_impl_unregister_interrupt(group_impl);
+	}
+}
+
 SPDK_LOG_REGISTER_COMPONENT(sock)
+
+static void
+sock_trace(void)
+{
+	struct spdk_trace_tpoint_opts opts[] = {
+		{
+			"SOCK_REQ_QUEUE", TRACE_SOCK_REQ_QUEUE,
+			OWNER_TYPE_SOCK, OBJECT_SOCK_REQ, 1,
+			{
+				{ "ctx", SPDK_TRACE_ARG_TYPE_PTR, 8 },
+			}
+		},
+		{
+			"SOCK_REQ_PEND", TRACE_SOCK_REQ_PEND,
+			OWNER_TYPE_SOCK, OBJECT_SOCK_REQ, 0,
+			{
+				{ "ctx", SPDK_TRACE_ARG_TYPE_PTR, 8 },
+			}
+		},
+		{
+			"SOCK_REQ_COMPLETE", TRACE_SOCK_REQ_COMPLETE,
+			OWNER_TYPE_SOCK, OBJECT_SOCK_REQ, 0,
+			{
+				{ "ctx", SPDK_TRACE_ARG_TYPE_PTR, 8 },
+			}
+		},
+	};
+
+	spdk_trace_register_owner_type(OWNER_TYPE_SOCK, 's');
+	spdk_trace_register_object(OBJECT_SOCK_REQ, 's');
+	spdk_trace_register_description_ext(opts, SPDK_COUNTOF(opts));
+}
+SPDK_TRACE_REGISTER_FN(sock_trace, "sock", TRACE_GROUP_SOCK)

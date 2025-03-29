@@ -18,14 +18,16 @@ function usage() {
 	echo "  -a --all"
 	echo "  -d --developer-tools        Install tools for developers (code styling, code coverage, etc.)"
 	echo "  -p --pmem                   Additional dependencies for reduce"
-	echo "  -f --fuse                   Additional dependencies for FUSE and NVMe-CUSE"
 	echo "  -R --rbd                    Additional dependencies for RBD"
 	echo "  -r --rdma                   Additional dependencies for RDMA transport in NVMe over Fabrics"
 	echo "  -b --docs                   Additional dependencies for building docs"
 	echo "  -u --uring                  Additional dependencies for io_uring"
+	echo "     --uadk                   Additional dependencies for UADK"
 	echo "  -D --daos                   Additional dependencies for DAOS"
 	echo "  -A --avahi                  Additional dependencies for Avahi mDNS Discovery"
-	echo "  -G --golang                 Additional dependencies for go API generation (excluded from --all)"
+	echo "  -G --golang                 Additional dependencies for go API generation"
+	echo "  -I --idxd                   Additional dependencies for IDXD"
+	echo "  -l --lz4                    Additional dependencies for lz4"
 	echo ""
 	exit 0
 }
@@ -33,19 +35,20 @@ function usage() {
 function install_all_dependencies() {
 	INSTALL_DEV_TOOLS=true
 	INSTALL_PMEM=true
-	INSTALL_FUSE=true
 	INSTALL_RBD=true
 	INSTALL_RDMA=true
 	INSTALL_DOCS=true
 	INSTALL_LIBURING=true
 	INSTALL_DAOS=true
 	INSTALL_AVAHI=true
+	INSTALL_GOLANG=true
+	INSTALL_IDXD=true
+	INSTALL_LZ4=true
 }
 
 INSTALL_CRYPTO=false
 INSTALL_DEV_TOOLS=false
 INSTALL_PMEM=false
-INSTALL_FUSE=false
 INSTALL_RBD=false
 INSTALL_RDMA=false
 INSTALL_DOCS=false
@@ -53,8 +56,11 @@ INSTALL_LIBURING=false
 INSTALL_DAOS=false
 INSTALL_AVAHI=false
 INSTALL_GOLANG=false
+INSTALL_IDXD=false
+INSTALL_UADK=false
+INSTALL_LZ4=false
 
-while getopts 'abdfhipruADGR-:' optchar; do
+while getopts 'abdfhilpruADGIR-:' optchar; do
 	case "$optchar" in
 		-)
 			case "$OPTARG" in
@@ -62,14 +68,16 @@ while getopts 'abdfhipruADGR-:' optchar; do
 				all) install_all_dependencies ;;
 				developer-tools) INSTALL_DEV_TOOLS=true ;;
 				pmem) INSTALL_PMEM=true ;;
-				fuse) INSTALL_FUSE=true ;;
 				rbd) INSTALL_RBD=true ;;
 				rdma) INSTALL_RDMA=true ;;
 				docs) INSTALL_DOCS=true ;;
 				uring) INSTALL_LIBURING=true ;;
+				uadk) INSTALL_UADK=true ;;
 				daos) INSTALL_DAOS=true ;;
 				avahi) INSTALL_AVAHI=true ;;
 				golang) INSTALL_GOLANG=true ;;
+				idxd) INSTALL_IDXD=true ;;
+				lz4) INSTALL_LZ4=true ;;
 				*)
 					echo "Invalid argument '$OPTARG'"
 					usage
@@ -80,7 +88,6 @@ while getopts 'abdfhipruADGR-:' optchar; do
 		a) install_all_dependencies ;;
 		d) INSTALL_DEV_TOOLS=true ;;
 		p) INSTALL_PMEM=true ;;
-		f) INSTALL_FUSE=true ;;
 		R) INSTALL_RBD=true ;;
 		r) INSTALL_RDMA=true ;;
 		b) INSTALL_DOCS=true ;;
@@ -88,6 +95,8 @@ while getopts 'abdfhipruADGR-:' optchar; do
 		D) INSTALL_DAOS=true ;;
 		A) INSTALL_AVAHI=true ;;
 		G) INSTALL_GOLANG=true ;;
+		I) INSTALL_IDXD=true ;;
+		l) INSTALL_LZ4=true ;;
 		*)
 			echo "Invalid argument '$OPTARG'"
 			usage
@@ -99,6 +108,8 @@ trap 'set +e; trap - ERR; echo "Error!"; exit 1;' ERR
 
 scriptsdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $scriptsdir/..)
+source "$rootdir/scripts/common.sh"
+source "$scriptsdir/pkgdep/helpers.sh"
 
 OS=$(uname -s)
 

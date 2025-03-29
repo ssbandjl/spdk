@@ -102,7 +102,7 @@ on each other, multiple calls need to be issued.
 
 ## Configuring Logical Volumes
 
-There is no static configuration available for logical volumes. All configuration is done trough RPC. Information about
+There is no static configuration available for logical volumes. All configuration is done through RPC. Information about
 logical volumes is kept on block devices.
 
 ## RPC overview {#lvol_rpc}
@@ -195,6 +195,24 @@ bdev_lvol_inflate [-h] name
     -h, --help  show help
 bdev_lvol_decouple_parent [-h] name
     Decouple parent of a logical volume
+    optional arguments:
+    -h, --help  show help
+bdev_lvol_start_shallow_copy [-h] src_lvol_name dst_bdev_name
+    Make a shallow copy of lvol over a given bdev
+    This RPC starts the operation and returns an identifier that can be used to query the status
+    of the operation with the RPC bdev_lvol_check_shallow_copy.
+    optional arguments:
+    -h, --help  show help
+bdev_lvol_check_shallow_copy [-h] operation_id
+    Get shallow copy status
+    optional arguments:
+    -h, --help  show help
+bdev_lvol_set_parent [-h] lvol_name snapshot_name
+    Set the parent snapshot of a lvol
+    optional arguments:
+    -h, --help  show help
+bdev_lvol_set_parent_bdev lvol_name esnap_name
+    Set the parent external snapshot of a lvol
     optional arguments:
     -h, --help  show help
 ```

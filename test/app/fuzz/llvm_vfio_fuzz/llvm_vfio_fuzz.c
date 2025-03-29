@@ -11,13 +11,17 @@
 #include "spdk/nvme.h"
 #include "spdk/likely.h"
 #include "spdk/file.h"
-#include "spdk/util.h"
 
 #include "spdk/vfio_user_pci.h"
 #include <linux/vfio.h>
 #include "spdk/vfio_user_spec.h"
+#include "spdk/config.h"
 
+#ifdef SPDK_CONFIG_ASAN
+#include <sanitizer/lsan_interface.h>
+#endif
 #define VFIO_MAXIMUM_SPARSE_MMAP_REGIONS	8
+#define VFIO_USER_GET_REGION_INFO_LEN		4096
 
 typedef int (*fuzzer_fn)(const uint8_t *data, size_t size, struct vfio_device *dev);
 struct fuzz_type {
@@ -92,10 +96,121 @@ fuzz_vfio_user_region_rw(const uint8_t *data, size_t size, struct vfio_device *d
 					     &buf, false);
 }
 
+#define VFIO_USER_GET_REGION_INFO_LEN 4096
+
+static int
+fuzz_vfio_user_get_region_info(const uint8_t *data, size_t size, struct vfio_device *dev)
+{
+	int ret = 0;
+	int fds[VFIO_MAXIMUM_SPARSE_MMAP_REGIONS];
+	uint8_t buf[VFIO_USER_GET_REGION_INFO_LEN];
+	struct vfio_region_info *info = (struct vfio_region_info *)buf;
+
+	memcpy(&info->index, &data[0], 4);
+	memcpy(&info->argsz, &data[4], 4);
+
+	ret = spdk_vfio_user_dev_send_request(dev, VFIO_USER_DEVICE_GET_REGION_INFO,
+					      info, info->argsz, VFIO_USER_GET_REGION_INFO_LEN, fds,
+					      VFIO_MAXIMUM_SPARSE_MMAP_REGIONS);
+	return ret;
+}
+
+/* Since both ends of the connection are in the same process,
+ * picking completely random addresses is actually fine, since
+ * we won't be actually mapping anything.
+ */
+static int
+fuzz_vfio_user_dma_map(const uint8_t *data, size_t size, struct vfio_device *dev)
+{
+	struct vfio_user_dma_map dma_map = { 0 };
+	int fd;
+
+	memcpy(&fd, &data[0], 4);
+	dma_map.argsz = sizeof(struct vfio_user_dma_map);
+
+	memcpy(&dma_map.addr, &data[8], 8);
+	memcpy(&dma_map.size, &data[16], 8);
+	memcpy(&dma_map.offset, &data[24], 8);
+
+	dma_map.flags = VFIO_USER_F_DMA_REGION_READ | VFIO_USER_F_DMA_REGION_WRITE;
+
+	spdk_vfio_user_dev_send_request(dev, VFIO_USER_DMA_MAP,
+					&dma_map, sizeof(dma_map), sizeof(dma_map), &fd, 1);
+	return 0;
+}
+
+static int
+fuzz_vfio_user_dma_unmap(const uint8_t *data, size_t size, struct vfio_device *dev)
+{
+	struct vfio_user_dma_unmap dma_unmap = { 0 };
+	struct vfio_user_dma_map dma_map = { 0 };
+	int fd;
+
+	memcpy(&fd, &data[0], 4);
+	dma_map.argsz = sizeof(struct vfio_user_dma_map);
+
+	memcpy(&dma_map.addr, &data[8], 8);
+	memcpy(&dma_map.size, &data[16], 8);
+	memcpy(&dma_map.offset, &data[24], 8);
+
+	dma_map.flags = VFIO_USER_F_DMA_REGION_READ | VFIO_USER_F_DMA_REGION_WRITE;
+
+	dma_unmap.argsz = sizeof(struct vfio_user_dma_unmap);
+	dma_unmap.addr = dma_map.addr;
+	dma_unmap.size = dma_map.size;
+
+	spdk_vfio_user_dev_send_request(dev, VFIO_USER_DMA_MAP,
+					&dma_map, sizeof(dma_map), sizeof(dma_map), &fd, 1);
+	/* Don't verify return value to check unmapping not previously mapped region */
+	spdk_vfio_user_dev_send_request(dev, VFIO_USER_DMA_UNMAP,
+					&dma_unmap, sizeof(dma_unmap), sizeof(dma_unmap), &fd, 1);
+	return 0;
+}
+static int
+fuzz_vfio_user_irq_set(const uint8_t *data, size_t size, struct vfio_device *dev)
+{
+	uint8_t buf[VFIO_USER_GET_REGION_INFO_LEN];
+	struct vfio_irq_set *irq_set = (struct vfio_irq_set *)buf;
+
+	irq_set->argsz = sizeof(struct vfio_irq_set) ;
+	memcpy(&irq_set->flags, &data[0], 4);
+	/* max index is up to VFIO_PCI_NUM_IRQS, no need to fuzz all uint */
+	irq_set->index = data[4];
+	memcpy(&irq_set->start, &data[5], 4);
+	memcpy(&irq_set->count, &data[9], 4);
+
+	spdk_vfio_user_dev_send_request(dev, VFIO_USER_DEVICE_SET_IRQS,
+					irq_set, irq_set->argsz,
+					VFIO_USER_GET_REGION_INFO_LEN, NULL, 0);
+	return 0;
+}
+
+static int
+fuzz_vfio_user_set_msix(const uint8_t *data, size_t size, struct vfio_device *dev)
+{
+	struct vfio_irq_set irq_set;
+
+	irq_set.argsz = sizeof(struct vfio_irq_set);
+	/* Max value is VFIO_IRQ_SET_ACTION_TRIGGER, try different combination too */
+	irq_set.flags = data[0] & ((1 << 6) - 1);
+	irq_set.index = VFIO_PCI_MSIX_IRQ_INDEX;
+	memcpy(&irq_set.start, &data[1], 4);
+	memcpy(&irq_set.count, &data[5], 4);
+
+	spdk_vfio_user_dev_send_request(dev, VFIO_USER_DEVICE_SET_IRQS,
+					&irq_set, sizeof(irq_set), sizeof(irq_set), NULL, 0);
+	return 0;
+}
+
 static struct fuzz_type g_fuzzers[] = {
-	{ .fn = fuzz_vfio_user_region_rw,			.bytes_per_cmd = 6},
-	{ .fn = fuzz_vfio_user_version,				.bytes_per_cmd = 4},
-	{ .fn = NULL,						.bytes_per_cmd = 0}
+	{ .fn = fuzz_vfio_user_region_rw,		.bytes_per_cmd = 6},
+	{ .fn = fuzz_vfio_user_version,			.bytes_per_cmd = 4},
+	{ .fn = fuzz_vfio_user_get_region_info,		.bytes_per_cmd = 8},
+	{ .fn = fuzz_vfio_user_dma_map,			.bytes_per_cmd = 32},
+	{ .fn = fuzz_vfio_user_dma_unmap,		.bytes_per_cmd = 32},
+	{ .fn = fuzz_vfio_user_irq_set,			.bytes_per_cmd = 13},
+	{ .fn = fuzz_vfio_user_set_msix,		.bytes_per_cmd = 9},
+	{ .fn = NULL,					.bytes_per_cmd = 0}
 };
 
 #define NUM_FUZZERS (SPDK_COUNTOF(g_fuzzers) - 1)
@@ -107,6 +222,7 @@ TestOneInput(const uint8_t *data, size_t size)
 	char ctrlr_path[PATH_MAX];
 	int ret = 0;
 
+	/* Reject any input of insufficient length */
 	if (size < g_fuzzer->bytes_per_cmd) {
 		return -1;
 	}
@@ -115,7 +231,7 @@ TestOneInput(const uint8_t *data, size_t size)
 	ret = access(ctrlr_path, F_OK);
 	if (ret != 0) {
 		fprintf(stderr, "Access path %s failed\n", ctrlr_path);
-		spdk_app_stop(-1);
+		spdk_app_start_shutdown();
 		return -1;
 	}
 
@@ -123,7 +239,7 @@ TestOneInput(const uint8_t *data, size_t size)
 	if (dev == NULL) {
 		fprintf(stderr, "spdk_vfio_user_setup() failed for controller path '%s'\n",
 			ctrlr_path);
-		spdk_app_stop(-1);
+		spdk_app_start_shutdown();
 		return -1;
 	}
 
@@ -163,10 +279,7 @@ start_fuzzer(void *ctx)
 	char *_argv[] = {
 		"spdk",
 		"-len_control=0",
-		/* TODO: temporarily disable leak detection due to issues
-		 * with ASAN and DPDK, see #2455 and #2992.
-		 */
-		"-detect_leaks=0",
+		"-detect_leaks=1",
 		NULL,
 		NULL,
 		NULL,
@@ -177,13 +290,11 @@ start_fuzzer(void *ctx)
 	char len_str[128];
 	char **argv = _argv;
 	int argc = SPDK_COUNTOF(_argv);
-	uint32_t len = 0;
 
 	spdk_unaffinitize_thread();
 	snprintf(prefix, sizeof(prefix), "-artifact_prefix=%s", g_artifact_prefix);
 	argv[argc - 4] = prefix;
-	len = 10 * g_fuzzer->bytes_per_cmd;
-	snprintf(len_str, sizeof(len_str), "-max_len=%d", len);
+	snprintf(len_str, sizeof(len_str), "-max_len=%d", g_fuzzer->bytes_per_cmd);
 	argv[argc - 3] = len_str;
 	snprintf(time_str, sizeof(time_str), "-max_total_time=%d", g_time_in_sec);
 	argv[argc - 2] = time_str;
@@ -342,8 +453,7 @@ start_io_poller(void *ctx)
 	io->run_poller = SPDK_POLLER_REGISTER(io_poller, ctx, 0);
 	if (io->run_poller == NULL) {
 		fprintf(stderr, "Failed to register a poller for IO.\n");
-		spdk_app_stop(-1);
-		pthread_kill(g_fuzz_td, SIGSEGV);
+		spdk_app_start_shutdown();
 	}
 }
 
@@ -360,24 +470,32 @@ init_io(void *ctx)
 	if (g_io_thread.io_ctrlr == NULL) {
 		fprintf(stderr, "spdk_nvme_connect() failed for transport address '%s'\n",
 			trid.traddr);
-		spdk_app_stop(-1);
-		pthread_kill(g_fuzz_td, SIGSEGV);
+		spdk_app_start_shutdown();
 		return NULL;
 	}
 
+	/* Even if ASan is enabled in DPDK, leak sanitizer has problems detecting
+	 * references allocated in DPDK-manage memory. This causes LSAN to report
+	 * a false memory leak when the 'pqpair->stat' variable is allocated on
+	 * the heap, but the only reference is stored on `qpair` that is DPDK-manage
+	 * making it not visible for LSAN. */
+#ifdef SPDK_CONFIG_ASAN
+	__lsan_disable();
+#endif
 	g_io_thread.io_qpair = spdk_nvme_ctrlr_alloc_io_qpair(g_io_thread.io_ctrlr, NULL, 0);
+#ifdef SPDK_CONFIG_ASAN
+	__lsan_enable();
+#endif
 	if (g_io_thread.io_qpair == NULL) {
 		spdk_nvme_detach(g_io_thread.io_ctrlr);
 		fprintf(stderr, "spdk_nvme_ctrlr_alloc_io_qpair failed\n");
-		spdk_app_stop(-1);
-		pthread_kill(g_fuzz_td, SIGSEGV);
+		spdk_app_start_shutdown();
 		return NULL;
 	}
 
 	if (spdk_nvme_ctrlr_get_num_ns(g_io_thread.io_ctrlr) == 0) {
 		fprintf(stderr, "no namespaces for IO\n");
-		spdk_app_stop(-1);
-		pthread_kill(g_fuzz_td, SIGSEGV);
+		spdk_app_start_shutdown();
 		return NULL;
 	}
 
@@ -385,31 +503,28 @@ init_io(void *ctx)
 	g_io_thread.io_ns = spdk_nvme_ctrlr_get_ns(g_io_thread.io_ctrlr, nsid);
 	if (!g_io_thread.io_ns) {
 		fprintf(stderr, "no io_ns for IO\n");
-		spdk_app_stop(-1);
-		pthread_kill(g_fuzz_td, SIGSEGV);
+		spdk_app_start_shutdown();
 		return NULL;
 	}
 
 	g_io_thread.buf_size = spdk_nvme_ns_get_sector_size(g_io_thread.io_ns);
 
 	g_io_thread.read_buf = spdk_zmalloc(g_io_thread.buf_size, 0x1000, NULL,
-					    SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+					    SPDK_ENV_NUMA_ID_ANY, SPDK_MALLOC_DMA);
 
 	g_io_thread.write_buf = spdk_zmalloc(g_io_thread.buf_size, 0x1000, NULL,
-					     SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+					     SPDK_ENV_NUMA_ID_ANY, SPDK_MALLOC_DMA);
 
 	if (!g_io_thread.write_buf || !g_io_thread.read_buf) {
 		fprintf(stderr, "cannot allocated memory for io buffers\n");
-		spdk_app_stop(-1);
-		pthread_kill(g_fuzz_td, SIGSEGV);
+		spdk_app_start_shutdown();
 		return NULL;
 	}
 
 	g_io_thread.thread = spdk_thread_create("io_thread", NULL);
 	if (g_io_thread.thread == NULL) {
 		fprintf(stderr, "cannot create io thread\n");
-		spdk_app_stop(-1);
-		pthread_kill(g_fuzz_td, SIGSEGV);
+		spdk_app_start_shutdown();
 		return NULL;
 	}
 
@@ -437,8 +552,7 @@ begin_fuzz(void *ctx)
 	if (g_io_thread.io_ctrlr_path) {
 		rc = pthread_create(&g_io_thread.io_td, NULL, init_io, NULL);
 		if (rc != 0) {
-			spdk_app_stop(-1);
-			pthread_kill(g_fuzz_td, SIGSEGV);
+			spdk_app_start_shutdown();
 		}
 	}
 }
@@ -459,7 +573,6 @@ static int
 vfio_fuzz_parse(int ch, char *arg)
 {
 	long long tmp = 0;
-	FILE *repro_file = NULL;
 
 	switch (ch) {
 	case 'D':
@@ -477,12 +590,7 @@ vfio_fuzz_parse(int ch, char *arg)
 		}
 		break;
 	case 'N':
-		repro_file = fopen(optarg, "r");
-		if (repro_file == NULL) {
-			fprintf(stderr, "could not open %s: %s\n", optarg, spdk_strerror(errno));
-			return -1;
-		}
-		g_repro_data = spdk_posix_file_load(repro_file, &g_repro_size);
+		g_repro_data = spdk_posix_file_load_from_name(optarg, &g_repro_size);
 		if (g_repro_data == NULL) {
 			fprintf(stderr, "could not load data for file %s\n", optarg);
 			return -1;
@@ -542,7 +650,12 @@ fuzz_shutdown(void)
 	 * simpler than trying to differentiate between hung inputs and
 	 * an impatient user.
 	 */
-	pthread_kill(g_fuzz_td, SIGSEGV);
+	spdk_app_stop(-1);
+
+	if (g_fuzz_td) {
+		fprintf(stderr, "Terminate fuzzer driver with SIGSEGV.\n");
+		pthread_kill(g_fuzz_td, SIGSEGV);
+	}
 }
 
 int

@@ -15,6 +15,8 @@
 extern "C" {
 #endif
 
+struct spdk_rpc_server;
+
 /**
  * Verify correctness of registered RPC methods and aliases.
  *
@@ -30,6 +32,8 @@ bool spdk_rpc_verify_methods(void);
 /**
  * Start listening for RPC connections.
  *
+ * Deprecated, will be removed in 24.09 release.
+ *
  * \param listen_addr Listening address.
  *
  * \return 0 on success, -1 on failure.
@@ -38,13 +42,40 @@ int spdk_rpc_listen(const char *listen_addr);
 
 /**
  * Poll the RPC server.
+ *
+ * Deprecated, will be removed in 24.09 release.
  */
 void spdk_rpc_accept(void);
 
 /**
  * Stop listening for RPC connections.
+ *
+ * Deprecated, will be removed in 24.09 release.
  */
 void spdk_rpc_close(void);
+
+/**
+ * Start listening for RPC connections on given address.
+ *
+ * \param listen_addr Listening address.
+ *
+ * \return new RPC server or NULL on failure.
+ */
+struct spdk_rpc_server *spdk_rpc_server_listen(const char *listen_addr);
+
+/**
+ * Poll the RPC server.
+ *
+ * \param server RPC server, which will be polled for connections.
+ */
+void spdk_rpc_server_accept(struct spdk_rpc_server *server);
+
+/**
+ * Stop a server from listening and free it.
+ *
+ * \param server RPC server, which will be stopped and be freed.
+ */
+void spdk_rpc_server_close(struct spdk_rpc_server *server);
 
 /**
  * Function signature for RPC request handlers.

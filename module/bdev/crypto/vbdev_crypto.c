@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2018 Intel Corporation.
  *   All rights reserved.
- *   Copyright (c) 2022, 2023 NVIDIA CORPORATION & AFFILIATES.
+ *   Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES.
  *   All rights reserved.
  */
 
@@ -130,7 +130,7 @@ static void
 crypto_encrypt(struct crypto_io_channel *crypto_ch, struct spdk_bdev_io *bdev_io)
 {
 	struct crypto_bdev_io *crypto_io = (struct crypto_bdev_io *)bdev_io->driver_ctx;
-	uint32_t crypto_len = crypto_io->crypto_bdev->crypto_bdev.blocklen;
+	uint32_t blocklen = crypto_io->crypto_bdev->crypto_bdev.blocklen;
 	uint64_t total_length;
 	uint64_t alignment;
 	void *aux_buf = crypto_io->aux_buf_raw;
@@ -141,7 +141,7 @@ crypto_encrypt(struct crypto_io_channel *crypto_ch, struct spdk_bdev_io *bdev_io
 	 * This is done to avoiding encrypting the provided write buffer which may be
 	 * undesirable in some use cases.
 	 */
-	total_length = bdev_io->u.bdev.num_blocks * crypto_len;
+	total_length = bdev_io->u.bdev.num_blocks * blocklen;
 	alignment = spdk_bdev_get_buf_align(&crypto_io->crypto_bdev->crypto_bdev);
 	crypto_io->aux_buf_iov.iov_len = total_length;
 	crypto_io->aux_buf_iov.iov_base  = (void *)(((uintptr_t)aux_buf + (alignment - 1)) & ~
@@ -155,7 +155,7 @@ crypto_encrypt(struct crypto_io_channel *crypto_ch, struct spdk_bdev_io *bdev_io
 				       bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
 				       bdev_io->u.bdev.memory_domain,
 				       bdev_io->u.bdev.memory_domain_ctx,
-				       bdev_io->u.bdev.offset_blocks, crypto_len, 0,
+				       bdev_io->u.bdev.offset_blocks, blocklen,
 				       NULL, NULL);
 	if (spdk_unlikely(rc != 0)) {
 		spdk_accel_put_buf(crypto_ch->accel_channel, crypto_io->aux_buf_raw,
@@ -180,14 +180,13 @@ _complete_internal_io(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 	struct spdk_bdev_io *orig_io = cb_arg;
 	struct crypto_bdev_io *crypto_io = (struct crypto_bdev_io *)orig_io->driver_ctx;
 	struct crypto_io_channel *crypto_ch = crypto_io->crypto_ch;
-	int status = success ? SPDK_BDEV_IO_STATUS_SUCCESS : SPDK_BDEV_IO_STATUS_FAILED;
 
 	if (crypto_io->aux_buf_raw) {
 		spdk_accel_put_buf(crypto_ch->accel_channel, crypto_io->aux_buf_raw,
 				   crypto_io->aux_domain, crypto_io->aux_domain_ctx);
 	}
 
-	spdk_bdev_io_complete(orig_io, status);
+	spdk_bdev_io_complete_base_io_status(orig_io, bdev_io);
 	spdk_bdev_free_io(bdev_io);
 }
 
@@ -285,7 +284,7 @@ crypto_read_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io,
 				       bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
 				       bdev_io->u.bdev.memory_domain,
 				       bdev_io->u.bdev.memory_domain_ctx,
-				       bdev_io->u.bdev.offset_blocks, blocklen, 0,
+				       bdev_io->u.bdev.offset_blocks, blocklen,
 				       NULL, NULL);
 	if (rc != 0) {
 		if (rc == -ENOMEM) {
@@ -674,6 +673,18 @@ vbdev_crypto_base_bdev_hotremove_cb(struct spdk_bdev *bdev_find)
 	}
 }
 
+static void
+vbdev_crypto_base_bdev_resize_cb(struct spdk_bdev *bdev_find)
+{
+	struct vbdev_crypto *crypto_bdev;
+
+	TAILQ_FOREACH(crypto_bdev, &g_vbdev_crypto, link) {
+		if (bdev_find == crypto_bdev->base_bdev) {
+			spdk_bdev_notify_blockcnt_change(&crypto_bdev->crypto_bdev, bdev_find->blockcnt);
+		}
+	}
+}
+
 /* Called when the underlying base bdev triggers asynchronous event such as bdev removal. */
 static void
 vbdev_crypto_base_bdev_event_cb(enum spdk_bdev_event_type type, struct spdk_bdev *bdev,
@@ -682,6 +693,9 @@ vbdev_crypto_base_bdev_event_cb(enum spdk_bdev_event_type type, struct spdk_bdev
 	switch (type) {
 	case SPDK_BDEV_EVENT_REMOVE:
 		vbdev_crypto_base_bdev_hotremove_cb(bdev);
+		break;
+	case SPDK_BDEV_EVENT_RESIZE:
+		vbdev_crypto_base_bdev_resize_cb(bdev);
 		break;
 	default:
 		SPDK_NOTICELOG("Unsupported bdev event: type %d\n", type);
@@ -692,16 +706,26 @@ vbdev_crypto_base_bdev_event_cb(enum spdk_bdev_event_type type, struct spdk_bdev
 static int
 vbdev_crypto_get_memory_domains(void *ctx, struct spdk_memory_domain **domains, int array_size)
 {
-	struct vbdev_crypto *crypto_bdev = ctx;
-	int num_domains;
+	struct spdk_memory_domain **accel_domains = NULL;
+	int num_domains = 0, accel_rc, accel_array_size = 0;
 
-	/* Report base bdev's memory domains plus accel memory domain */
-	num_domains = spdk_bdev_get_memory_domains(crypto_bdev->base_bdev, domains, array_size);
-	if (domains != NULL && num_domains < array_size) {
+	/* Report generic accel and encryption module's memory domains */
+	if (domains && num_domains < array_size) {
 		domains[num_domains] = spdk_accel_get_memory_domain();
 	}
 
-	return num_domains + 1;
+	num_domains++;
+	if (domains && num_domains < array_size) {
+		accel_domains = domains + num_domains;
+		accel_array_size = array_size - num_domains;
+	}
+	accel_rc = spdk_accel_get_opc_memory_domains(SPDK_ACCEL_OPC_ENCRYPT, accel_domains,
+			accel_array_size);
+	if (accel_rc > 0) {
+		num_domains += accel_rc;
+	}
+
+	return num_domains;
 }
 
 static bool
@@ -745,6 +769,7 @@ vbdev_crypto_claim(const char *bdev_name)
 	struct vbdev_crypto *vbdev;
 	struct spdk_bdev *bdev;
 	struct spdk_iobuf_opts iobuf_opts;
+	struct spdk_accel_operation_exec_ctx opctx = {};
 	struct spdk_uuid ns_uuid;
 	int rc = 0;
 
@@ -752,7 +777,7 @@ vbdev_crypto_claim(const char *bdev_name)
 
 	/* Limit the max IO size by some reasonable value. Since in write operation we use aux buffer,
 	 * let's set the limit to the large_bufsize value */
-	spdk_iobuf_get_opts(&iobuf_opts);
+	spdk_iobuf_get_opts(&iobuf_opts, sizeof(iobuf_opts));
 
 	/* Check our list of names from config versus this bdev and if
 	 * there's a match, create the crypto_bdev & bdev accordingly.
@@ -790,21 +815,18 @@ vbdev_crypto_claim(const char *bdev_name)
 		vbdev->base_bdev = bdev;
 
 		vbdev->crypto_bdev.write_cache = bdev->write_cache;
-		if (bdev->optimal_io_boundary > 0) {
-			vbdev->crypto_bdev.optimal_io_boundary =
-				spdk_min((iobuf_opts.large_bufsize / bdev->blocklen), bdev->optimal_io_boundary);
-		} else {
-			vbdev->crypto_bdev.optimal_io_boundary = (iobuf_opts.large_bufsize / bdev->blocklen);
-		}
-		vbdev->crypto_bdev.split_on_optimal_io_boundary = true;
-		if (bdev->required_alignment > 0) {
-			vbdev->crypto_bdev.required_alignment = bdev->required_alignment;
-		} else {
-			/* Some accel modules may not support SGL input or output, if this module works with physical
-			 * addresses, unaligned buffer may cross huge page boundary which leads to scattered payload.
-			 * To avoid such cases, set required_alignment to the block size */
-			vbdev->crypto_bdev.required_alignment = spdk_u32log2(bdev->blocklen);
-		}
+		vbdev->crypto_bdev.optimal_io_boundary = bdev->optimal_io_boundary;
+		vbdev->crypto_bdev.max_rw_size = spdk_min(
+				bdev->max_rw_size ? bdev->max_rw_size : UINT32_MAX,
+				iobuf_opts.large_bufsize / bdev->blocklen);
+
+		opctx.size = SPDK_SIZEOF(&opctx, block_size);
+		opctx.block_size = bdev->blocklen;
+		vbdev->crypto_bdev.required_alignment =
+			spdk_max(bdev->required_alignment,
+				 spdk_max(spdk_accel_get_buf_align(SPDK_ACCEL_OPC_ENCRYPT, &opctx),
+					  spdk_accel_get_buf_align(SPDK_ACCEL_OPC_DECRYPT, &opctx)));
+
 		vbdev->crypto_bdev.blocklen = bdev->blocklen;
 		vbdev->crypto_bdev.blockcnt = bdev->blockcnt;
 

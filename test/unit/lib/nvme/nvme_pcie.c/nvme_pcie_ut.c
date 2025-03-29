@@ -6,7 +6,7 @@
 
 #include "spdk/stdinc.h"
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #define UNIT_TEST_NO_VTOPHYS
 
@@ -27,9 +27,12 @@ DEFINE_STUB_V(nvme_completion_poll_cb, (void *arg, const struct spdk_nvme_cpl *c
 
 DEFINE_STUB(nvme_ctrlr_submit_admin_request, int, (struct spdk_nvme_ctrlr *ctrlr,
 		struct nvme_request *req), 0);
-DEFINE_STUB_V(nvme_ctrlr_free_processes, (struct spdk_nvme_ctrlr *ctrlr));
+
 DEFINE_STUB(nvme_ctrlr_proc_get_devhandle, struct spdk_pci_device *,
 	    (struct spdk_nvme_ctrlr *ctrlr), NULL);
+DEFINE_STUB(spdk_nvme_ctrlr_get_numa_id, int32_t, (struct spdk_nvme_ctrlr *ctrlr),
+	    SPDK_ENV_NUMA_ID_ANY);
+
 DEFINE_STUB(spdk_pci_device_unmap_bar, int, (struct spdk_pci_device *dev, uint32_t bar, void *addr),
 	    0);
 DEFINE_STUB(spdk_pci_device_attach, int, (struct spdk_pci_driver *driver, spdk_pci_enum_cb enum_cb,
@@ -49,9 +52,11 @@ DEFINE_STUB_V(spdk_pci_unregister_error_handler, (spdk_pci_error_handler sighand
 DEFINE_STUB(spdk_pci_enumerate, int,
 	    (struct spdk_pci_driver *driver, spdk_pci_enum_cb enum_cb, void *enum_ctx),
 	    -1);
-
-DEFINE_STUB(nvme_transport_get_name, const char *, (const struct spdk_nvme_transport *transport),
-	    NULL);
+DEFINE_STUB(spdk_pci_device_enable_interrupts, int, (struct spdk_pci_device *dev,
+		uint32_t efd_count), 0);
+DEFINE_STUB(spdk_pci_device_disable_interrupts, int, (struct spdk_pci_device *dev), 0);
+DEFINE_STUB(spdk_pci_device_get_interrupt_efd_by_index, int, (struct spdk_pci_device *dev,
+		uint32_t index), 0);
 
 SPDK_LOG_REGISTER_COMPONENT(nvme)
 
@@ -112,14 +117,12 @@ DEFINE_STUB(nvme_ctrlr_probe, int, (const struct spdk_nvme_transport_id *trid,
 				    struct spdk_nvme_probe_ctx *probe_ctx, void *devhandle), 0);
 DEFINE_STUB(spdk_pci_device_is_removed, bool, (struct spdk_pci_device *dev), false);
 DEFINE_STUB(nvme_get_ctrlr_by_trid_unsafe, struct spdk_nvme_ctrlr *,
-	    (const struct spdk_nvme_transport_id *trid), NULL);
+	    (const struct spdk_nvme_transport_id *trid, const char *hostnqn), NULL);
 DEFINE_STUB(spdk_nvme_ctrlr_get_regs_csts, union spdk_nvme_csts_register,
 	    (struct spdk_nvme_ctrlr *ctrlr), {});
 DEFINE_STUB(nvme_ctrlr_get_process, struct spdk_nvme_ctrlr_process *,
 	    (struct spdk_nvme_ctrlr *ctrlr, pid_t pid), NULL);
 DEFINE_STUB(nvme_completion_is_retry, bool, (const struct spdk_nvme_cpl *cpl), false);
-DEFINE_STUB_V(nvme_ctrlr_process_async_event, (struct spdk_nvme_ctrlr *ctrlr,
-		const struct spdk_nvme_cpl *cpl));
 DEFINE_STUB_V(spdk_nvme_qpair_print_command, (struct spdk_nvme_qpair *qpair,
 		struct spdk_nvme_cmd *cmd));
 DEFINE_STUB_V(spdk_nvme_qpair_print_completion, (struct spdk_nvme_qpair *qpair,
@@ -625,7 +628,8 @@ test_nvme_pcie_qpair_build_prps_sgl_request(void)
 static void
 test_nvme_pcie_qpair_build_hw_sgl_request(void)
 {
-	struct spdk_nvme_qpair qpair = {};
+	struct nvme_pcie_qpair pqpair = {};
+	struct spdk_nvme_qpair *qpair = &pqpair.qpair;
 	struct nvme_request req = {};
 	struct nvme_tracker tr = {};
 	struct nvme_pcie_ut_bdev_io bio = {};
@@ -633,7 +637,7 @@ test_nvme_pcie_qpair_build_hw_sgl_request(void)
 	int rc;
 
 	ctrlr.trid.trtype = SPDK_NVME_TRANSPORT_PCIE;
-	qpair.ctrlr = &ctrlr;
+	qpair->ctrlr = &ctrlr;
 	req.payload = NVME_PAYLOAD_SGL(nvme_pcie_ut_reset_sgl, nvme_pcie_ut_next_sge, &bio, NULL);
 	req.cmd.opc = SPDK_NVME_OPC_WRITE;
 	tr.prp_sgl_bus_addr =  0xDAADBEE0;
@@ -649,7 +653,7 @@ test_nvme_pcie_qpair_build_hw_sgl_request(void)
 	bio.iovs[2].iov_base = (void *)0xDDADBEE0;
 	bio.iovs[2].iov_len = 2048;
 
-	rc = nvme_pcie_qpair_build_hw_sgl_request(&qpair, &req, &tr, true);
+	rc = nvme_pcie_qpair_build_hw_sgl_request(qpair, &req, &tr, true);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(tr.u.sgl[0].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
 	CU_ASSERT(tr.u.sgl[0].unkeyed.length == 2048);
@@ -679,7 +683,7 @@ test_nvme_pcie_qpair_build_hw_sgl_request(void)
 	bio.iovs[0].iov_base = (void *)0xDBADBEE0;
 	bio.iovs[0].iov_len = 4096;
 
-	rc = nvme_pcie_qpair_build_hw_sgl_request(&qpair, &req, &tr, true);
+	rc = nvme_pcie_qpair_build_hw_sgl_request(qpair, &req, &tr, true);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(tr.u.sgl[0].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
 	CU_ASSERT(tr.u.sgl[0].unkeyed.length == 4096);
@@ -1117,7 +1121,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("nvme_pcie", NULL, NULL);
@@ -1136,9 +1139,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_nvme_pcie_ctrlr_config_pmr);
 	CU_ADD_TEST(suite, test_nvme_pcie_ctrlr_map_io_pmr);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

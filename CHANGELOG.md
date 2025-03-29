@@ -1,16 +1,571 @@
 # Changelog
 
-## v23.09: (Upcoming Release)
+## v25.01: (Upcoming Release)
 
-### dpdk
+### bdev_nvme
 
-Updated DPDK submodule to DPDK 23.03.
+Added controller configuration consistency check, so all controllers created with the same name will
+be forced to have consistent setting, either multipath or failover. No mixing of different '-x'
+options will be allowed.
+
+Changed default mode: if no '-x' option is specified in bdev_nvme_attach_controller RPC call,
+the multipath mode will be assigned as a default.
+
+Changed `spdk_bdev_nvme_create` API function, the `multipath` parameter was removed as it is redundant
+to `multipath` field in spdk_bdev_nvme_ctrlr_opts structure passed as a parameter to this function.
+If multipathing shall be enabled for nvme bdev, `bdev_opts.multipath` shall be set to `true`. When
+`bdev_opts.multipath` is set to `false`, failover mode is enabled.
+
+Added public APIs `spdk_bdev_nvme_get_opts` and `spdk_bdev_nvme_set_opts` to get default bdev nvme
+options and set them respectively.
 
 ### env
 
-The `phys_addr` parameter in spdk_*_malloc() functions is now invalid. Passing non-NULL value
+Added 3 APIs to handle multiple interrupts for PCI device `spdk_pci_device_enable_interrupts()`,
+`spdk_pci_device_disable_interrupts()`, and `spdk_pci_device_get_interrupt_efd_by_index()`.
+
+### nvme
+
+Added `enable_interrupts` option to `spdk_nvme_ctrlr_opts`. If set to true then interrupts may be
+enabled during initialization. Make sure to check the resulting value after the attach step to
+check for success. This mode is currently only supported for PCIe transport. This is only
+supported within a primary SPDK process, and if enabled SPDK will not support secondary processes.
+
+Added APIs `spdk_nvme_qpair_get_fd()` and `spdk_nvme_ctrlr_get_admin_qp_fd()` to retrieve the file
+descriptor for an I/O and the admin queue pair of a given NVMe controller respectively.
+These APIs accept `spdk_event_handler_opts` structure, and if specified the transport layer will
+fill it out which can be used by the application to register interrupts on the queue pairs.
+
+Added `opts_size` in `spdk_nvme_io_qpair_opts` structure to align it with other opts structures.
+
+`spdk_nvme_poll_group_create()` now creates a fd group to manage interrupt events.
+
+Two new APIs have been added to manage interrupt events in poll group.
+
+`spdk_nvme_poll_group_get_fd()` retrieves the internal epoll file descriptor of the poll group.
+
+`spdk_nvme_poll_group_wait()` waits for interrupt events on all the I/O queue pair file descriptors
+in a poll group. When an interrupt event gets generated, it processes any outstanding completions
+on the I/O queue pair with interrupts. These interrupt events are registered at the the time of I/O
+queue pair creation.
+
+### nvmf
+
+Added public API `spdk_nvmf_send_discovery_log_notice` to send discovery log page
+change notice to client.
+
+### reduce
+
+Add `spdk_reduce_vol_get_info()` to get the information for the compressed volume.
+
+### thread
+
+Added `spdk_interrupt_register_ext()` API which can receive `spdk_event_handler_opts` structure.
+This is to prevent any further expansion of `spdk_interrupt_register()` API.
+
+### util
+
+Added `spdk_fd_group_add_ext()` API which can receive `spdk_event_handler_opts` structure. This is
+to prevent any further expansion of `spdk_fd_group_add()` API.
+
+## v24.09
+
+### accel
+
+Added `spdk_accel_submit_compress_ext()` and `spdk_accel_submit_decompress_ext()` API.  They differ
+from the non-ext variants in that these functions allow users to specify a compression algorithm and
+compression level.
+
+Added `spdk_accel_get_compress_level_range()` to get the valid level range of a given compression
+algorithm.
+
+Added API to generate and verify DIX.
+
+Added append version of `dif_verify`, `dif_verify_copy`, `dif_generate`, and `dif_generate_copy`.
+
+Added support for lz4 compression.
+
+### bdev
+
+`spdk_bdev_io_get_aux_buf` and `spdk_bdev_io_put_aux_buf` are deprecated and
+will be removed in the 25.01 release. We do not believe these are in use currently.
+
+### bdev_compress
+
+Added support for specifying compression algorithm and level.
+
+### bdev_nvme
+
+Introduced new header file /module/bdev/nvme.h and added public APIs `spdk_bdev_nvme_create`,
+`spdk_bdev_nvme_set_multipath_policy` and `spdk_bdev_nvme_get_default_ctrlr_opts`
+to get connectivity and multipathing capabilities of `bdev_nvme`.
+
+Added `bdev_nvme_set_keys` RPC to change DH-HMAC-CHAP keys and force reauthentication of all qpairs
+of a controller.
+
+### dif
+
+Each element in `enum spdk_dif_pi_format` was subtracted by 1 to match the definition
+of the Protection Information Format in the NVMe specification. This is necessary change
+but breaks ABI compatibility. Please recompile your application if you added code using
+this enum of older SPDK.
+
+### dma
+
+Added `spdk_memory_domain_transfer_data()` function to transfer data between two memory domains.
+
+### env
+
+Added `spdk_env_core_get_smt_cpuset()` API to get the list of SMT sibling
+cores for a given core ID.
+
+Added `spdk_pci_device_get_numa_id()`, `spdk_env_get_numa_id()`, and `SPDK_ENV_NUMA_ID_ANY` to
+replace `socket_id` with `numa_id` when referring to a NUMA node.
+
+Added `spdk_env_get_first_numa_id()`, `spdk_env_get_last_numa_id()`, `spdk_env_get_next_numa_id()`,
+and `SPDK_ENV_FOREACH_NUMA_ID()` API to iterate over available NUMA nodes in a system.
+
+Added `enforce_numa` option to `spdk_env_opts`.  This option forces all hugepage memory
+allocations to allocate memory only from the specified NUMA node without trying to fallback to other
+NUMA nodes if it fails.
+
+### env_dpdk
+
+`spdk_get_tid` is added to get the tid of the current thread.
+
+### event
+
+The `framework_get_reactors` RPC method supports getting pid and tid.
+
+### fsdev
+
+Added the fsdev library providing a filesystem abstraction.
+
+### fuse_dispatcher
+
+Added the `fuse_dispatcher` library that manages fsdevs and implements FUSE <-> fsdev API
+translation.
+
+### idxd
+
+Added `spdk_idxd_submit_dix_generate()` function to generate DIX using DSA.
+
+### nvme
+
+Added `spdk_nvme_ctrlr_set_keys()`, `spdk_nvme_ctrlr_authenticate()`, and
+`spdk_nvme_qpair_authenticate()` API to change the DH-HMAC-CHAP keys of a given controller and force
+reauthentication on its qpairs.
+
+### nvmf
+
+Added support for interrupt mode in the NVMe-of TCP transport.
+
+Enable iobuf based queuing for nvmf requests when there is not enough free buffers available.
+Perspective from the user of the `spdk_nvmf_request_get_buffers()` API is that whenever all iovecs
+are allocated immediately then nothing changes compared to the previous implementation.
+If iobuf does not have enough buffers then there are two flows now:
+
+- if `req_get_buffers_done` is not set in the `spdk_nvmf_transport_ops` then again, nothing
+  changes. All (if there were any) ioves are released and caller must try again later.
+- if callback was set then caller will be notified once all iovecs are allocated.
+
+As requests waiting for the buffer might get aborted, another API to remove such request from
+the iobuf queue is also added.
+
+Added public API `spdk_nvmf_subsystem_set_cntlid_range()` to set controller ID range for a
+subsystem.
+
+Added `nvmf_subsystem_set_keys` RPC to change DH-HMAC-CHAP keys for a given subsystem/host pair
+without having to remove and readd a host.
+
+Added `spdk_nvmf_subsystem_set_ns_ana_group()` function to change ANA group ID of an active
+namespace of a subsystem.
+
+### scheduler
+
+Added `framework_get_governor` RPC to retrieve the power governor name,
+power env and the frequencies available, frequency set to the cpu cores.
+
+### sock
+
+New functions that allows to register interrupt for given socket group:
+`spdk_sock_group_register_interrupt()` and `spdk_sock_group_unregister_interrupt()`. Both uses API
+exposed by the thread.h, see below for details.  Support implemented only for the POSIX and SSL
+sockets.
+
+### thread
+
+New function `spdk_interrupt_register_for_events()` build on top of `spdk_fd_group_add_for_events()`.
+See below for details.
+
+### util
+
+New function `spdk_fd_group_add_for_events()` was added alongside the existing `spdk_fd_group_add()`.
+Difference is that new API allows for specifying a set of events to be monitored instead of default
+`SPDK_INTERRUPT_EVENT_IN`.
+
+Added API to calculate md5 hash.
+
+## v24.05
+
+### accel
+
+`spdk_accel_get/set_opts()` has changed to act more like spdk_bdev's variant.
+
+### bdev
+
+Added `spdk_bdev_get_nvme_ctratt()` API to get controller attributes of bdev.
+
+### bdev_raid
+
+Added support for interleaved metadata.
+
+Added RAID1 I/O error handling.
+
+Examining a bdev with RAID superblock now searches for other base bdevs that may be present.
+
+Re-adding a removed base bdev with superblock will now begin rebuild on applicable RAID levels.
+
+Base bdevs can now be added back if were removed while in configuring state.
+
+RAID in configuring state will not be removed if the last base bdev is removed.
+
+### bdev_uring
+
+Added `bdev_uring_rescan` RPC to allow rescaning the size of uring bdev.
+
+### blobstore
+
+Added new API `spdk_bs_blob_shallow_copy()` to make a shallow copy from a blob to a blobstore device. Only clusters
+allocated to the blob will be written on the device.
+
+Added new APIs `spdk_bs_blob_set_parent()` and `spdk_bs_blob_set_external_parent()` to change the parent of an
+existing lvol. With these new API a thin provisioned blob can become a clone of an existing snapshot
+or of an existing external snapshot.
+
+### event
+
+SPDK applications can now start with `--wait-for-rpc` and JSON configuration provided at the same time.
+
+Struct `spdk_app_opts` was extended by `json_data` and `json_data_size` fields
+allowing user to provide a buffer with JSON config as alternative to providing JSON config file path
+(these fields are mutually exclusive).
+
+### init
+
+Function `spdk_subsystem_init_from_json_config()` is deprecated and will be removed in 24.09 release.
+Please use `spdk_subsystem_load_config()` instead.
+
+### iscsi
+
+Added `iscsi_get_stats` RPC method to get stat information about all active connections.
+
+Added `iscsi_enable_histogram` RPC method to enable or disable histogram for specified iSCSI target.
+
+Added `iscsi_get_histogram` RPC method to get histogram for specified iSCSI target.
+
+### keyring
+
+Added keyring library.  Its purpose is to provide secure access to cryptographic keys from other
+libraries.  Prior to being used, keys need to be attached to the keyring using one of the modules,
+which are responsible for retrieving keying material in a secure manner.  Currently, there are two
+keyring modules implemented: `keyring_file` (keys are stored in files on a filesystem) and
+`keyring_linux` (based on Linux kernel keyring).  The module interface is pluggable, so users can
+implement their own keyring modules.
+
+### lvol
+
+Added `bdev_lvol_start_shallow_copy` RPC to start a shallow copy of an lvol over a given bdev and
+`bdev_lvol_check_shallow_copy` RPC to get the status of the operation.
+These RPCs use the new API `spdk_lvol_shallow_copy()`.
+
+Added `bdev_lvol_set_parent` and `bdev_lvol_set_parent_bdev` RPC to change the parent of an existing lvol
+with the use of the new APIs `spdk_lvol_set_parent()` and `spdk_lvol_set_external_parent()`.
+
+### nvme
+
+Added `spdk_nvme_ctrlr_get_max_sges()` API to retrieve maximum number of SGEs per request
+for the given NVMe controller.
+
+The NVMe driver now supports in-band authentication using the DH-HMAC-CHAP protocol.  To enable it,
+users need to specify keys in the `bdev_nvme_attach_controller` RPC.  Additionally, it's possible to
+limit the allowed digests and Diffie-Hellman groups via `bdev_nvme_set_options`.
+
+### nvmf
+
+Added support for namespace masking using new C APIs `spdk_nvmf_ns_add_host()` and
+`spdk_nvmf_ns_remove_host()` and RPCs `nvmf_ns_add_host` and `nvmf_ns_remove_host`.
+Users must pass new `--no-auto-visible` parameter to `nvmf_subsystem_add_ns` RPC to allow
+namespace masking to be controlled by these new RPCs.
+
+Added `spdk_nvmf_subsystem_get_ana_state()` API to get current ANA state of
+a particular ANA group ID.
+
+Added support for enabling mDNS-based discovery of nvmf target for
+TCP transport with the addition of `nvmf_publish_mdns_prr` and
+`nvmf_stop_mdns_prr` RPCs.
+
+The NVMe-oF target now supports in-band authentication using the DH-HMAC-CHAP protocol.  The target
+will request hosts to authenticate if they're configured to use DH-HMAC-CHAP keys.  The keys can be
+set in the `nvmf_subsystem_add_host` RPC.  Additionally, it's possible to limit the allowed digests
+and Diffie-Hellman groups via `nvmf_set_config`.
+
+### spdk_trace
+
+`spdk_trace` has learned how to use the most recent trace file in /dev/shm when
+the user has specified neither `-f` nor `-s` options. This is only available on
+Linux since FreeBSD does not mount have a /dev/shm mount.
+
+### thread
+
+Changed `spdk_iobuf_get/set_opts()` API to act more like spdk_bdev's variant.
+
+### trace
+
+Merged `struct spdk_trace_flags` and `struct spdk_trace_histories` into
+new `struct spdk_trace_file`. Also renamed `spdk_get_trace_histories_size()`
+to `spdk_get_trace_file_size()`.
+
+## v24.01
+
+### accel
+
+Added support for new operations for computing Data Integrity Field (DIF),
+`spdk_accel_submit_dif_verify()`, `spdk_accel_submit_dif_generate()` and
+`spdk_accel_submit_dif_generate_copy()`.
+
+Added `spdk_accel_get_opcode_name()` API that returns name of an operation.
+
+Added `spdk_accel_get_module()` API that returns pointer to a module.
+
+Added optional `init()` and `fini()` callbacks to `spdk_accel_driver` in order to allow
+drivers to initialize and clean up resources by the driver.
+
+### accel_error
+
+Added new `error` accel module that allows user to inject error to selected accel operations.
+
+### bdev
+
+Added `spdk_bdev_nvme_iov_passthru_md()` API to allow sending larger passthru commands.
+
+Added `max_rw_size` field to `spdk_bdev` structure allowing bdev modules to specify maximum
+size of an I/O.
+
+Added `iobuf_small_cache_size` and `iobuf_large_cache_size` parameters to
+`bdev_set_options` RPC making iobuf use in bdev configurable.
+
+### bdev_raid
+
+Added support for rebuild in raid1 and raid5f levels.
+
+Added `superblock` argument to `bdev_raid_create` RPC to allow writing out raid metadata to
+a superblock. It can be then re-created from examined base bdevs, without the need
+to issue `bdev_raid_create`.
+
+Added `bdev_raid_add_base_bdev` RPC to add a base bdevs to an existing raid bdev.
+
+Added `bdev_raid_set_options` RPC that changes options for raid bdev module,
+currently allows setting `process_window_size_kb` affecting background operations
+like rebuild.
+
+### blobstore
+
+Added `spdk_bs_grow_live()` and `spdk_bdev_update_bs_blockcnt()` API that can be used to
+increase size of blobstore filling the underlying device without first closing the blobstore.
+
+### env
+
+Added SPDK command line parameter `--no-huge`, which enables SPDK to run without hugepages.
+
+### event
+
+Added SPDK command line parameter `--interrupt-mode`, which enables to run SPDK in interrupt
+mode. Effective only if all components used in the application, support interrupt mode.
+
+### ftl
+
+Added `rpc_bdev_ftl_get_properties` and `bdev_ftl_set_property` RPC with matching API calls,
+to allow modification of FTL device properties.
+
+### idxd
+
+Added `spdk_idxd_submit_dif_check()` and `spdk_idxd_submit_dif_insert()` API to support
+new operations for computing Data Integrity Field (DIF).
+
+### json
+
+Added `spdk_json_write_uuid()`, `spdk_json_write_named_uuid()` and `spdk_json_decode_uuid()`
+to help with writing and decoding UUID.
+
+### nvme
+
+A new transport option `rdma_max_cq_size` was added to limit indefinite growth of CQ size.
+
+Added `spdk_nvme_ctrlr_cmd_iov_raw_with_md()` API to allow sending larger passthru commands.
+
+### nvmf
+
+Added `max_discard_size_kib` and `max_write_zeroes_size_kib` to `nvmf_create_subsystem` RPC to set the
+maximum discard size and maximum write zeroes size.
+
+Added new optional `--ana-state` (or shortly `-n`) parameter to `nvmf_subsystem_add_listener` RPC.
+
+Added public APIs `spdk_nvmf_subsystem_get_ana_reporting()` and `spdk_nvmf_subsystem_set_ana_state()`,
+replacing the internal functions `nvmf_subsystem_get_ana_reporting()` and `nvmf_subsystem_set_ana_state()`
+respectively.
+
+Added support for NVMe-oF referrals in NVMe-oF target with addition of
+`spdk_nvmf_tgt_add_referral()` and `spdk_nvmf_tgt_remove_referral()` API and `nvmf_discovery_add_referral`,
+`nvmf_discovery_remove_referral` and `nvmf_discovery_get_referrals` RPC.
+
+Added `spdk_nvmf_set_custom_ns_reservation_ops()` API allowing to register custom handlers for reservation
+operations.
+
+### scsi
+
+Added support for `SPDK_SBC_WRITE_SAME_10` and `SPDK_SBC_WRITE_SAME_16`.
+
+### thread
+
+Added `iobuf_get_stats` RPC and `spdk_iobuf_get_stats()` API to track iobuf use across components.
+
+### trace
+
+Added `spdk_trace_register_user_thread()` to initialize trace environment and
+`spdk_trace_unregister_user_thread()` to de-initialize trace environment
+for a user created thread.
+
+Modified `spdk_trace_init()` to take number of user created threads as a parameter.
+
+### ublk
+
+Added `ublk_recover_disk` RPC to support recovering after restarting ublk target.
+
+### vhost
+
+Added `caw_iov` field to struct `spdk_scsi_task` to support SBC-3 compare_and_write IO.
+
+Added parameter `delay` to `vhost_create_scsi_controller` RPC which allows user to defer starting
+the vhost-scsi controller until adding the scsi target is completed.
+
+Added `vhost_start_scsi_controller` RPC to start vhost-scsi controller, it could be used to support
+live recovery feature of vhost-scsi target.
+
+### rpc
+
+Functions `spdk_rpc_listen`, `spdk_rpc_accept` and `spdk_rpc_close` are deprecated and will be
+removed in 24.09 release. Please use `spdk_rpc_server_listen`, `spdk_rpc_server_accept` and
+`spdk_rpc_server_close` instead.
+
+## v23.09
+
+### accel
+
+Added `spdk_accel_get_buf_align()` API to get minimum buffer alignment to execute a given operation.
+
+Added `get_operation_info()` callback for accel_modules to return constraints for a given operation.
+
+### bdev
+
+Added `spdk_bdev_open_async()` API to allow asynchronous bdev open that waits for specified time
+until the block device appears.
+
+### bdev_nvme
+
+Added `bdev_nvme_enable_controller` and `bdev_nvme_disable_controller` RPC to enable and disable
+NVMe controller. For NVMe multipath `cntlid` is used to select only one NVMe-oF controller.
+
+Added `cntlid` field to `bdev_nvme_reset_controller` RPC to support resetting only one NVMe-oF
+controller in multipath configuration.
+
+### bdev_raid
+
+Added `bdev_raid_remove_base_bdev` RPC to remove a base bdev from existing raid bdev.
+
+### dpdk
+
+Updated DPDK submodule to DPDK 23.07.
+
+### env
+
+The `phys_addr` parameter in `spdk_*_malloc()` functions is now invalid. Passing non-NULL value
 will return NULL from the functions. The parameter was deprecated in SPDK 19.04.
-For retrieving physical addresses, spdk_vtophys() should be used instead.
+For retrieving physical addresses, `spdk_vtophys()` should be used instead.
+
+### go
+
+Added JSON-RPC 2.0 client written in Go to ease communication with SPDK.
+Please see the documentation at `go/rpc/` and example at `examples/go/`.
+
+### init
+
+Options for the JSON-RPC server initialization were added. The options are defined via the
+`spdk_rpc_opts` structure and is passed to the existing API `spdk_rpc_initialize()` as a new
+argument. The options include `log_file` and `log_level`.
+
+### intel-ipsec-mb
+
+Updated intel-ipsec-mb submodule to v1.4.
+
+### jsonrpc
+
+New APIs, `spdk_jsonrpc_set_log_level` and `spdk_jsonrpc_set_log_file`, were added to enable
+logging JSON RPC calls history.
+
+### log
+
+New APIs, `spdk_flog` and `spdk_vflog`, were added to write messages to the specified log file.
+
+### nvme
+
+The `spdk_nvme_accel_fn_table` interface has been extended with callbacks allowing users to chain
+multiple accel operations.  Users can now send requests with an existing accel sequence by setting
+the `accel_sequence` field in `spdk_nvme_ns_cmd_ext_io_opts` if the controller supports it (i.e.
+sets the `SPDK_NVME_CTRLR_ACCEL_SEQUENCE_SUPPORTED` flag) and the user implements the necessary
+`spdk_nvme_accel_fn_table` callbacks.
+
+The NVMe bdev will now advertise support for accel sequences if the `allow_accel_sequence` flag is
+set in `bdev_nvme_set_options` and the underlying controller also supports them.
+
+The TCP transport will now calculate data digest using the accel sequence APIs if they're available.
+
+Added `spdk_nvme_qpair_is_connected()` API to check the connection status.
+
+### nvmf
+
+The `spdk_nvmf_request::data` field has been removed: instead, clients should set
+`->iov` and `->iovcnt` appropriately, as nvmf request APIs now expect any data
+buffers to be described there. `spdk_nvmf_request_get_data()` has been removed.
+
+`transport` field in `listen_addresses` of `nvmf_get_subsystems` RPC is deprecated.
+`trtype` field should be used instead. `transport` field will be removed in 24.01 release.
+
+Added `spdk_nvmf_subsystem_add_listener_ext()` API for accepting new connections on the provided
+address, now allowing to specify additional options for the listener.
+
+Deprecated `spdk_nvmf_subsystem_any_listener_allowed()` API (to be removed in 24.01) and replaced with
+spdk_nvmf_subsystem_any_listener_allowed()` API fixing the typo.
+
+Added `spdk_nvmf_subsystem_is_discovery()` API to check whether a given susbystem is discovery subsystem.
+
+### scripts
+
+`setup.sh` now supports interactive mode for device selection and hugepage reservation.
+
+Added `backport.sh` script that formalizes process of backporting commits from latest SPDK,
+to specific release branches. Please see [documentation](https://spdk.io/doc/backporting.html).
+
+### thread
+
+Added `spdk_thread_is_app_thread()` API to check if specified spdk_thread is the app thread.
+
+### util
+
+Extended DIF support to CRC-32 and CRC-64 format of the Protection Information.
+
+Added `spdk_crc64_nvme()` and `spdk_crc32c_nvme()`, CRC-64 and CRC-32C checksums compatible with
+NVMe Protection Information.
 
 ## v23.05
 
@@ -24,7 +579,7 @@ should have equal length and key size in hexlified form can be either 32 bytes f
 dropped, only plain text mode is supported.
 
 The accel library will now collect statistics on the number of executed operations and processed
-bytes.  These statistics can be retreived using the `accel_get_stats` RPC.
+bytes.  These statistics can be retrieved using the `accel_get_stats` RPC.
 
 Added support for appending a crc32 calculation to an accel sequence.
 

@@ -38,6 +38,8 @@ extern "C" {
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <fnmatch.h>
+#include <ftw.h>
 #include <glob.h>
 #include <ifaddrs.h>
 #include <libgen.h>
@@ -63,19 +65,29 @@ extern "C" {
 #include <sys/user.h>
 #include <sys/wait.h>
 #include <regex.h>
+#include <sys/statvfs.h>
+#include <sys/syscall.h>
+#include <sys/file.h>
 
 /* GNU extension */
 #include <getopt.h>
 
 /* Linux */
 #ifdef __linux__
+#include <sys/xattr.h>
 #include <sys/eventfd.h>
+#include <sys/epoll.h>
 #include <sched.h>
 #endif
 
-/* FreeBSD */
-#ifdef __FreeBSD__
+/* FreeBSD or Linux */
+#if defined(__FreeBSD__) || defined(__linux__)
 #include <aio.h>
+#endif
+
+/* FreeBSD doesn't define ENOKEY */
+#ifndef ENOKEY
+#define ENOKEY 126
 #endif
 
 #ifdef __cplusplus

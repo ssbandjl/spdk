@@ -203,7 +203,7 @@ bdev_part_remap_dif(struct spdk_bdev_io *bdev_io, uint32_t offset,
 	int rc;
 	struct spdk_dif_ctx_init_ext_opts dif_opts;
 
-	if (spdk_likely(!(bdev->dif_check_flags & SPDK_DIF_FLAGS_REFTAG_CHECK))) {
+	if (spdk_likely(!(bdev_io->u.bdev.dif_check_flags & SPDK_DIF_FLAGS_REFTAG_CHECK))) {
 		return 0;
 	}
 
@@ -211,7 +211,7 @@ bdev_part_remap_dif(struct spdk_bdev_io *bdev_io, uint32_t offset,
 	dif_opts.dif_pi_format = SPDK_DIF_PI_FORMAT_16;
 	rc = spdk_dif_ctx_init(&dif_ctx,
 			       bdev->blocklen, bdev->md_len, bdev->md_interleave,
-			       bdev->dif_is_head_of_md, bdev->dif_type, bdev->dif_check_flags,
+			       bdev->dif_is_head_of_md, bdev->dif_type, bdev_io->u.bdev.dif_check_flags,
 			       offset, 0, 0, 0, 0, &dif_opts);
 	if (rc != 0) {
 		SPDK_ERRLOG("Initialization of DIF context failed\n");
@@ -222,14 +222,14 @@ bdev_part_remap_dif(struct spdk_bdev_io *bdev_io, uint32_t offset,
 
 	if (bdev->md_interleave) {
 		rc = spdk_dif_remap_ref_tag(bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
-					    bdev_io->u.bdev.num_blocks, &dif_ctx, &err_blk);
+					    bdev_io->u.bdev.num_blocks, &dif_ctx, &err_blk, true);
 	} else {
 		struct iovec md_iov = {
 			.iov_base	= bdev_io->u.bdev.md_buf,
 			.iov_len	= bdev_io->u.bdev.num_blocks * bdev->md_len,
 		};
 
-		rc = spdk_dix_remap_ref_tag(&md_iov, bdev_io->u.bdev.num_blocks, &dif_ctx, &err_blk);
+		rc = spdk_dix_remap_ref_tag(&md_iov, bdev_io->u.bdev.num_blocks, &dif_ctx, &err_blk, true);
 	}
 
 	if (rc != 0) {
@@ -245,8 +245,7 @@ bdev_part_complete_io(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 {
 	struct spdk_bdev_io *part_io = cb_arg;
 	uint32_t offset, remapped_offset;
-	spdk_bdev_io_completion_cb cb;
-	int rc, status;
+	int rc;
 
 	switch (bdev_io->type) {
 	case SPDK_BDEV_IO_TYPE_READ:
@@ -268,14 +267,10 @@ bdev_part_complete_io(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 		break;
 	}
 
-
-	cb = part_io->u.bdev.stored_user_cb;
-	if (cb != NULL) {
-		cb(part_io, success, NULL);
+	if (part_io->internal.f.split) {
+		part_io->internal.split.stored_user_cb(part_io, success, NULL);
 	} else {
-		status = success ? SPDK_BDEV_IO_STATUS_SUCCESS : SPDK_BDEV_IO_STATUS_FAILED;
-
-		spdk_bdev_io_complete(part_io, status);
+		spdk_bdev_io_complete_base_io_status(part_io, bdev_io);
 	}
 
 	spdk_bdev_free_io(bdev_io);
@@ -289,6 +284,7 @@ bdev_part_init_ext_io_opts(struct spdk_bdev_io *bdev_io, struct spdk_bdev_ext_io
 	opts->memory_domain = bdev_io->u.bdev.memory_domain;
 	opts->memory_domain_ctx = bdev_io->u.bdev.memory_domain_ctx;
 	opts->metadata = bdev_io->u.bdev.md_buf;
+	opts->dif_check_flags_exclude_mask = ~bdev_io->u.bdev.dif_check_flags;
 }
 
 int
@@ -302,7 +298,10 @@ spdk_bdev_part_submit_request_ext(struct spdk_bdev_part_channel *ch, struct spdk
 	uint64_t offset, remapped_offset, remapped_src_offset;
 	int rc = 0;
 
-	bdev_io->u.bdev.stored_user_cb = cb;
+	if (cb != NULL) {
+		bdev_io->internal.f.split = true;
+		bdev_io->internal.split.stored_user_cb = cb;
+	}
 
 	offset = bdev_io->u.bdev.offset_blocks;
 	remapped_offset = offset + part->internal.offset_blocks;
@@ -344,6 +343,10 @@ spdk_bdev_part_submit_request_ext(struct spdk_bdev_part_channel *ch, struct spdk
 		break;
 	case SPDK_BDEV_IO_TYPE_RESET:
 		rc = spdk_bdev_reset(base_desc, base_ch,
+				     bdev_part_complete_io, bdev_io);
+		break;
+	case SPDK_BDEV_IO_TYPE_ABORT:
+		rc = spdk_bdev_abort(base_desc, base_ch, bdev_io->u.abort.bio_to_abort,
 				     bdev_part_complete_io, bdev_io);
 		break;
 	case SPDK_BDEV_IO_TYPE_ZCOPY:

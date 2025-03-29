@@ -20,19 +20,20 @@ cleanup() {
 
 function run_bdevperf() {
 	local subnqn hostnqn psk
-	subnqn=$1 hostnqn=$2 psk=${3:+--psk $3}
+	subnqn=$1 hostnqn=$2 psk=$3
 
 	bdevperf_rpc_sock=/var/tmp/bdevperf.sock
 	# use bdevperf to test "bdev_nvme_attach_controller"
-	$rootdir/build/examples/bdevperf -m 0x4 -z -r $bdevperf_rpc_sock -q 128 -o 4096 -w verify -t 10 &
+	$rootdir/build/examples/bdevperf -m 0x4 -z -r $bdevperf_rpc_sock -q 128 -o 4096 -w verify -t 10 "${NO_HUGE[@]}" &
 	bdevperf_pid=$!
 
 	trap 'cleanup; exit 1' SIGINT SIGTERM EXIT
 	waitforlisten $bdevperf_pid $bdevperf_rpc_sock
 
+	$rpc_py -s $bdevperf_rpc_sock keyring_file_add_key key0 "$psk"
 	# send RPC
 	if ! $rpc_py -s $bdevperf_rpc_sock bdev_nvme_attach_controller -b TLSTEST -t $TEST_TRANSPORT \
-		-a $NVMF_FIRST_TARGET_IP -s $NVMF_PORT -f ipv4 -n "$subnqn" -q "$hostnqn" $psk; then
+		-a $NVMF_FIRST_TARGET_IP -s $NVMF_PORT -f ipv4 -n "$subnqn" -q "$hostnqn" --psk key0; then
 		killprocess $bdevperf_pid
 		return 1
 	fi
@@ -45,15 +46,6 @@ function run_bdevperf() {
 	killprocess $bdevperf_pid
 }
 
-format_interchange_psk() {
-	local key hash crc
-
-	key=$1 hash=${2:-01}
-	crc=$(echo -n $key | gzip -1 -c | tail -c8 | head -c 4)
-
-	echo "NVMeTLSkey-1:$hash:$(base64 <(echo -n ${key}${crc})):"
-}
-
 setup_nvmf_tgt() {
 	local key=$1
 
@@ -63,9 +55,9 @@ setup_nvmf_tgt() {
 		-a $NVMF_FIRST_TARGET_IP -s $NVMF_PORT -k
 	$rpc_py bdev_malloc_create 32 4096 -b malloc0
 	$rpc_py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 malloc0 -n 1
-
+	$rpc_py keyring_file_add_key key0 "$key"
 	$rpc_py nvmf_subsystem_add_host nqn.2016-06.io.spdk:cnode1 nqn.2016-06.io.spdk:host1 \
-		--psk $key
+		--psk key0
 }
 
 nvmftestinit
@@ -124,11 +116,11 @@ if [[ "$ktls" != "false" ]]; then
 	exit 1
 fi
 
-key=$(format_interchange_psk 00112233445566778899aabbccddeeff)
-key_2=$(format_interchange_psk ffeeddccbbaa99887766554433221100)
+key=$(format_interchange_psk 00112233445566778899aabbccddeeff 1)
+key_2=$(format_interchange_psk ffeeddccbbaa99887766554433221100 1)
 
-key_path="$testdir/key1.txt"
-key_2_path="$testdir/key2.txt"
+key_path=$(mktemp)
+key_2_path=$(mktemp)
 
 echo -n "$key" > $key_path
 echo -n "$key_2" > $key_2_path
@@ -143,10 +135,10 @@ setup_nvmf_tgt $key_path
 
 # Test #1 - test connectivity with perf and bdevperf application
 # Check connectivity with nvmeperf"
-"${NVMF_TARGET_NS_CMD[@]}" $SPDK_EXAMPLE_DIR/perf -S ssl -q 64 -o 4096 -w randrw -M 30 -t 10 \
+"${NVMF_TARGET_NS_CMD[@]}" $SPDK_BIN_DIR/spdk_nvme_perf -S ssl -q 64 -o 4096 -w randrw -M 30 -t 10 \
 	-r "trtype:${TEST_TRANSPORT} adrfam:IPv4 traddr:${NVMF_FIRST_TARGET_IP} trsvcid:${NVMF_PORT} \
 subnqn:nqn.2016-06.io.spdk:cnode1 hostnqn:nqn.2016-06.io.spdk:host1" \
-	--psk-path $key_path
+	--psk-path $key_path "${NO_HUGE[@]}"
 
 # Check connectivity with bdevperf with 32 bytes long key
 run_bdevperf nqn.2016-06.io.spdk:cnode1 nqn.2016-06.io.spdk:host1 "$key_path"
@@ -165,8 +157,8 @@ NOT run_bdevperf nqn.2016-06.io.spdk:cnode1 nqn.2016-06.io.spdk:host1 ""
 
 # Test #6 - check connectivity with bdevperf, but with 48 bytes long key
 killprocess $nvmfpid
-key_long=$(format_interchange_psk 00112233445566778899aabbccddeeff0011223344556677 02)
-key_long_path="$testdir/key_long.txt"
+key_long=$(format_interchange_psk 00112233445566778899aabbccddeeff0011223344556677 2)
+key_long_path=$(mktemp)
 echo -n "$key_long" > $key_long_path
 chmod 0600 $key_long_path
 nvmfappstart -m 0x2
@@ -184,6 +176,108 @@ killprocess $nvmfpid
 nvmfappstart -m 0x2
 
 NOT setup_nvmf_tgt $key_long_path
+
+# Test #9 - test saving/loading JSON configuration by connecting to bdevperf
+killprocess $nvmfpid
+chmod 0600 $key_long_path
+
+# Run both applications just to get their JSON configs
+nvmfappstart -m 0x2
+setup_nvmf_tgt $key_long_path
+
+$rootdir/build/examples/bdevperf -m 0x4 -z -r $bdevperf_rpc_sock -q 128 -o 4096 -w verify -t 10 "${NO_HUGE[@]}" &
+bdevperf_pid=$!
+
+trap 'cleanup; exit 1' SIGINT SIGTERM EXIT
+waitforlisten $bdevperf_pid $bdevperf_rpc_sock
+$rpc_py -s $bdevperf_rpc_sock keyring_file_add_key key0 "$key_long_path"
+$rpc_py -s $bdevperf_rpc_sock bdev_nvme_attach_controller -b TLSTEST -t $TEST_TRANSPORT \
+	-a $NVMF_FIRST_TARGET_IP -s $NVMF_PORT -f ipv4 -n nqn.2016-06.io.spdk:cnode1 \
+	-q nqn.2016-06.io.spdk:host1 --psk key0
+
+tgtconf=$($rpc_py save_config)
+bdevperfconf=$($rpc_py -s $bdevperf_rpc_sock save_config)
+
+killprocess $bdevperf_pid
+killprocess $nvmfpid
+
+# Launch apps with configs
+nvmfappstart -m 0x2 -c <(echo "$tgtconf")
+$rootdir/build/examples/bdevperf -m 0x4 -z -r $bdevperf_rpc_sock -q 128 -o 4096 -w verify -t 10 \
+	-c <(echo "$bdevperfconf") "${NO_HUGE[@]}" &
+
+bdevperf_pid=$!
+waitforlisten $bdevperf_pid $bdevperf_rpc_sock
+
+# Run I/O
+$rootdir/examples/bdev/bdevperf/bdevperf.py -t 20 -s $bdevperf_rpc_sock perform_tests
+
+trap 'nvmftestfini; exit 1' SIGINT SIGTERM EXIT
+killprocess $bdevperf_pid
+killprocess $nvmfpid
+
+# Load the keys using keyring
+nvmfappstart
+setup_nvmf_tgt "$key_long_path"
+"$rootdir/build/examples/bdevperf" -m 2 -z -r "$bdevperf_rpc_sock" \
+	-q 128 -o 4k -w verify -t 1 "${NO_HUGE[@]}" &
+bdevperf_pid=$!
+
+trap 'cleanup; exit 1' SIGINT SIGTERM EXIT
+waitforlisten "$bdevperf_pid" "$bdevperf_rpc_sock"
+
+"$rpc_py" -s "$bdevperf_rpc_sock" keyring_file_add_key key0 "$key_long_path"
+"$rpc_py" -s "$bdevperf_rpc_sock" bdev_nvme_attach_controller -b nvme0 -t tcp \
+	-a $NVMF_FIRST_TARGET_IP -s $NVMF_PORT -f ipv4 --psk key0 \
+	-n "nqn.2016-06.io.spdk:cnode1" -q "nqn.2016-06.io.spdk:host1"
+
+"$rootdir/examples/bdev/bdevperf/bdevperf.py" -s "$bdevperf_rpc_sock" perform_tests
+
+killprocess $bdevperf_pid
+killprocess $nvmfpid
+
+# Check the same, but this time, use keyring on the target side too
+# Additionally, use '-S ssl' instead of '-k' when adding the listener
+# as they *should* be the same
+nvmfappstart
+rpc_cmd << CONFIG
+	nvmf_create_transport $NVMF_TRANSPORT_OPTS
+	bdev_malloc_create 32 4096 -b malloc0
+	nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1
+	nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 -t tcp \
+		-a $NVMF_FIRST_TARGET_IP -s $NVMF_PORT -S ssl
+	nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 malloc0
+	keyring_file_add_key key0 "$key_long_path"
+	nvmf_subsystem_add_host nqn.2016-06.io.spdk:cnode1 nqn.2016-06.io.spdk:host1 --psk key0
+CONFIG
+
+"$rootdir/build/examples/bdevperf" -m 2 -z -r "$bdevperf_rpc_sock" \
+	-q 128 -o 4k -w verify -t 1 "${NO_HUGE[@]}" &
+bdevperf_pid=$!
+
+waitforlisten "$bdevperf_pid" "$bdevperf_rpc_sock"
+"$rpc_py" -s "$bdevperf_rpc_sock" keyring_file_add_key key0 "$key_long_path"
+"$rpc_py" -s "$bdevperf_rpc_sock" bdev_nvme_attach_controller -b nvme0 -t tcp \
+	-a $NVMF_FIRST_TARGET_IP -s $NVMF_PORT -f ipv4 --psk key0 \
+	-n "nqn.2016-06.io.spdk:cnode1" -q "nqn.2016-06.io.spdk:host1"
+
+"$rootdir/examples/bdev/bdevperf/bdevperf.py" -s "$bdevperf_rpc_sock" perform_tests
+
+# Check save/load config
+tgtcfg=$(rpc_cmd save_config)
+bperfcfg=$("$rpc_py" -s "$bdevperf_rpc_sock" save_config)
+
+killprocess $bdevperf_pid
+killprocess $nvmfpid
+
+nvmfappstart -c <(echo "$tgtcfg")
+"$rootdir/build/examples/bdevperf" -m 2 -z -r "$bdevperf_rpc_sock" \
+	-q 128 -o 4k -w verify -t 1 "${NO_HUGE[@]}" -c <(echo "$bperfcfg") &
+bdevperf_pid=$!
+waitforlisten "$bdevperf_pid" "$bdevperf_rpc_sock"
+
+[[ $("$rpc_py" -s "$bdevperf_rpc_sock" bdev_nvme_get_controllers | jq -r '.[].name') == "nvme0" ]]
+"$rootdir/examples/bdev/bdevperf/bdevperf.py" -s "$bdevperf_rpc_sock" perform_tests
 
 trap - SIGINT SIGTERM EXIT
 cleanup

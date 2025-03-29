@@ -789,6 +789,7 @@ TestOneInput(const uint8_t *data, size_t size)
 	if (g_ctrlr == NULL) {
 		fprintf(stderr, "spdk_nvme_connect() failed for transport address '%s'\n",
 			g_trid.traddr);
+		spdk_app_stop(-1);
 		return -1;
 	}
 
@@ -808,6 +809,9 @@ detach_ctrlr:
 
 	if (detach_ctx) {
 		spdk_nvme_detach_poll(detach_ctx);
+	}
+	if (ret < 0) {
+		spdk_app_stop(ret);
 	}
 
 	return ret;
@@ -830,10 +834,7 @@ start_fuzzer(void *ctx)
 	char *_argv[] = {
 		"spdk",
 		"-len_control=0",
-		/* TODO: temporarily disable leak detection due to issues
-		 * with ASAN and DPDK, see #2455 and #2992.
-		 */
-		"-detect_leaks=0",
+		"-detect_leaks=1",
 		NULL,
 		NULL,
 		NULL,
@@ -913,7 +914,6 @@ nvme_fuzz_parse(int ch, char *arg)
 {
 	long long tmp;
 	int rc;
-	FILE *repro_file;
 
 	switch (ch) {
 	case 'D':
@@ -932,12 +932,7 @@ nvme_fuzz_parse(int ch, char *arg)
 		}
 		break;
 	case 'N':
-		repro_file = fopen(optarg, "r");
-		if (repro_file == NULL) {
-			fprintf(stderr, "could not open %s: %s\n", optarg, spdk_strerror(errno));
-			return -1;
-		}
-		g_repro_data = spdk_posix_file_load(repro_file, &g_repro_size);
+		g_repro_data = spdk_posix_file_load_from_name(optarg, &g_repro_size);
 		if (g_repro_data == NULL) {
 			fprintf(stderr, "could not load data for file %s\n", optarg);
 			return -1;
@@ -1002,6 +997,7 @@ main(int argc, char **argv)
 	spdk_app_opts_init(&opts, sizeof(opts));
 	opts.name = "nvme_fuzz";
 	opts.shutdown_cb = fuzz_shutdown;
+	opts.rpc_addr = NULL;
 
 	if ((rc = spdk_app_parse_args(argc, argv, &opts, "D:F:N:P:t:Z:", NULL, nvme_fuzz_parse,
 				      nvme_fuzz_usage) != SPDK_APP_PARSE_ARGS_SUCCESS)) {

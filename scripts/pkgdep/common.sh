@@ -17,20 +17,64 @@ install_liburing() {
 	git -C "$liburing_dir" checkout liburing-2.2
 	(cd "$liburing_dir" && ./configure --libdir=/usr/lib64 --libdevdir=/usr/lib64 && make install)
 	echo /usr/lib64 > /etc/ld.so.conf.d/spdk-liburing.conf
+	ldconfig -X
+}
+
+install_uadk() {
+	local GIT_REPO_UADK=https://github.com/Linaro/uadk
+	local uadk_dir=/usr/local/src/uadk
+
+	if [[ -d $uadk_dir ]]; then
+		echo "uadk source already present, not cloning"
+	else
+		mkdir -p $uadk_dir
+		git clone "${GIT_REPO_UADK}" "$uadk_dir"
+	fi
+	(cd "$uadk_dir" && ./cleanup.sh && ./autogen.sh && ./configure --libdir=/usr/lib64 && make install)
+	echo /usr/lib64 > /etc/ld.so.conf.d/uadk.conf
 	ldconfig
+}
+
+_install_shfmt() {
+	local version=$1 arch=$2 type=$3
+
+	local shfmt_dir=/usr/local/src/shfmt shfmt_repo=https://github.com/mvdan/sh
+
+	if [[ $type != build ]]; then
+		echo "$shfmt_repo/releases/download/$version/shfmt_${version}_linux_${arch}"
+		return 0
+	fi
+
+	if [[ ! -e /etc/opt/spdk-pkgdep/paths/go.path ]]; then
+		install_golang
+	fi
+	source /etc/opt/spdk-pkgdep/paths/export.sh > /dev/null
+
+	rm -rf "$shfmt_dir"
+
+	git clone "$shfmt_repo" "$shfmt_dir"
+	git -C "$shfmt_dir" checkout "$version"
+
+	# See cmd/shfmt/Dockerfile
+	CGO_ENABLED=0 go -C "$shfmt_dir" build \
+		-ldflags "-w -s -extldflags '-static' -X main.version=$version" \
+		"$shfmt_dir/cmd/shfmt"
+
+	echo "file://$shfmt_dir/shfmt"
 }
 
 install_shfmt() {
 	# Fetch version that has been tested
-	local shfmt_version=3.1.0
+	local shfmt_version=v3.8.0
 	local shfmt=shfmt-$shfmt_version
 	local shfmt_dir=${SHFMT_DIR:-/opt/shfmt}
 	local shfmt_dir_out=${SHFMT_DIR_OUT:-/usr/bin}
 	local shfmt_url
 	local os
 	local arch
+	local cmdline
 
-	if hash "$shfmt" && [[ $("$shfmt" --version) == "v$shfmt_version" ]]; then
+	if hash "$shfmt" && [[ $("$shfmt" --version) == "$shfmt_version" ]]; then
 		echo "$shfmt already installed"
 		return 0
 	fi 2> /dev/null
@@ -40,21 +84,19 @@ install_shfmt() {
 
 	case "$arch" in
 		x86_64) arch="amd64" ;;
-		aarch64) arch="arm" ;;
+		aarch) arch="arm" ;;
+		aarch64) arch="arm64" ;;
+		amd64) ;; # FreeBSD
 		*)
 			echo "Not supported arch (${arch:-Unknown}), skipping"
 			return 0
 			;;
 	esac
 
-	case "$os" in
-		Linux) shfmt_url=https://github.com/mvdan/sh/releases/download/v$shfmt_version/shfmt_v${shfmt_version}_linux_${arch} ;;
-		FreeBSD) shfmt_url=https://github.com/mvdan/sh/releases/download/v$shfmt_version/shfmt_v${shfmt_version}_freebsd_${arch} ;;
-		*)
-			echo "Not supported OS (${os:-Unknown}), skipping"
-			return 0
-			;;
-	esac
+	cmdline=("$shfmt_version" "$arch")
+	[[ $os == FreeBSD || -n $BUILD_SHFMT ]] && cmdline+=(build)
+
+	shfmt_url=$(_install_shfmt "${cmdline[@]}")
 
 	mkdir -p "$shfmt_dir"
 	mkdir -p "$shfmt_dir_out"
@@ -111,14 +153,13 @@ install_markdownlint() {
 	else
 		echo "Markdown lint tool already in /usr/src/markdownlint. Not installing"
 	fi
-}
 
-version-at-least() {
-	local atleastver="$1"
-	local askver="$2"
-	local smallest
-	smallest=$(echo -e "${atleastver}\n${askver}" | sort -V | head -n 1)
-	[[ "${smallest}" == "${atleastver}" ]]
+	rm -rf "$srcdir"
+	git clone --branch "$mdl_version" "$git_repo_mdl" "$srcdir"
+	(
+		cd "$srcdir"
+		rake install
+	)
 }
 
 install_protoc() {
@@ -148,7 +189,7 @@ install_protoc() {
 		echo "installing protoc v${PROTOCVERSION} to ${protocdir}"
 		mkdir -p "${protocdir}"
 		arch=x86_64
-		if [[ "$(arch)" == "aarch64" ]]; then
+		if [[ "$(uname -m)" == "aarch64" ]]; then
 			arch=aarch_64
 		fi
 		protocpkg=protoc-${PROTOCVERSION}-linux-${arch}.zip
@@ -188,13 +229,12 @@ install_protoc() {
 }
 
 install_golang() {
-	local GOVERSION=${GOVERSION:-1.19}
-	local godir gopkg gover arch
-	gover=$(go version 2> /dev/null | {
-		read -r _ _ v _
-		echo ${v#go}
-	})
-	if [[ -n "${gover}" ]] && version-at-least "${GOVERSION}" "${gover}"; then
+	local GOVERSION=${GOVERSION:-1.21.1}
+	local godir gopkg gover arch os
+
+	read -r _ _ gover _ < <(go version) || true
+	gover=${gover#go}
+	if [[ -n "${gover}" ]] && ge "${gover}" "${GOVERSION}"; then
 		echo "found go version ${gover} >= required ${GOVERSION}, skip installing"
 		return 0
 	fi
@@ -205,44 +245,40 @@ install_golang() {
 	fi
 	mkdir -p "${godir}"
 	arch=amd64
-	if [[ "$(arch)" == "aarch64" ]]; then
+	os=$(uname -s)
+	if [[ "$(uname -m)" == "aarch64" ]]; then
 		arch=arm64
 	fi
-	gopkg=go${GOVERSION}.linux-${arch}.tar.gz
+	gopkg=go${GOVERSION}.${os,,}-${arch}.tar.gz
 	echo "installing go v${GOVERSION} to ${godir}/bin"
-	curl -s https://dl.google.com/go/${gopkg} | tar -C "${godir}" -xzf - --strip 1
-	${godir}/bin/go version || {
+	curl -sL https://go.dev/dl/${gopkg} | tar -C "${godir}" -xzf - --strip 1
+	if ! "${godir}/bin/go" version; then
 		echo "go install failed"
 		return 1
-	}
+	fi
 	export PATH=${godir}/bin:$PATH
 	export GOBIN=${godir}/bin
 	pkgdep_toolpath go "${godir}/bin"
 }
 
-pkgdep_toolpath() {
-	# Usage: pkgdep_toolpath TOOL DIR
-	#
-	# Regenerates /etc/opt/spdk-pkgdep/paths to ensure that
-	# TOOL in DIR will be in PATH before other versions
-	# of the TOOL installed in the system.
-	local toolname="$1"
-	local toolpath="$2"
-	local toolpath_dir="/etc/opt/spdk-pkgdep/paths"
-	local toolpath_file="${toolpath_dir}/${toolname}.path"
-	local export_file="${toolpath_dir}/export.sh"
-	mkdir -p "$(dirname "${toolpath_file}")"
-	echo "${toolpath}" > "${toolpath_file}" || {
-		echo "cannot write toolpath ${toolpath} to ${toolpath_file}"
+install_golangci_lint() {
+	local golangcidir installed_lintversion lintversion=${GOLANGCLILINTVERSION:-1.54.2}
+	installed_lintversion=$(golangci-lint --version | awk '{print $4}')
+
+	if [[ -n "${installed_lintversion}" ]] && ge "${installed_lintversion}" "${lintversion}"; then
+		echo "golangci-lint already installed, skip installing"
+		return 0
+	fi
+
+	echo "installing golangci-lint"
+	golangcidir=/opt/golangci/$lintversion/bin
+	export PATH=${golangcidir}:$PATH
+	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v${lintversion}/install.sh \
+		| sh -s -- -b "${golangcidir}" "v$lintversion" || {
+		echo "installing golangci-lint failed"
 		return 1
 	}
-	echo "# generated, source this file in shell" > "${export_file}"
-	for pathfile in "${toolpath_dir}"/*.path; do
-		echo "PATH=$(< ${pathfile}):\$PATH" >> "${export_file}"
-	done
-	echo "export PATH" >> "${export_file}"
-	echo "echo \$PATH" >> "${export_file}"
-	chmod a+x "${export_file}"
+	pkgdep_toolpath golangci_lint "${golangcidir}"
 }
 
 if [[ $INSTALL_DEV_TOOLS == true ]]; then
@@ -259,7 +295,12 @@ if [[ $INSTALL_LIBURING == true ]]; then
 	install_liburing
 fi
 
+if [[ $INSTALL_UADK == true ]]; then
+	install_uadk
+fi
+
 if [[ $INSTALL_GOLANG == true ]]; then
 	install_golang
-	install_protoc
+	[[ $(uname -s) == Linux ]] && install_protoc
+	install_golangci_lint
 fi

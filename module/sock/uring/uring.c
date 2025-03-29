@@ -7,7 +7,6 @@
 #include "spdk/config.h"
 
 #include <linux/errqueue.h>
-#include <sys/epoll.h>
 #include <liburing.h>
 
 #include "spdk/barrier.h"
@@ -17,10 +16,12 @@
 #include "spdk/sock.h"
 #include "spdk/string.h"
 #include "spdk/util.h"
+#include "spdk/net.h"
+#include "spdk/file.h"
 
 #include "spdk_internal/sock.h"
 #include "spdk_internal/assert.h"
-#include "../sock_kernel.h"
+#include "spdk/net.h"
 
 #define MAX_TMPBUF 1024
 #define PORTNUMLEN 32
@@ -87,9 +88,17 @@ struct spdk_uring_sock {
 	int					zcopy_send_flags;
 	int					connection_status;
 	int					placement_id;
+	uint8_t                                 reserved[4];
 	uint8_t					buf[SPDK_SOCK_CMG_INFO_SIZE];
 	TAILQ_ENTRY(spdk_uring_sock)		link;
+	char					interface_name[IFNAMSIZ];
 };
+/* 'struct cmsghdr' is mapped to the buffer 'buf', and while first element
+ * of this control message header has a size of 8 bytes, 'buf'
+ * must be 8-byte aligned.
+ */
+SPDK_STATIC_ASSERT(offsetof(struct spdk_uring_sock, buf) % 8 == 0,
+		   "Incorrect alignment: `buf` must be aligned to 8 bytes");
 
 TAILQ_HEAD(pending_recv_list, spdk_uring_sock);
 
@@ -224,70 +233,51 @@ uring_sock_getaddr(struct spdk_sock *_sock, char *saddr, int slen, uint16_t *spo
 		   char *caddr, int clen, uint16_t *cport)
 {
 	struct spdk_uring_sock *sock = __uring_sock(_sock);
-	struct sockaddr_storage sa;
-	socklen_t salen;
-	int rc;
 
 	assert(sock != NULL);
+	return spdk_net_getaddr(sock->fd, saddr, slen, sport, caddr, clen, cport);
+}
 
-	memset(&sa, 0, sizeof sa);
-	salen = sizeof sa;
-	rc = getsockname(sock->fd, (struct sockaddr *) &sa, &salen);
+static const char *
+uring_sock_get_interface_name(struct spdk_sock *_sock)
+{
+	struct spdk_uring_sock *sock = __uring_sock(_sock);
+	char saddr[64];
+	int rc;
+
+	rc = spdk_net_getaddr(sock->fd, saddr, sizeof(saddr), NULL, NULL, 0, NULL);
 	if (rc != 0) {
-		SPDK_ERRLOG("getsockname() failed (errno=%d)\n", errno);
-		return -1;
+		return NULL;
 	}
 
-	switch (sa.ss_family) {
-	case AF_UNIX:
-		/* Acceptable connection types that don't have IPs */
-		return 0;
-	case AF_INET:
-	case AF_INET6:
-		/* Code below will get IP addresses */
-		break;
-	default:
-		/* Unsupported socket family */
-		return -1;
-	}
-
-	rc = get_addr_str((struct sockaddr *)&sa, saddr, slen);
+	rc = spdk_net_get_interface_name(saddr, sock->interface_name,
+					 sizeof(sock->interface_name));
 	if (rc != 0) {
-		SPDK_ERRLOG("getnameinfo() failed (errno=%d)\n", errno);
-		return -1;
+		return NULL;
 	}
 
-	if (sport) {
-		if (sa.ss_family == AF_INET) {
-			*sport = ntohs(((struct sockaddr_in *) &sa)->sin_port);
-		} else if (sa.ss_family == AF_INET6) {
-			*sport = ntohs(((struct sockaddr_in6 *) &sa)->sin6_port);
-		}
+	return sock->interface_name;
+}
+
+static int32_t
+uring_sock_get_numa_id(struct spdk_sock *sock)
+{
+	const char *interface_name;
+	uint32_t numa_id;
+	int rc;
+
+	interface_name = uring_sock_get_interface_name(sock);
+	if (interface_name == NULL) {
+		return SPDK_ENV_NUMA_ID_ANY;
 	}
 
-	memset(&sa, 0, sizeof sa);
-	salen = sizeof sa;
-	rc = getpeername(sock->fd, (struct sockaddr *) &sa, &salen);
-	if (rc != 0) {
-		SPDK_ERRLOG("getpeername() failed (errno=%d)\n", errno);
-		return -1;
+	rc = spdk_read_sysfs_attribute_uint32(&numa_id,
+					      "/sys/class/net/%s/device/numa_node", interface_name);
+	if (rc == 0 && numa_id <= INT32_MAX) {
+		return (int32_t)numa_id;
+	} else {
+		return SPDK_ENV_NUMA_ID_ANY;
 	}
-
-	rc = get_addr_str((struct sockaddr *)&sa, caddr, clen);
-	if (rc != 0) {
-		SPDK_ERRLOG("getnameinfo() failed (errno=%d)\n", errno);
-		return -1;
-	}
-
-	if (cport) {
-		if (sa.ss_family == AF_INET) {
-			*cport = ntohs(((struct sockaddr_in *) &sa)->sin_port);
-		} else if (sa.ss_family == AF_INET6) {
-			*cport = ntohs(((struct sockaddr_in6 *) &sa)->sin6_port);
-		}
-	}
-
-	return 0;
 }
 
 enum uring_sock_create_type {
@@ -485,7 +475,9 @@ uring_sock_create(const char *ip, int port,
 	char buf[MAX_TMPBUF];
 	char portnum[PORTNUMLEN];
 	char *p;
-	struct addrinfo hints, *res, *res0;
+	const char *src_addr;
+	uint16_t src_port;
+	struct addrinfo hints, *res, *res0, *src_ai;
 	int fd, flag;
 	int val = 1;
 	int rc;
@@ -636,6 +628,37 @@ retry:
 
 			enable_zcopy_impl_opts = impl_opts.enable_zerocopy_send_server;
 		} else if (type == SPDK_SOCK_CREATE_CONNECT) {
+			src_addr = SPDK_GET_FIELD(opts, src_addr, NULL, opts->opts_size);
+			src_port = SPDK_GET_FIELD(opts, src_port, 0, opts->opts_size);
+			if (src_addr != NULL || src_port != 0) {
+				snprintf(portnum, sizeof(portnum), "%"PRIu16, src_port);
+				memset(&hints, 0, sizeof hints);
+				hints.ai_family = AF_UNSPEC;
+				hints.ai_socktype = SOCK_STREAM;
+				hints.ai_flags = AI_NUMERICSERV | AI_NUMERICHOST | AI_PASSIVE;
+				rc = getaddrinfo(src_addr, src_port > 0 ? portnum : NULL,
+						 &hints, &src_ai);
+				if (rc != 0 || src_ai == NULL) {
+					SPDK_ERRLOG("getaddrinfo() failed %s (%d)\n",
+						    rc != 0 ? gai_strerror(rc) : "", rc);
+					close(fd);
+					fd = -1;
+					break;
+				}
+				rc = bind(fd, src_ai->ai_addr, src_ai->ai_addrlen);
+				if (rc != 0) {
+					SPDK_ERRLOG("bind() failed errno %d (%s:%s)\n", errno,
+						    src_addr ? src_addr : "", portnum);
+					close(fd);
+					fd = -1;
+					freeaddrinfo(src_ai);
+					src_ai = NULL;
+					break;
+				}
+				freeaddrinfo(src_ai);
+				src_ai = NULL;
+			}
+
 			rc = connect(fd, res->ai_addr, res->ai_addrlen);
 			if (rc != 0) {
 				SPDK_ERRLOG("connect() failed, errno = %d\n", errno);
@@ -663,7 +686,7 @@ retry:
 		return NULL;
 	}
 
-	enable_zcopy_user_opts = opts->zcopy && !sock_is_loopback(fd);
+	enable_zcopy_user_opts = opts->zcopy && !spdk_net_is_loopback(fd);
 	sock = uring_sock_alloc(fd, &impl_opts, enable_zcopy_user_opts && enable_zcopy_impl_opts);
 	if (sock == NULL) {
 		SPDK_ERRLOG("sock allocation failed\n");
@@ -677,12 +700,22 @@ retry:
 static struct spdk_sock *
 uring_sock_listen(const char *ip, int port, struct spdk_sock_opts *opts)
 {
+	if (spdk_interrupt_mode_is_enabled()) {
+		SPDK_ERRLOG("Interrupt mode is not supported in the uring sock implementation.");
+		return NULL;
+	}
+
 	return uring_sock_create(ip, port, SPDK_SOCK_CREATE_LISTEN, opts);
 }
 
 static struct spdk_sock *
 uring_sock_connect(const char *ip, int port, struct spdk_sock_opts *opts)
 {
+	if (spdk_interrupt_mode_is_enabled()) {
+		SPDK_ERRLOG("Interrupt mode is not supported in the uring sock implementation.");
+		return NULL;
+	}
+
 	return uring_sock_create(ip, port, SPDK_SOCK_CREATE_CONNECT, opts);
 }
 
@@ -1286,6 +1319,23 @@ _sock_prep_cancel_task(struct spdk_sock *_sock, void *user_data)
 	task->status = SPDK_URING_SOCK_TASK_IN_PROCESS;
 }
 
+static void
+uring_sock_fail(struct spdk_uring_sock *sock, int status)
+{
+	struct spdk_uring_sock_group_impl *group = sock->group;
+	int rc;
+
+	sock->connection_status = status;
+	rc = spdk_sock_abort_requests(&sock->base);
+
+	/* The user needs to be notified that this socket is dead. */
+	if (rc == 0 && sock->base.cb_fn != NULL &&
+	    sock->pending_recv == false) {
+		sock->pending_recv = true;
+		TAILQ_INSERT_TAIL(&group->pending_recv, sock, link);
+	}
+}
+
 static int
 sock_uring_group_reap(struct spdk_uring_sock_group_impl *group, int max, int max_read_events,
 		      struct spdk_sock **socks)
@@ -1340,15 +1390,7 @@ sock_uring_group_reap(struct spdk_uring_sock_group_impl *group, int max, int max
 
 				_sock_prep_read(&sock->base);
 			} else if (spdk_unlikely(status <= 0)) {
-				sock->connection_status = status < 0 ? status : -ECONNRESET;
-				spdk_sock_abort_requests(&sock->base);
-
-				/* The user needs to be notified that this socket is dead. */
-				if (sock->base.cb_fn != NULL &&
-				    sock->pending_recv == false) {
-					sock->pending_recv = true;
-					TAILQ_INSERT_TAIL(&group->pending_recv, sock, link);
-				}
+				uring_sock_fail(sock, status < 0 ? status : -ECONNRESET);
 			} else {
 				struct spdk_uring_buf_tracker *tracker;
 
@@ -1381,15 +1423,7 @@ sock_uring_group_reap(struct spdk_uring_sock_group_impl *group, int max, int max
 			    status == -ECANCELED) {
 				continue;
 			} else if (spdk_unlikely(status) < 0) {
-				sock->connection_status = status;
-				spdk_sock_abort_requests(&sock->base);
-
-				/* The user needs to be notified that this socket is dead. */
-				if (sock->base.cb_fn != NULL &&
-				    sock->pending_recv == false) {
-					sock->pending_recv = true;
-					TAILQ_INSERT_TAIL(&group->pending_recv, sock, link);
-				}
+				uring_sock_fail(sock, status);
 			} else {
 				task->last_req = NULL;
 				task->iov_cnt = 0;
@@ -1406,15 +1440,7 @@ sock_uring_group_reap(struct spdk_uring_sock_group_impl *group, int max, int max
 			} else if (status == -ECANCELED) {
 				continue;
 			} else if (spdk_unlikely(status < 0)) {
-				spdk_sock_abort_requests(&sock->base);
-
-				/* The user needs to be notified that this socket is dead. */
-				if (sock->base.cb_fn != NULL &&
-				    sock->pending_recv == false) {
-					sock->pending_recv = true;
-					TAILQ_INSERT_TAIL(&group->pending_recv, sock, link);
-				}
-				break;
+				uring_sock_fail(sock, status);
 			} else {
 				_sock_check_zcopy(&sock->base, status);
 				_sock_prep_errqueue(&sock->base);
@@ -1705,8 +1731,8 @@ uring_sock_group_impl_create(void)
 	TAILQ_INIT(&group_impl->pending_recv);
 
 	if (uring_sock_group_impl_buf_pool_alloc(group_impl) < 0) {
-		SPDK_ERRLOG("Failed to create buffer ring. Your kernel is likely not new enough. "
-			    "Please switch to the POSIX sock implementation instead.\n");
+		SPDK_ERRLOG("Failed to create buffer ring."
+			    "uring sock implementation is likely not supported on this kernel.\n");
 		io_uring_queue_exit(&group_impl->uring);
 		free(group_impl);
 		return NULL;
@@ -2009,9 +2035,25 @@ uring_sock_flush(struct spdk_sock *_sock)
 	return rc;
 }
 
+static int
+uring_sock_group_impl_register_interrupt(struct spdk_sock_group_impl *_group, uint32_t events,
+		spdk_interrupt_fn fn, void *arg, const char *name)
+{
+	SPDK_ERRLOG("Interrupt mode is not supported in the uring sock implementation.");
+
+	return -ENOTSUP;
+}
+
+static void
+uring_sock_group_impl_unregister_interrupt(struct spdk_sock_group_impl *_group)
+{
+}
+
 static struct spdk_net_impl g_uring_net_impl = {
 	.name		= "uring",
 	.getaddr	= uring_sock_getaddr,
+	.get_interface_name = uring_sock_get_interface_name,
+	.get_numa_id	= uring_sock_get_numa_id,
 	.connect	= uring_sock_connect,
 	.listen		= uring_sock_listen,
 	.accept		= uring_sock_accept,
@@ -2033,9 +2075,23 @@ static struct spdk_net_impl g_uring_net_impl = {
 	.group_impl_add_sock	= uring_sock_group_impl_add_sock,
 	.group_impl_remove_sock	= uring_sock_group_impl_remove_sock,
 	.group_impl_poll	= uring_sock_group_impl_poll,
+	.group_impl_register_interrupt    = uring_sock_group_impl_register_interrupt,
+	.group_impl_unregister_interrupt  = uring_sock_group_impl_unregister_interrupt,
 	.group_impl_close	= uring_sock_group_impl_close,
 	.get_opts		= uring_sock_impl_get_opts,
 	.set_opts		= uring_sock_impl_set_opts,
 };
 
-SPDK_NET_IMPL_REGISTER(uring, &g_uring_net_impl, DEFAULT_SOCK_PRIORITY + 2);
+__attribute__((constructor)) static void
+net_impl_register_uring(void)
+{
+	struct spdk_sock_group_impl *impl;
+
+	/* Check if we can create a uring sock group before we register
+	 * it as a valid impl. */
+	impl = uring_sock_group_impl_create();
+	if (impl) {
+		uring_sock_group_impl_close(impl);
+		spdk_net_impl_register(&g_uring_net_impl);
+	}
+}

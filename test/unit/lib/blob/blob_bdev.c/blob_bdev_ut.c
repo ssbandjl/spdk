@@ -4,7 +4,7 @@
 
 #include "spdk/stdinc.h"
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 #include "common/lib/ut_multithread.c"
 
 static void ut_put_io_channel(struct spdk_io_channel *ch);
@@ -57,6 +57,7 @@ struct spdk_bdev {
 	char name[16];
 	uint64_t blockcnt;
 	uint32_t blocklen;
+	uint32_t phys_blocklen;
 	uint32_t open_cnt;
 	enum spdk_bdev_claim_type claim_type;
 	struct spdk_bdev_module *claim_module;
@@ -161,6 +162,12 @@ uint32_t
 spdk_bdev_get_block_size(const struct spdk_bdev *bdev)
 {
 	return bdev->blocklen;
+}
+
+uint32_t
+spdk_bdev_get_physical_block_size(const struct spdk_bdev *bdev)
+{
+	return bdev->phys_blocklen;
 }
 
 /* This is a simple approximation: it does not support shared claims */
@@ -541,7 +548,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("blob_bdev", NULL, NULL);
@@ -558,9 +564,7 @@ main(int argc, char **argv)
 	allocate_threads(2);
 	set_thread(0);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 
 	free_threads();

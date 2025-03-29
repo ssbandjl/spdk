@@ -59,7 +59,7 @@
 
 #define ACCEL_DPDK_CRYPTODEV_AESNI_MB_NUM_QP		64
 
-/* Common for suported devices. */
+/* Common for supported devices. */
 #define ACCEL_DPDK_CRYPTODEV_DEFAULT_NUM_XFORMS		2
 #define ACCEL_DPDK_CRYPTODEV_IV_OFFSET (sizeof(struct rte_crypto_op) + \
                 sizeof(struct rte_crypto_sym_op) + \
@@ -72,15 +72,15 @@
 #define ACCEL_DPDK_CRYPTODEV_QAT	"crypto_qat"
 #define ACCEL_DPDK_CRYPTODEV_QAT_ASYM	"crypto_qat_asym"
 #define ACCEL_DPDK_CRYPTODEV_MLX5	"mlx5_pci"
+#define ACCEL_DPDK_CRYPTODEV_UADK	"crypto_uadk"
 
 /* Supported ciphers */
 #define ACCEL_DPDK_CRYPTODEV_AES_CBC	"AES_CBC" /* QAT and ACCEL_DPDK_CRYPTODEV_AESNI_MB */
 #define ACCEL_DPDK_CRYPTODEV_AES_XTS	"AES_XTS" /* QAT and MLX5 */
 
 /* Specific to AES_CBC. */
-#define ACCEL_DPDK_CRYPTODEV_AES_CBC_KEY_LENGTH			16
-#define ACCEL_DPDK_CRYPTODEV_AES_XTS_128_BLOCK_KEY_LENGTH	16 /* AES-XTS-128 block key size. */
-#define ACCEL_DPDK_CRYPTODEV_AES_XTS_256_BLOCK_KEY_LENGTH	32 /* AES-XTS-256 block key size. */
+#define ACCEL_DPDK_CRYPTODEV_AES_CBC_128_KEY_SIZE			16
+#define ACCEL_DPDK_CRYPTODEV_AES_CBC_256_KEY_SIZE			32
 
 /* Limit of the max memory len attached to mbuf - rte_pktmbuf_attach_extbuf has uint16_t `buf_len`
  * parameter, we use closes aligned value 32768 for better performance */
@@ -100,6 +100,7 @@ enum accel_dpdk_cryptodev_driver_type {
 	ACCEL_DPDK_CRYPTODEV_DRIVER_AESNI_MB = 0,
 	ACCEL_DPDK_CRYPTODEV_DRIVER_QAT,
 	ACCEL_DPDK_CRYPTODEV_DRIVER_MLX5_PCI,
+	ACCEL_DPDK_CRYPTODEV_DRIVER_UADK,
 	ACCEL_DPDK_CRYPTODEV_DRIVER_LAST
 };
 
@@ -177,7 +178,8 @@ static uint8_t g_next_qat_index;
 static const char *g_driver_names[] = {
 	[ACCEL_DPDK_CRYPTODEV_DRIVER_AESNI_MB]	= ACCEL_DPDK_CRYPTODEV_AESNI_MB,
 	[ACCEL_DPDK_CRYPTODEV_DRIVER_QAT]	= ACCEL_DPDK_CRYPTODEV_QAT,
-	[ACCEL_DPDK_CRYPTODEV_DRIVER_MLX5_PCI]	= ACCEL_DPDK_CRYPTODEV_MLX5
+	[ACCEL_DPDK_CRYPTODEV_DRIVER_MLX5_PCI]	= ACCEL_DPDK_CRYPTODEV_MLX5,
+	[ACCEL_DPDK_CRYPTODEV_DRIVER_UADK]	= ACCEL_DPDK_CRYPTODEV_UADK
 };
 static const char *g_cipher_names[] = {
 	[SPDK_ACCEL_CIPHER_AES_CBC]	= ACCEL_DPDK_CRYPTODEV_AES_CBC,
@@ -212,6 +214,8 @@ accel_dpdk_cryptodev_set_driver(const char *driver_name)
 		g_dpdk_cryptodev_driver = ACCEL_DPDK_CRYPTODEV_DRIVER_AESNI_MB;
 	} else if (strcmp(driver_name, ACCEL_DPDK_CRYPTODEV_MLX5) == 0) {
 		g_dpdk_cryptodev_driver = ACCEL_DPDK_CRYPTODEV_DRIVER_MLX5_PCI;
+	} else if (strcmp(driver_name, ACCEL_DPDK_CRYPTODEV_UADK) == 0) {
+		g_dpdk_cryptodev_driver = ACCEL_DPDK_CRYPTODEV_DRIVER_UADK;
 	} else {
 		SPDK_ERRLOG("Unsupported driver %s\n", driver_name);
 		return -EINVAL;
@@ -395,7 +399,7 @@ accel_dpdk_cryptodev_mbuf_chain_remainder(struct accel_dpdk_cryptodev_task *task
 	rte_pktmbuf_attach_extbuf(chain_mbuf, addr, phys_addr, remainder, &g_shinfo);
 	rte_pktmbuf_append(chain_mbuf, remainder);
 
-	/* Chained buffer is released by rte_pktbuf_free_bulk() automagicaly. */
+	/* Chained buffer is released by rte_pktbuf_free_bulk() automagically. */
 	rte_pktmbuf_chain(orig_mbuf, chain_mbuf);
 	*_remainder = remainder;
 
@@ -653,9 +657,9 @@ accel_dpdk_cryptodev_process_task(struct accel_dpdk_cryptodev_io_channel *crypto
 	/* mlx5_pci binds keys to a specific device, we can't use a key with any device */
 	assert(dev == key_handle->device || priv->driver != ACCEL_DPDK_CRYPTODEV_DRIVER_MLX5_PCI);
 
-	if (task->base.op_code == ACCEL_OPC_ENCRYPT) {
+	if (task->base.op_code == SPDK_ACCEL_OPC_ENCRYPT) {
 		session = key_handle->session_encrypt;
-	} else if (task->base.op_code == ACCEL_OPC_DECRYPT) {
+	} else if (task->base.op_code == SPDK_ACCEL_OPC_DECRYPT) {
 		session = key_handle->session_decrypt;
 	} else {
 		return -EINVAL;
@@ -863,6 +867,12 @@ accel_dpdk_cryptodev_assign_device_qps(struct accel_dpdk_cryptodev_io_channel *c
 		num_drivers++;
 	}
 
+	device_qp = accel_dpdk_cryptodev_get_next_device_qpair(ACCEL_DPDK_CRYPTODEV_DRIVER_UADK);
+	if (device_qp) {
+		assert(crypto_ch->device_qp[ACCEL_DPDK_CRYPTODEV_DRIVER_UADK] == NULL);
+		crypto_ch->device_qp[ACCEL_DPDK_CRYPTODEV_DRIVER_UADK] = device_qp;
+		num_drivers++;
+	}
 	pthread_mutex_unlock(&g_device_lock);
 
 	return num_drivers;
@@ -919,11 +929,11 @@ accel_dpdk_cryptodev_ctx_size(void)
 }
 
 static bool
-accel_dpdk_cryptodev_supports_opcode(enum accel_opcode opc)
+accel_dpdk_cryptodev_supports_opcode(enum spdk_accel_opcode opc)
 {
 	switch (opc) {
-	case ACCEL_OPC_ENCRYPT:
-	case ACCEL_OPC_DECRYPT:
+	case SPDK_ACCEL_OPC_ENCRYPT:
+	case SPDK_ACCEL_OPC_DECRYPT:
 		return true;
 	default:
 		return false;
@@ -987,7 +997,7 @@ accel_dpdk_cryptodev_create(uint8_t index, uint16_t num_lcores)
 #endif
 	};
 	/* Setup queue pairs. */
-	struct rte_cryptodev_config conf = { .socket_id = SPDK_ENV_SOCKET_ID_ANY };
+	struct rte_cryptodev_config conf = { .socket_id = SPDK_ENV_NUMA_ID_ANY };
 	struct accel_dpdk_cryptodev_device *device;
 	uint8_t j, cdev_id, cdrv_id;
 	struct accel_dpdk_cryptodev_qp *dev_qp;
@@ -1016,6 +1026,9 @@ accel_dpdk_cryptodev_create(uint8_t index, uint16_t num_lcores)
 		/* ACCEL_DPDK_CRYPTODEV_QAT_ASYM devices are not supported at this time. */
 		rc = 0;
 		goto err;
+	} else if (strcmp(device->cdev_info.driver_name, ACCEL_DPDK_CRYPTODEV_UADK) == 0) {
+		device->qp_desc_nr = ACCEL_DPDK_CRYPTODEV_QP_DESCRIPTORS;
+		device->type = ACCEL_DPDK_CRYPTODEV_DRIVER_UADK;
 	} else {
 		SPDK_ERRLOG("Failed to start device %u. Invalid driver name \"%s\"\n",
 			    cdev_id, device->cdev_info.driver_name);
@@ -1024,7 +1037,7 @@ accel_dpdk_cryptodev_create(uint8_t index, uint16_t num_lcores)
 	}
 
 	/* Before going any further, make sure we have enough resources for this
-	 * device type to function.  We need a unique queue pair per core accross each
+	 * device type to function.  We need a unique queue pair per core across each
 	 * device type to remain lockless....
 	 */
 	if ((rte_cryptodev_device_count_by_driver(cdrv_id) *
@@ -1135,32 +1148,35 @@ accel_dpdk_cryptodev_init(void)
 	uint8_t cdev_count;
 	uint8_t cdev_id;
 	int i, rc;
+	const char *driver_name = g_driver_names[g_dpdk_cryptodev_driver];
 	struct accel_dpdk_cryptodev_device *device, *tmp_dev;
 	unsigned int max_sess_size = 0, sess_size;
 	uint16_t num_lcores = rte_lcore_count();
-	char aesni_args[32];
+	char init_args[32];
 
 	/* Only the first call via module init should init the crypto drivers. */
 	if (g_session_mp != NULL) {
 		return 0;
 	}
 
-	/* We always init ACCEL_DPDK_CRYPTODEV_AESNI_MB */
-	snprintf(aesni_args, sizeof(aesni_args), "max_nb_queue_pairs=%d",
-		 ACCEL_DPDK_CRYPTODEV_AESNI_MB_NUM_QP);
-	rc = rte_vdev_init(ACCEL_DPDK_CRYPTODEV_AESNI_MB, aesni_args);
-	if (rc) {
-		SPDK_NOTICELOG("Failed to create virtual PMD %s: error %d. "
-			       "Possibly %s is not supported by DPDK library. "
-			       "Keep going...\n", ACCEL_DPDK_CRYPTODEV_AESNI_MB, rc, ACCEL_DPDK_CRYPTODEV_AESNI_MB);
+	if (g_dpdk_cryptodev_driver == ACCEL_DPDK_CRYPTODEV_DRIVER_AESNI_MB ||
+	    g_dpdk_cryptodev_driver == ACCEL_DPDK_CRYPTODEV_DRIVER_UADK) {
+		snprintf(init_args, sizeof(init_args), "max_nb_queue_pairs=%d",
+			 ACCEL_DPDK_CRYPTODEV_AESNI_MB_NUM_QP);
+		rc = rte_vdev_init(driver_name, init_args);
+		if (rc) {
+			SPDK_NOTICELOG("Failed to create virtual PMD %s: error %d. "
+				       "Possibly %s is not supported by DPDK library. "
+				       "Keep going...\n", driver_name, rc, driver_name);
+		}
 	}
 
-	/* If we have no crypto devices, there's no reason to continue. */
+	/* If we have no crypto devices, report error to fallback on other modules. */
 	cdev_count = rte_cryptodev_count();
-	SPDK_NOTICELOG("Found crypto devices: %d\n", (int)cdev_count);
 	if (cdev_count == 0) {
-		return 0;
+		return -ENODEV;
 	}
+	SPDK_NOTICELOG("Found crypto devices: %d\n", (int)cdev_count);
 
 	g_mbuf_offset = rte_mbuf_dynfield_register(&rte_mbuf_dynfield_io_context);
 	if (g_mbuf_offset < 0) {
@@ -1203,7 +1219,7 @@ accel_dpdk_cryptodev_init(void)
 
 	g_mbuf_mp = rte_pktmbuf_pool_create("dpdk_crypto_mbuf_mp", ACCEL_DPDK_CRYPTODEV_NUM_MBUFS,
 					    ACCEL_DPDK_CRYPTODEV_POOL_CACHE_SIZE,
-					    0, 0, SPDK_ENV_SOCKET_ID_ANY);
+					    0, 0, SPDK_ENV_NUMA_ID_ANY);
 	if (g_mbuf_mp == NULL) {
 		SPDK_ERRLOG("Cannot create mbuf pool\n");
 		rc = -ENOMEM;
@@ -1269,7 +1285,11 @@ accel_dpdk_cryptodev_fini_cb(void *io_device)
 		TAILQ_REMOVE(&g_crypto_devices, device, link);
 		accel_dpdk_cryptodev_release(device);
 	}
-	rte_vdev_uninit(ACCEL_DPDK_CRYPTODEV_AESNI_MB);
+
+	if (g_dpdk_cryptodev_driver == ACCEL_DPDK_CRYPTODEV_DRIVER_AESNI_MB ||
+	    g_dpdk_cryptodev_driver == ACCEL_DPDK_CRYPTODEV_DRIVER_UADK) {
+		rte_vdev_uninit(g_driver_names[g_dpdk_cryptodev_driver]);
+	}
 
 	rte_mempool_free(g_crypto_op_mp);
 	rte_mempool_free(g_mbuf_mp);
@@ -1372,72 +1392,6 @@ accel_dpdk_cryptodev_key_handle_configure(struct spdk_accel_crypto_key *key,
 	return 0;
 }
 
-static int
-accel_dpdk_cryptodev_validate_parameters(enum accel_dpdk_cryptodev_driver_type driver,
-		struct spdk_accel_crypto_key *key)
-{
-	/* Check that all required parameters exist */
-	switch (key->cipher) {
-	case SPDK_ACCEL_CIPHER_AES_CBC:
-		if (!key->key || !key->key_size) {
-			SPDK_ERRLOG("ACCEL_DPDK_CRYPTODEV_AES_CBC requires a key\n");
-			return -1;
-		}
-		if (key->key2 || key->key2_size) {
-			SPDK_ERRLOG("ACCEL_DPDK_CRYPTODEV_AES_CBC doesn't use key2\n");
-			return -1;
-		}
-		break;
-	case SPDK_ACCEL_CIPHER_AES_XTS:
-		break;
-	default:
-		return -1;
-	}
-
-	/* Check driver/cipher combinations and key lengths */
-	switch (key->cipher) {
-	case SPDK_ACCEL_CIPHER_AES_CBC:
-		if (key->key_size != ACCEL_DPDK_CRYPTODEV_AES_CBC_KEY_LENGTH) {
-			SPDK_ERRLOG("Invalid key size %zu for cipher %s, should be %d\n", key->key_size,
-				    g_cipher_names[SPDK_ACCEL_CIPHER_AES_CBC], ACCEL_DPDK_CRYPTODEV_AES_CBC_KEY_LENGTH);
-			return -1;
-		}
-		break;
-	case SPDK_ACCEL_CIPHER_AES_XTS:
-		switch (driver) {
-		case ACCEL_DPDK_CRYPTODEV_DRIVER_MLX5_PCI:
-			if (key->key_size != ACCEL_DPDK_CRYPTODEV_AES_XTS_128_BLOCK_KEY_LENGTH &&
-			    key->key_size != ACCEL_DPDK_CRYPTODEV_AES_XTS_256_BLOCK_KEY_LENGTH) {
-				SPDK_ERRLOG("Invalid key size %zu for driver %s, cipher %s, supported %d or %d\n",
-					    key->key_size, g_driver_names[ACCEL_DPDK_CRYPTODEV_DRIVER_MLX5_PCI],
-					    g_cipher_names[SPDK_ACCEL_CIPHER_AES_XTS],
-					    ACCEL_DPDK_CRYPTODEV_AES_XTS_128_BLOCK_KEY_LENGTH,
-					    ACCEL_DPDK_CRYPTODEV_AES_XTS_256_BLOCK_KEY_LENGTH);
-				return -1;
-			}
-			break;
-		case ACCEL_DPDK_CRYPTODEV_DRIVER_QAT:
-		case ACCEL_DPDK_CRYPTODEV_DRIVER_AESNI_MB:
-			if (key->key_size != ACCEL_DPDK_CRYPTODEV_AES_XTS_128_BLOCK_KEY_LENGTH) {
-				SPDK_ERRLOG("Invalid key size %zu, supported %d\n", key->key_size,
-					    ACCEL_DPDK_CRYPTODEV_AES_XTS_128_BLOCK_KEY_LENGTH);
-				return -1;
-			}
-			break;
-		default:
-			SPDK_ERRLOG("Incorrect driver type %d\n", driver);
-			assert(0);
-			return -1;
-		}
-		break;
-	default:
-		assert(0);
-		return -1;
-	}
-
-	return 0;
-}
-
 static void
 accel_dpdk_cryptodev_key_deinit(struct spdk_accel_crypto_key *key)
 {
@@ -1460,14 +1414,28 @@ accel_dpdk_cryptodev_key_deinit(struct spdk_accel_crypto_key *key)
 }
 
 static bool
-accel_dpdk_cryptodev_supports_cipher(enum spdk_accel_cipher cipher)
+accel_dpdk_cryptodev_supports_cipher(enum spdk_accel_cipher cipher, size_t key_size)
 {
 	switch (g_dpdk_cryptodev_driver) {
 	case ACCEL_DPDK_CRYPTODEV_DRIVER_QAT:
+	case ACCEL_DPDK_CRYPTODEV_DRIVER_UADK:
 	case ACCEL_DPDK_CRYPTODEV_DRIVER_AESNI_MB:
-		return cipher == SPDK_ACCEL_CIPHER_AES_XTS || cipher == SPDK_ACCEL_CIPHER_AES_CBC;
+		switch (cipher) {
+		case SPDK_ACCEL_CIPHER_AES_XTS:
+			return key_size == SPDK_ACCEL_AES_XTS_128_KEY_SIZE;
+		case SPDK_ACCEL_CIPHER_AES_CBC:
+			return key_size == ACCEL_DPDK_CRYPTODEV_AES_CBC_128_KEY_SIZE ||
+			       key_size == ACCEL_DPDK_CRYPTODEV_AES_CBC_256_KEY_SIZE;
+		default:
+			return false;
+		}
 	case ACCEL_DPDK_CRYPTODEV_DRIVER_MLX5_PCI:
-		return cipher == SPDK_ACCEL_CIPHER_AES_XTS;
+		switch (cipher) {
+		case SPDK_ACCEL_CIPHER_AES_XTS:
+			return key_size == SPDK_ACCEL_AES_XTS_128_KEY_SIZE || key_size == SPDK_ACCEL_AES_XTS_256_KEY_SIZE;
+		default:
+			return false;
+		}
 	default:
 		return false;
 	}
@@ -1483,10 +1451,6 @@ accel_dpdk_cryptodev_key_init(struct spdk_accel_crypto_key *key)
 	int rc;
 
 	driver = g_dpdk_cryptodev_driver;
-
-	if (accel_dpdk_cryptodev_validate_parameters(driver, key)) {
-		return -EINVAL;
-	}
 
 	priv = calloc(1, sizeof(*priv));
 	if (!priv) {
@@ -1561,6 +1525,29 @@ accel_dpdk_cryptodev_write_config_json(struct spdk_json_write_ctx *w)
 	spdk_json_write_object_end(w);
 }
 
+static int
+accel_dpdk_cryptodev_get_operation_info(enum spdk_accel_opcode opcode,
+					const struct spdk_accel_operation_exec_ctx *ctx,
+					struct spdk_accel_opcode_info *info)
+{
+	if (!accel_dpdk_cryptodev_supports_opcode(opcode)) {
+		SPDK_ERRLOG("Received unexpected opcode: %d", opcode);
+		assert(false);
+		return -EINVAL;
+	}
+
+	switch (g_dpdk_cryptodev_driver) {
+	case ACCEL_DPDK_CRYPTODEV_DRIVER_QAT:
+		info->required_alignment = spdk_u32log2(ctx->block_size);
+		break;
+	default:
+		info->required_alignment = 0;
+		break;
+	}
+
+	return 0;
+}
+
 static struct spdk_accel_module_if g_accel_dpdk_cryptodev_module = {
 	.module_init		= accel_dpdk_cryptodev_init,
 	.module_fini		= accel_dpdk_cryptodev_fini,
@@ -1573,4 +1560,5 @@ static struct spdk_accel_module_if g_accel_dpdk_cryptodev_module = {
 	.crypto_key_init	= accel_dpdk_cryptodev_key_init,
 	.crypto_key_deinit	= accel_dpdk_cryptodev_key_deinit,
 	.crypto_supports_cipher	= accel_dpdk_cryptodev_supports_cipher,
+	.get_operation_info	= accel_dpdk_cryptodev_get_operation_info,
 };
