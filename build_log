@@ -1,0 +1,1702 @@
+root@hpc117:~/project/stor/spdk# git submodule update --init
+Submodule 'dpdk' (https://github.com/spdk/dpdk.git) registered for path 'dpdk'
+Submodule 'intel-ipsec-mb' (https://github.com/spdk/intel-ipsec-mb.git) registered for path 'intel-ipsec-mb'
+Submodule 'isa-l' (https://github.com/spdk/isa-l.git) registered for path 'isa-l'
+Submodule 'isa-l-crypto' (https://github.com/intel/isa-l_crypto) registered for path 'isa-l-crypto'
+Submodule 'libvfio-user' (https://github.com/nutanix/libvfio-user.git) registered for path 'libvfio-user'
+Submodule 'ocf' (https://github.com/Open-CAS/ocf.git) registered for path 'ocf'
+Submodule 'xnvme' (https://github.com/xnvme/xnvme.git) registered for path 'xnvme'
+Cloning into '/root/project/stor/spdk/dpdk'...
+Cloning into '/root/project/stor/spdk/intel-ipsec-mb'...
+Cloning into '/root/project/stor/spdk/isa-l'...
+Cloning into '/root/project/stor/spdk/isa-l-crypto'...
+Cloning into '/root/project/stor/spdk/libvfio-user'...
+Cloning into '/root/project/stor/spdk/ocf'...
+Cloning into '/root/project/stor/spdk/xnvme'...
+Submodule path 'dpdk': checked out '8d8db71763ccc7f092e3d66dbc8b32deaaf69fb4'
+Submodule path 'intel-ipsec-mb': checked out '935a3802883249ba3b12e566833994af7991e808'
+Submodule path 'isa-l': checked out '6f420b14a1e3e091bc9d15f508a54f82c007483c'
+Submodule path 'isa-l-crypto': checked out '9b7a2b842c9f4e54b8dc1c82899e5a5520c53301'
+Submodule path 'libvfio-user': checked out '5b82b9601780de6e0cf9c5b069fea4385107ab9b'
+Submodule path 'ocf': checked out '6ad1007e6fa47ff6468eaba0b304d77334c34d4a'
+Submodule path 'xnvme': checked out 'be52a634c139647b14940ba8a3ff254d6b1ca8c4'
+root@hpc117:~/project/stor/spdk# 
+
+
+root@hpc117:~/project/stor/spdk# ./scripts/pkgdep.sh
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+pkg-config is already the newest version (0.29.1-0ubuntu4).
+The following packages were automatically installed and are no longer required:
+  libevent-core-2.1-7 libevent-dev libevent-extra-2.1-7 libevent-openssl-2.1-7 libevent-pthreads-2.1-7 libpmix2 libpsm-infinipath1 libpsm2-2
+Use 'apt autoremove' to remove them.
+0 upgraded, 0 newly installed, 0 to remove and 224 not upgraded.
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+g++ is already the newest version (4:9.3.0-1ubuntu2).
+g++ set to manually installed.
+gcc is already the newest version (4:9.3.0-1ubuntu2).
+libaio-dev is already the newest version (0.3.112-5).
+make is already the newest version (4.2.1-1.2).
+python3 is already the newest version (3.8.2-0ubuntu2).
+python3 set to manually installed.
+python3-dev is already the newest version (3.8.2-0ubuntu2).
+libcmocka-dev is already the newest version (1.1.5-2).
+libcunit1-dev is already the newest version (2.1-3-dfsg-2build1).
+libfuse3-dev is already the newest version (3.9.0-2).
+patchelf is already the newest version (0.10-2build1).
+libjson-c-dev is already the newest version (0.13.1+dfsg-7ubuntu0.3).
+libncurses5-dev is already the newest version (6.2-0ubuntu2.1).
+libssl-dev is already the newest version (1.1.1f-1ubuntu2.24).
+uuid-dev is already the newest version (2.34-0.1ubuntu9.6).
+python3-pip is already the newest version (20.0.2-5ubuntu1.11).
+The following packages were automatically installed and are no longer required:
+  libevent-core-2.1-7 libevent-dev libevent-extra-2.1-7 libevent-openssl-2.1-7 libevent-pthreads-2.1-7 libpmix2 libpsm-infinipath1 libpsm2-2
+Use 'apt autoremove' to remove them.
+The following additional packages will be installed:
+  libiscsi7 libkeyutils1
+The following NEW packages will be installed:
+  libiscsi-dev libiscsi7 libkeyutils-dev libncursesw5-dev
+The following packages will be upgraded:
+  libkeyutils1 unzip
+2 upgraded, 4 newly installed, 0 to remove and 222 not upgraded.
+Need to get 366 kB of archives.
+After this operation, 746 kB of additional disk space will be used.
+Get:1 http://us.archive.ubuntu.com/ubuntu focal-updates/main amd64 libkeyutils1 amd64 1.6-6ubuntu1.1 [10.3 kB]
+Get:2 http://us.archive.ubuntu.com/ubuntu focal/main amd64 libiscsi7 amd64 1.18.0-2 [63.9 kB]
+Get:3 http://us.archive.ubuntu.com/ubuntu focal/main amd64 libiscsi-dev amd64 1.18.0-2 [80.4 kB]
+Get:4 http://us.archive.ubuntu.com/ubuntu focal-updates/main amd64 libkeyutils-dev amd64 1.6-6ubuntu1.1 [42.3 kB]
+Get:5 http://us.archive.ubuntu.com/ubuntu focal-updates/main amd64 libncursesw5-dev amd64 6.2-0ubuntu2.1 [988 B]
+Get:6 http://us.archive.ubuntu.com/ubuntu focal-updates/main amd64 unzip amd64 6.0-25ubuntu1.2 [169 kB]
+Fetched 366 kB in 14s (25.4 kB/s)
+(Reading database ... 239320 files and directories currently installed.)
+Preparing to unpack .../0-libkeyutils1_1.6-6ubuntu1.1_amd64.deb ...
+Unpacking libkeyutils1:amd64 (1.6-6ubuntu1.1) over (1.6-6ubuntu1) ...
+Selecting previously unselected package libiscsi7:amd64.
+Preparing to unpack .../1-libiscsi7_1.18.0-2_amd64.deb ...
+Unpacking libiscsi7:amd64 (1.18.0-2) ...
+Selecting previously unselected package libiscsi-dev:amd64.
+Preparing to unpack .../2-libiscsi-dev_1.18.0-2_amd64.deb ...
+Unpacking libiscsi-dev:amd64 (1.18.0-2) ...
+Selecting previously unselected package libkeyutils-dev:amd64.
+Preparing to unpack .../3-libkeyutils-dev_1.6-6ubuntu1.1_amd64.deb ...
+Unpacking libkeyutils-dev:amd64 (1.6-6ubuntu1.1) ...
+Selecting previously unselected package libncursesw5-dev:amd64.
+Preparing to unpack .../4-libncursesw5-dev_6.2-0ubuntu2.1_amd64.deb ...
+Unpacking libncursesw5-dev:amd64 (6.2-0ubuntu2.1) ...
+Preparing to unpack .../5-unzip_6.0-25ubuntu1.2_amd64.deb ...
+Unpacking unzip (6.0-25ubuntu1.2) over (6.0-25ubuntu1.1) ...
+Setting up libkeyutils1:amd64 (1.6-6ubuntu1.1) ...
+Setting up libncursesw5-dev:amd64 (6.2-0ubuntu2.1) ...
+Setting up unzip (6.0-25ubuntu1.2) ...
+Setting up libkeyutils-dev:amd64 (1.6-6ubuntu1.1) ...
+Setting up libiscsi7:amd64 (1.18.0-2) ...
+Setting up libiscsi-dev:amd64 (1.18.0-2) ...
+Processing triggers for man-db (2.9.1-1) ...
+Processing triggers for mime-support (3.64ubuntu1) ...
+Processing triggers for libc-bin (2.31-0ubuntu9.17) ...
+Collecting ninja
+  Downloading ninja-1.11.1.4-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.whl (422 kB)
+     |████████████████████████████████| 422 kB 571 kB/s 
+Installing collected packages: ninja
+Successfully installed ninja-1.11.1.4
+Requirement already satisfied: meson in /usr/lib/python3/dist-packages (0.53.2)
+Requirement already satisfied: pyelftools in /usr/local/lib/python3.8/dist-packages (0.31)
+Collecting ijson
+  Downloading ijson-3.3.0-cp38-cp38-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (115 kB)
+     |████████████████████████████████| 115 kB 550 kB/s 
+Installing collected packages: ijson
+Successfully installed ijson-3.3.0
+Collecting python-magic
+  Downloading python_magic-0.4.27-py2.py3-none-any.whl (13 kB)
+Installing collected packages: python-magic
+Successfully installed python-magic-0.4.27
+Collecting grpcio
+  Downloading grpcio-1.70.0-cp38-cp38-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (6.0 MB)
+     |████████████████████████████████| 6.0 MB 612 kB/s 
+Installing collected packages: grpcio
+Successfully installed grpcio-1.70.0
+Collecting grpcio-tools
+  Downloading grpcio_tools-1.70.0-cp38-cp38-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.5 MB)
+     |████████████████████████████████| 2.5 MB 594 kB/s 
+Requirement already satisfied: grpcio>=1.70.0 in /usr/local/lib/python3.8/dist-packages (from grpcio-tools) (1.70.0)
+Collecting protobuf<6.0dev,>=5.26.1
+  Downloading protobuf-5.29.4-cp38-abi3-manylinux2014_x86_64.whl (319 kB)
+     |████████████████████████████████| 319 kB 12.1 MB/s 
+Requirement already satisfied: setuptools in /usr/lib/python3/dist-packages (from grpcio-tools) (45.2.0)
+Installing collected packages: protobuf, grpcio-tools
+  Attempting uninstall: protobuf
+    Found existing installation: protobuf 3.6.1
+    Not uninstalling protobuf at /usr/lib/python3/dist-packages, outside environment /usr
+    Can't uninstall 'protobuf'. No files were found to uninstall.
+Successfully installed grpcio-tools-1.70.0 protobuf-5.29.4
+Requirement already satisfied: pyyaml in /usr/lib/python3/dist-packages (5.3.1)
+Collecting Jinja2
+  Downloading jinja2-3.1.6-py3-none-any.whl (134 kB)
+     |████████████████████████████████| 134 kB 676 kB/s 
+Collecting MarkupSafe>=2.0
+  Downloading MarkupSafe-2.1.5-cp38-cp38-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (26 kB)
+Installing collected packages: MarkupSafe, Jinja2
+  Attempting uninstall: MarkupSafe
+    Found existing installation: MarkupSafe 1.1.0
+    Not uninstalling markupsafe at /usr/lib/python3/dist-packages, outside environment /usr
+    Can't uninstall 'MarkupSafe'. No files were found to uninstall.
+Successfully installed Jinja2-3.1.6 MarkupSafe-2.1.5
+Collecting tabulate
+  Downloading tabulate-0.9.0-py3-none-any.whl (35 kB)
+Installing collected packages: tabulate
+Successfully installed tabulate-0.9.0
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+python3-pexpect is already the newest version (4.6.0-1build1).
+python3-pexpect set to manually installed.
+The following packages were automatically installed and are no longer required:
+  libevent-core-2.1-7 libevent-dev libevent-extra-2.1-7 libevent-openssl-2.1-7 libevent-pthreads-2.1-7 libpmix2 libpsm-infinipath1 libpsm2-2
+Use 'apt autoremove' to remove them.
+The following additional packages will be installed:
+  python3-pyparsing python3-urwid
+Suggested packages:
+  python-pyparsing-doc python-urwid-doc
+The following NEW packages will be installed:
+  python3-configshell-fb python3-pyparsing python3-urwid
+0 upgraded, 3 newly installed, 0 to remove and 222 not upgraded.
+Need to get 248 kB of archives.
+After this operation, 1,510 kB of additional disk space will be used.
+Get:1 http://us.archive.ubuntu.com/ubuntu focal/main amd64 python3-pyparsing all 2.4.6-1 [61.3 kB]
+Get:2 http://us.archive.ubuntu.com/ubuntu focal/universe amd64 python3-urwid amd64 2.0.1-3 [159 kB]
+Get:3 http://us.archive.ubuntu.com/ubuntu focal/universe amd64 python3-configshell-fb all 1:1.1.27-0ubuntu1 [28.0 kB]
+Fetched 248 kB in 2s (106 kB/s)                  
+Selecting previously unselected package python3-pyparsing.
+(Reading database ... 239381 files and directories currently installed.)
+Preparing to unpack .../python3-pyparsing_2.4.6-1_all.deb ...
+Unpacking python3-pyparsing (2.4.6-1) ...
+Selecting previously unselected package python3-urwid.
+Preparing to unpack .../python3-urwid_2.0.1-3_amd64.deb ...
+Unpacking python3-urwid (2.0.1-3) ...
+Selecting previously unselected package python3-configshell-fb.
+Preparing to unpack .../python3-configshell-fb_1%3a1.1.27-0ubuntu1_all.deb ...
+Unpacking python3-configshell-fb (1:1.1.27-0ubuntu1) ...
+Setting up python3-urwid (2.0.1-3) ...
+/usr/lib/python3/dist-packages/urwid/tests/test_canvas.py:141: SyntaxWarning: 'str' object is not callable; perhaps you missed a comma?
+  assert result == expected, "got: %r expected: %r" (result, expected)
+/usr/lib/python3/dist-packages/urwid/tests/test_canvas.py:145: SyntaxWarning: 'str' object is not callable; perhaps you missed a comma?
+  assert result == expected, "got: %r expected: %r" (result, expected)
+/usr/lib/python3/dist-packages/urwid/tests/test_canvas.py:149: SyntaxWarning: 'str' object is not callable; perhaps you missed a comma?
+  assert result == expected, "got: %r expected: %r" (result, expected)
+/usr/lib/python3/dist-packages/urwid/tests/test_canvas.py:232: SyntaxWarning: 'str' object is not callable; perhaps you missed a comma?
+  assert result == expected, "got: %r expected: %r" (result, expected)
+Setting up python3-pyparsing (2.4.6-1) ...
+Setting up python3-configshell-fb (1:1.1.27-0ubuntu1) ...
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+libnuma-dev is already the newest version (2.0.12-1).
+The following packages were automatically installed and are no longer required:
+  libevent-core-2.1-7 libevent-dev libevent-extra-2.1-7 libevent-openssl-2.1-7 libevent-pthreads-2.1-7 libpmix2 libpsm-infinipath1 libpsm2-2
+Use 'apt autoremove' to remove them.
+The following NEW packages will be installed:
+  nasm
+0 upgraded, 1 newly installed, 0 to remove and 222 not upgraded.
+Need to get 362 kB of archives.
+After this operation, 3,374 kB of additional disk space will be used.
+Get:1 http://us.archive.ubuntu.com/ubuntu focal/universe amd64 nasm amd64 2.14.02-1 [362 kB]
+Fetched 362 kB in 2s (169 kB/s)                                    
+Selecting previously unselected package nasm.
+(Reading database ... 239463 files and directories currently installed.)
+Preparing to unpack .../nasm_2.14.02-1_amd64.deb ...
+Unpacking nasm (2.14.02-1) ...
+Setting up nasm (2.14.02-1) ...
+Processing triggers for man-db (2.9.1-1) ...
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+autoconf is already the newest version (2.69-11.1).
+automake is already the newest version (1:1.16.1-4ubuntu6).
+automake set to manually installed.
+libtool is already the newest version (2.4.6-14).
+libtool set to manually installed.
+The following packages were automatically installed and are no longer required:
+  libevent-core-2.1-7 libevent-dev libevent-extra-2.1-7 libevent-openssl-2.1-7 libevent-pthreads-2.1-7 libpmix2 libpsm-infinipath1 libpsm2-2
+Use 'apt autoremove' to remove them.
+The following NEW packages will be installed:
+  help2man
+0 upgraded, 1 newly installed, 0 to remove and 222 not upgraded.
+Need to get 173 kB of archives.
+After this operation, 509 kB of additional disk space will be used.
+Get:1 http://us.archive.ubuntu.com/ubuntu focal/universe amd64 help2man amd64 1.47.13 [173 kB]
+Fetched 173 kB in 2s (91.6 kB/s)                                   
+Selecting previously unselected package help2man.
+(Reading database ... 239488 files and directories currently installed.)
+Preparing to unpack .../help2man_1.47.13_amd64.deb ...
+Unpacking help2man (1.47.13) ...
+Setting up help2man (1.47.13) ...
+Processing triggers for man-db (2.9.1-1) ...
+Processing triggers for install-info (6.7.0.dfsg.2-5) ...
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+The following packages were automatically installed and are no longer required:
+  libevent-core-2.1-7 libevent-dev libevent-extra-2.1-7 libevent-openssl-2.1-7 libevent-pthreads-2.1-7 libpmix2 libpsm-infinipath1 libpsm2-2
+Use 'apt autoremove' to remove them.
+The following NEW packages will be installed:
+  systemtap-sdt-dev
+0 upgraded, 1 newly installed, 0 to remove and 222 not upgraded.
+Need to get 16.4 kB of archives.
+After this operation, 75.8 kB of additional disk space will be used.
+Get:1 http://us.archive.ubuntu.com/ubuntu focal-updates/universe amd64 systemtap-sdt-dev amd64 4.2-3ubuntu0.1 [16.4 kB]
+Fetched 16.4 kB in 1s (20.2 kB/s)            
+Selecting previously unselected package systemtap-sdt-dev.
+(Reading database ... 239564 files and directories currently installed.)
+Preparing to unpack .../systemtap-sdt-dev_4.2-3ubuntu0.1_amd64.deb ...
+Unpacking systemtap-sdt-dev (4.2-3ubuntu0.1) ...
+Setting up systemtap-sdt-dev (4.2-3ubuntu0.1) ...
+Processing triggers for man-db (2.9.1-1) ...
+root@hpc117:~/project/stor/spdk# 
+
+
+
+root@hpc117:~/project/stor/spdk# scripts/pkgdep.sh --rdma
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+pkg-config is already the newest version (0.29.1-0ubuntu4).
+The following packages were automatically installed and are no longer required:
+  libevent-core-2.1-7 libevent-dev libevent-extra-2.1-7 libevent-openssl-2.1-7 libevent-pthreads-2.1-7 libpmix2 libpsm-infinipath1 libpsm2-2
+Use 'apt autoremove' to remove them.
+0 upgraded, 0 newly installed, 0 to remove and 222 not upgraded.
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+g++ is already the newest version (4:9.3.0-1ubuntu2).
+gcc is already the newest version (4:9.3.0-1ubuntu2).
+libaio-dev is already the newest version (0.3.112-5).
+libiscsi-dev is already the newest version (1.18.0-2).
+make is already the newest version (4.2.1-1.2).
+python3 is already the newest version (3.8.2-0ubuntu2).
+python3-dev is already the newest version (3.8.2-0ubuntu2).
+libcmocka-dev is already the newest version (1.1.5-2).
+libcunit1-dev is already the newest version (2.1-3-dfsg-2build1).
+libfuse3-dev is already the newest version (3.9.0-2).
+patchelf is already the newest version (0.10-2build1).
+libjson-c-dev is already the newest version (0.13.1+dfsg-7ubuntu0.3).
+libkeyutils-dev is already the newest version (1.6-6ubuntu1.1).
+libncurses5-dev is already the newest version (6.2-0ubuntu2.1).
+libncursesw5-dev is already the newest version (6.2-0ubuntu2.1).
+libssl-dev is already the newest version (1.1.1f-1ubuntu2.24).
+unzip is already the newest version (6.0-25ubuntu1.2).
+unzip set to manually installed.
+uuid-dev is already the newest version (2.34-0.1ubuntu9.6).
+python3-pip is already the newest version (20.0.2-5ubuntu1.11).
+The following packages were automatically installed and are no longer required:
+  libevent-core-2.1-7 libevent-dev libevent-extra-2.1-7 libevent-openssl-2.1-7 libevent-pthreads-2.1-7 libpmix2 libpsm-infinipath1 libpsm2-2
+Use 'apt autoremove' to remove them.
+0 upgraded, 0 newly installed, 0 to remove and 222 not upgraded.
+Requirement already satisfied: ninja in /usr/local/lib/python3.8/dist-packages (1.11.1.4)
+Requirement already satisfied: meson in /usr/lib/python3/dist-packages (0.53.2)
+Requirement already satisfied: pyelftools in /usr/local/lib/python3.8/dist-packages (0.31)
+Requirement already satisfied: ijson in /usr/local/lib/python3.8/dist-packages (3.3.0)
+Requirement already satisfied: python-magic in /usr/local/lib/python3.8/dist-packages (0.4.27)
+Requirement already satisfied: grpcio in /usr/local/lib/python3.8/dist-packages (1.70.0)
+Requirement already satisfied: grpcio-tools in /usr/local/lib/python3.8/dist-packages (1.70.0)
+Requirement already satisfied: protobuf<6.0dev,>=5.26.1 in /usr/local/lib/python3.8/dist-packages (from grpcio-tools) (5.29.4)
+Requirement already satisfied: setuptools in /usr/lib/python3/dist-packages (from grpcio-tools) (45.2.0)
+Requirement already satisfied: grpcio>=1.70.0 in /usr/local/lib/python3.8/dist-packages (from grpcio-tools) (1.70.0)
+Requirement already satisfied: pyyaml in /usr/lib/python3/dist-packages (5.3.1)
+Requirement already satisfied: Jinja2 in /usr/local/lib/python3.8/dist-packages (3.1.6)
+Requirement already satisfied: MarkupSafe>=2.0 in /usr/local/lib/python3.8/dist-packages (from Jinja2) (2.1.5)
+Requirement already satisfied: tabulate in /usr/local/lib/python3.8/dist-packages (0.9.0)
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+python3-pexpect is already the newest version (4.6.0-1build1).
+python3-configshell-fb is already the newest version (1:1.1.27-0ubuntu1).
+The following packages were automatically installed and are no longer required:
+  libevent-core-2.1-7 libevent-dev libevent-extra-2.1-7 libevent-openssl-2.1-7 libevent-pthreads-2.1-7 libpmix2 libpsm-infinipath1 libpsm2-2
+Use 'apt autoremove' to remove them.
+0 upgraded, 0 newly installed, 0 to remove and 222 not upgraded.
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+libnuma-dev is already the newest version (2.0.12-1).
+nasm is already the newest version (2.14.02-1).
+The following packages were automatically installed and are no longer required:
+  libevent-core-2.1-7 libevent-dev libevent-extra-2.1-7 libevent-openssl-2.1-7 libevent-pthreads-2.1-7 libpmix2 libpsm-infinipath1 libpsm2-2
+Use 'apt autoremove' to remove them.
+0 upgraded, 0 newly installed, 0 to remove and 222 not upgraded.
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+autoconf is already the newest version (2.69-11.1).
+automake is already the newest version (1:1.16.1-4ubuntu6).
+libtool is already the newest version (2.4.6-14).
+help2man is already the newest version (1.47.13).
+The following packages were automatically installed and are no longer required:
+  libevent-core-2.1-7 libevent-dev libevent-extra-2.1-7 libevent-openssl-2.1-7 libevent-pthreads-2.1-7 libpmix2 libpsm-infinipath1 libpsm2-2
+Use 'apt autoremove' to remove them.
+0 upgraded, 0 newly installed, 0 to remove and 222 not upgraded.
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+systemtap-sdt-dev is already the newest version (4.2-3ubuntu0.1).
+The following packages were automatically installed and are no longer required:
+  libevent-core-2.1-7 libevent-dev libevent-extra-2.1-7 libevent-openssl-2.1-7 libevent-pthreads-2.1-7 libpmix2 libpsm-infinipath1 libpsm2-2
+Use 'apt autoremove' to remove them.
+0 upgraded, 0 newly installed, 0 to remove and 222 not upgraded.
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+libibverbs-dev is already the newest version (2410mlnx54-1.2410068).
+librdmacm-dev is already the newest version (2410mlnx54-1.2410068).
+The following packages were automatically installed and are no longer required:
+  libevent-core-2.1-7 libevent-dev libevent-extra-2.1-7 libevent-openssl-2.1-7 libevent-pthreads-2.1-7 libpmix2 libpsm-infinipath1 libpsm2-2
+Use 'apt autoremove' to remove them.
+0 upgraded, 0 newly installed, 0 to remove and 222 not upgraded.
+
+
+
+root@hpc117:~/project/stor/spdk# apt install meson
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+meson is already the newest version (0.53.2-2ubuntu2).
+0 upgraded, 0 newly installed, 0 to remove and 222 not upgraded.
+root@hpc117:~/project/stor/spdk# pip3 sudo apt install python3-pip
+ERROR: unknown command "sudo"
+root@hpc117:~/project/stor/spdk# apt install python3-pip
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+python3-pip is already the newest version (20.0.2-5ubuntu1.11).
+0 upgraded, 0 newly installed, 0 to remove and 222 not upgraded.
+root@hpc117:~/project/stor/spdk# pip3 install meson==0.63
+Collecting meson==0.63
+  Downloading meson-0.63.0-py3-none-any.whl (884 kB)
+     |████████████████████████████████| 884 kB 580 kB/s 
+Installing collected packages: meson
+  Attempting uninstall: meson
+    Found existing installation: meson 0.53.2
+    Not uninstalling meson at /usr/lib/python3/dist-packages, outside environment /usr
+    Can't uninstall 'meson'. No files were found to uninstall.
+Successfully installed meson-0.63.0
+root@hpc117:~/project/stor/spdk# meson -v
+0.63.0
+root@hpc117:~/project/stor/spdk# make -j64
+make[1]: Nothing to be done for 'all'.
+
+ERROR: Coredata file '/root/project/stor/spdk/dpdk/build-tmp/meson-private/coredata.dat' references functions or classes that don't exist. This probably means that it was generated with an old version of meson.
+make[1]: *** [Makefile:209: all] Error 1
+make: *** [/root/project/stor/spdk/mk/spdk.subdirs.mk:16: dpdkbuild] Error 2
+root@hpc117:~/project/stor/spdk# rm -rf build
+root@hpc117:~/project/stor/spdk# ./configure --enable-debug --with-rdma
+Using default SPDK env in /root/project/stor/spdk/lib/env_dpdk
+Using default DPDK in /root/project/stor/spdk/dpdk/build
+Using 'verbs' RDMA provider
+Configuring ISA-L (logfile: /root/project/stor/spdk/.spdk-isal.log)...done.
+Configuring ISA-L-crypto (logfile: /root/project/stor/spdk/.spdk-isal-crypto.log)...done.
+Creating mk/config.mk...done.
+Creating mk/cc.flags.mk...done.
+Type 'make' to build.
+root@hpc117:~/project/stor/spdk# make -j64
+make[1]: Nothing to be done for 'all'.
+The Meson build system
+Version: 0.63.0
+Source dir: /root/project/stor/spdk/dpdk
+Build dir: /root/project/stor/spdk/dpdk/build-tmp
+Build type: native build
+Program cat found: YES (/usr/bin/cat)
+Project name: DPDK
+Project version: 24.03.0
+C compiler for the host machine: cc (gcc 9.4.0 "cc (Ubuntu 9.4.0-1ubuntu1~20.04.2) 9.4.0")
+C linker for the host machine: cc ld.bfd 2.34
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Message: ## Building in Developer Mode ##
+Program pkg-config found: YES (/usr/bin/pkg-config)
+Program check-symbols.sh found: YES (/root/project/stor/spdk/dpdk/buildtools/check-symbols.sh)
+Program options-ibverbs-static.sh found: YES (/root/project/stor/spdk/dpdk/buildtools/options-ibverbs-static.sh)
+Program python3 found: YES (/usr/bin/python3)
+Program cat found: YES (/usr/bin/cat)
+Compiler for C supports arguments -march=native: YES 
+Checking for size of "void *" : 8
+Checking for size of "void *" : 8
+Compiler for C supports link arguments -Wl,--undefined-version: NO 
+Library m found: YES
+Library numa found: YES
+Has header "numaif.h" : YES 
+Library fdt found: NO
+Library execinfo found: NO
+Has header "execinfo.h" : YES 
+Found pkg-config: /usr/bin/pkg-config (0.29.1)
+Run-time dependency libarchive found: NO (tried pkgconfig)
+Run-time dependency libbsd found: NO (tried pkgconfig)
+Run-time dependency jansson found: NO (tried pkgconfig)
+Run-time dependency openssl found: YES 1.1.1f
+Run-time dependency libpcap found: YES 1.10.5
+Has header "pcap.h" with dependency libpcap: YES 
+Compiler for C supports arguments -Wcast-qual: YES 
+Compiler for C supports arguments -Wdeprecated: YES 
+Compiler for C supports arguments -Wformat: YES 
+Compiler for C supports arguments -Wformat-nonliteral: YES 
+Compiler for C supports arguments -Wformat-security: YES 
+Compiler for C supports arguments -Wmissing-declarations: YES 
+Compiler for C supports arguments -Wmissing-prototypes: YES 
+Compiler for C supports arguments -Wnested-externs: YES 
+Compiler for C supports arguments -Wold-style-definition: YES 
+Compiler for C supports arguments -Wpointer-arith: YES 
+Compiler for C supports arguments -Wsign-compare: YES 
+Compiler for C supports arguments -Wstrict-prototypes: YES 
+Compiler for C supports arguments -Wundef: YES 
+Compiler for C supports arguments -Wwrite-strings: YES 
+Compiler for C supports arguments -Wno-address-of-packed-member: YES 
+Compiler for C supports arguments -Wno-packed-not-aligned: YES 
+Compiler for C supports arguments -Wno-missing-field-initializers: YES 
+Program objdump found: YES (/usr/bin/objdump)
+Compiler for C supports arguments -mavx512f: YES 
+Checking if "AVX512 checking" compiles: YES 
+Fetching value of define "__SSE4_2__" : 1 
+Fetching value of define "__AES__" : 1 
+Fetching value of define "__AVX__" : 1 
+Fetching value of define "__AVX2__" : 1 
+Fetching value of define "__AVX512BW__" :  
+Fetching value of define "__AVX512CD__" :  
+Fetching value of define "__AVX512DQ__" :  
+Fetching value of define "__AVX512F__" :  
+Fetching value of define "__AVX512VL__" :  
+Fetching value of define "__PCLMUL__" : 1 
+Fetching value of define "__RDRND__" : 1 
+Fetching value of define "__RDSEED__" :  
+Fetching value of define "__VPCLMULQDQ__" :  
+Fetching value of define "__znver1__" :  
+Fetching value of define "__znver2__" :  
+Fetching value of define "__znver3__" :  
+Fetching value of define "__znver4__" :  
+Compiler for C supports arguments -Wno-format-truncation: YES 
+Message: lib/log: Defining dependency "log"
+Message: lib/kvargs: Defining dependency "kvargs"
+Message: lib/telemetry: Defining dependency "telemetry"
+Checking for function "getentropy" : NO 
+Message: lib/eal: Defining dependency "eal"
+Message: lib/ring: Defining dependency "ring"
+Message: lib/rcu: Defining dependency "rcu"
+Message: lib/mempool: Defining dependency "mempool"
+Message: lib/mbuf: Defining dependency "mbuf"
+Fetching value of define "__PCLMUL__" : 1 (cached)
+Fetching value of define "__AVX512F__" :  (cached)
+Compiler for C supports arguments -mpclmul: YES 
+Compiler for C supports arguments -maes: YES 
+Compiler for C supports arguments -mavx512f: YES (cached)
+Compiler for C supports arguments -mavx512bw: YES 
+Compiler for C supports arguments -mavx512dq: YES 
+Compiler for C supports arguments -mavx512vl: YES 
+Compiler for C supports arguments -mvpclmulqdq: YES 
+Compiler for C supports arguments -mavx2: YES 
+Compiler for C supports arguments -mavx: YES 
+Message: lib/net: Defining dependency "net"
+Message: lib/meter: Defining dependency "meter"
+Message: lib/ethdev: Defining dependency "ethdev"
+Message: lib/pci: Defining dependency "pci"
+Message: lib/cmdline: Defining dependency "cmdline"
+Message: lib/hash: Defining dependency "hash"
+Message: lib/timer: Defining dependency "timer"
+Message: lib/compressdev: Defining dependency "compressdev"
+Message: lib/cryptodev: Defining dependency "cryptodev"
+Message: lib/dmadev: Defining dependency "dmadev"
+Compiler for C supports arguments -Wno-cast-qual: YES 
+Message: lib/power: Defining dependency "power"
+Message: lib/reorder: Defining dependency "reorder"
+Message: lib/security: Defining dependency "security"
+Has header "linux/userfaultfd.h" : YES 
+Has header "linux/vduse.h" : NO 
+Message: lib/vhost: Defining dependency "vhost"
+Compiler for C supports arguments -Wno-format-truncation: YES (cached)
+Message: drivers/bus/pci: Defining dependency "bus_pci"
+Message: drivers/bus/vdev: Defining dependency "bus_vdev"
+Message: drivers/mempool/ring: Defining dependency "mempool_ring"
+Message: Disabling raw/* drivers: missing internal dependency "rawdev"
+Message: Disabling regex/* drivers: missing internal dependency "regexdev"
+Message: Disabling ml/* drivers: missing internal dependency "mldev"
+Message: Disabling event/* drivers: missing internal dependency "eventdev"
+Message: Disabling baseband/* drivers: missing internal dependency "bbdev"
+Message: Disabling gpu/* drivers: missing internal dependency "gpudev"
+Program doxygen found: NO
+Program sphinx-build found: NO
+Configuring rte_build_config.h using configuration
+Message: 
+=================
+Applications Enabled
+=================
+
+apps:
+
+
+Message: 
+=================
+Libraries Enabled
+=================
+
+libs:
+        log, kvargs, telemetry, eal, ring, rcu, mempool, mbuf, 
+        net, meter, ethdev, pci, cmdline, hash, timer, compressdev, 
+        cryptodev, dmadev, power, reorder, security, vhost, 
+
+Message: 
+===============
+Drivers Enabled
+===============
+
+common:
+
+bus:
+        pci, vdev, 
+mempool:
+        ring, 
+dma:
+
+net:
+
+crypto:
+
+compress:
+
+vdpa:
+
+
+Message: 
+=================
+Content Skipped
+=================
+
+apps:
+        dumpcap:        explicitly disabled via build config
+        graph:  explicitly disabled via build config
+        pdump:  explicitly disabled via build config
+        proc-info:      explicitly disabled via build config
+        test-acl:       explicitly disabled via build config
+        test-bbdev:     explicitly disabled via build config
+        test-cmdline:   explicitly disabled via build config
+        test-compress-perf:     explicitly disabled via build config
+        test-crypto-perf:       explicitly disabled via build config
+        test-dma-perf:  explicitly disabled via build config
+        test-eventdev:  explicitly disabled via build config
+        test-fib:       explicitly disabled via build config
+        test-flow-perf: explicitly disabled via build config
+        test-gpudev:    explicitly disabled via build config
+        test-mldev:     explicitly disabled via build config
+        test-pipeline:  explicitly disabled via build config
+        test-pmd:       explicitly disabled via build config
+        test-regex:     explicitly disabled via build config
+        test-sad:       explicitly disabled via build config
+        test-security-perf:     explicitly disabled via build config
+
+libs:
+        argparse:       explicitly disabled via build config
+        metrics:        explicitly disabled via build config
+        acl:    explicitly disabled via build config
+        bbdev:  explicitly disabled via build config
+        bitratestats:   explicitly disabled via build config
+        bpf:    explicitly disabled via build config
+        cfgfile:        explicitly disabled via build config
+        distributor:    explicitly disabled via build config
+        efd:    explicitly disabled via build config
+        eventdev:       explicitly disabled via build config
+        dispatcher:     explicitly disabled via build config
+        gpudev: explicitly disabled via build config
+        gro:    explicitly disabled via build config
+        gso:    explicitly disabled via build config
+        ip_frag:        explicitly disabled via build config
+        jobstats:       explicitly disabled via build config
+        latencystats:   explicitly disabled via build config
+        lpm:    explicitly disabled via build config
+        member: explicitly disabled via build config
+        pcapng: explicitly disabled via build config
+        rawdev: explicitly disabled via build config
+        regexdev:       explicitly disabled via build config
+        mldev:  explicitly disabled via build config
+        rib:    explicitly disabled via build config
+        sched:  explicitly disabled via build config
+        stack:  explicitly disabled via build config
+        ipsec:  explicitly disabled via build config
+        pdcp:   explicitly disabled via build config
+        fib:    explicitly disabled via build config
+        port:   explicitly disabled via build config
+        pdump:  explicitly disabled via build config
+        table:  explicitly disabled via build config
+        pipeline:       explicitly disabled via build config
+        graph:  explicitly disabled via build config
+        node:   explicitly disabled via build config
+
+drivers:
+        common/cpt:     not in enabled drivers build config
+        common/dpaax:   not in enabled drivers build config
+        common/iavf:    not in enabled drivers build config
+        common/idpf:    not in enabled drivers build config
+        common/ionic:   not in enabled drivers build config
+        common/mvep:    not in enabled drivers build config
+        common/octeontx:        not in enabled drivers build config
+        bus/auxiliary:  not in enabled drivers build config
+        bus/cdx:        not in enabled drivers build config
+        bus/dpaa:       not in enabled drivers build config
+        bus/fslmc:      not in enabled drivers build config
+        bus/ifpga:      not in enabled drivers build config
+        bus/platform:   not in enabled drivers build config
+        bus/uacce:      not in enabled drivers build config
+        bus/vmbus:      not in enabled drivers build config
+        common/cnxk:    not in enabled drivers build config
+        common/mlx5:    not in enabled drivers build config
+        common/nfp:     not in enabled drivers build config
+        common/nitrox:  not in enabled drivers build config
+        common/qat:     not in enabled drivers build config
+        common/sfc_efx: not in enabled drivers build config
+        mempool/bucket: not in enabled drivers build config
+        mempool/cnxk:   not in enabled drivers build config
+        mempool/dpaa:   not in enabled drivers build config
+        mempool/dpaa2:  not in enabled drivers build config
+        mempool/octeontx:       not in enabled drivers build config
+        mempool/stack:  not in enabled drivers build config
+        dma/cnxk:       not in enabled drivers build config
+        dma/dpaa:       not in enabled drivers build config
+        dma/dpaa2:      not in enabled drivers build config
+        dma/hisilicon:  not in enabled drivers build config
+        dma/idxd:       not in enabled drivers build config
+        dma/ioat:       not in enabled drivers build config
+        dma/skeleton:   not in enabled drivers build config
+        net/af_packet:  not in enabled drivers build config
+        net/af_xdp:     not in enabled drivers build config
+        net/ark:        not in enabled drivers build config
+        net/atlantic:   not in enabled drivers build config
+        net/avp:        not in enabled drivers build config
+        net/axgbe:      not in enabled drivers build config
+        net/bnx2x:      not in enabled drivers build config
+        net/bnxt:       not in enabled drivers build config
+        net/bonding:    not in enabled drivers build config
+        net/cnxk:       not in enabled drivers build config
+        net/cpfl:       not in enabled drivers build config
+        net/cxgbe:      not in enabled drivers build config
+        net/dpaa:       not in enabled drivers build config
+        net/dpaa2:      not in enabled drivers build config
+        net/e1000:      not in enabled drivers build config
+        net/ena:        not in enabled drivers build config
+        net/enetc:      not in enabled drivers build config
+        net/enetfec:    not in enabled drivers build config
+        net/enic:       not in enabled drivers build config
+        net/failsafe:   not in enabled drivers build config
+        net/fm10k:      not in enabled drivers build config
+        net/gve:        not in enabled drivers build config
+        net/hinic:      not in enabled drivers build config
+        net/hns3:       not in enabled drivers build config
+        net/i40e:       not in enabled drivers build config
+        net/iavf:       not in enabled drivers build config
+        net/ice:        not in enabled drivers build config
+        net/idpf:       not in enabled drivers build config
+        net/igc:        not in enabled drivers build config
+        net/ionic:      not in enabled drivers build config
+        net/ipn3ke:     not in enabled drivers build config
+        net/ixgbe:      not in enabled drivers build config
+        net/mana:       not in enabled drivers build config
+        net/memif:      not in enabled drivers build config
+        net/mlx4:       not in enabled drivers build config
+        net/mlx5:       not in enabled drivers build config
+        net/mvneta:     not in enabled drivers build config
+        net/mvpp2:      not in enabled drivers build config
+        net/netvsc:     not in enabled drivers build config
+        net/nfb:        not in enabled drivers build config
+        net/nfp:        not in enabled drivers build config
+        net/ngbe:       not in enabled drivers build config
+        net/null:       not in enabled drivers build config
+        net/octeontx:   not in enabled drivers build config
+        net/octeon_ep:  not in enabled drivers build config
+        net/pcap:       not in enabled drivers build config
+        net/pfe:        not in enabled drivers build config
+        net/qede:       not in enabled drivers build config
+        net/ring:       not in enabled drivers build config
+        net/sfc:        not in enabled drivers build config
+        net/softnic:    not in enabled drivers build config
+        net/tap:        not in enabled drivers build config
+        net/thunderx:   not in enabled drivers build config
+        net/txgbe:      not in enabled drivers build config
+        net/vdev_netvsc:        not in enabled drivers build config
+        net/vhost:      not in enabled drivers build config
+        net/virtio:     not in enabled drivers build config
+        net/vmxnet3:    not in enabled drivers build config
+        raw/*:  missing internal dependency, "rawdev"
+        crypto/armv8:   not in enabled drivers build config
+        crypto/bcmfs:   not in enabled drivers build config
+        crypto/caam_jr: not in enabled drivers build config
+        crypto/ccp:     not in enabled drivers build config
+        crypto/cnxk:    not in enabled drivers build config
+        crypto/dpaa_sec:        not in enabled drivers build config
+        crypto/dpaa2_sec:       not in enabled drivers build config
+        crypto/ipsec_mb:        not in enabled drivers build config
+        crypto/mlx5:    not in enabled drivers build config
+        crypto/mvsam:   not in enabled drivers build config
+        crypto/nitrox:  not in enabled drivers build config
+        crypto/null:    not in enabled drivers build config
+        crypto/octeontx:        not in enabled drivers build config
+        crypto/openssl: not in enabled drivers build config
+        crypto/scheduler:       not in enabled drivers build config
+        crypto/uadk:    not in enabled drivers build config
+        crypto/virtio:  not in enabled drivers build config
+        compress/isal:  not in enabled drivers build config
+        compress/mlx5:  not in enabled drivers build config
+        compress/nitrox:        not in enabled drivers build config
+        compress/octeontx:      not in enabled drivers build config
+        compress/zlib:  not in enabled drivers build config
+        regex/*:        missing internal dependency, "regexdev"
+        ml/*:   missing internal dependency, "mldev"
+        vdpa/ifc:       not in enabled drivers build config
+        vdpa/mlx5:      not in enabled drivers build config
+        vdpa/nfp:       not in enabled drivers build config
+        vdpa/sfc:       not in enabled drivers build config
+        event/*:        missing internal dependency, "eventdev"
+        baseband/*:     missing internal dependency, "bbdev"
+        gpu/*:  missing internal dependency, "gpudev"
+
+
+Build targets in project: 82
+
+DPDK 24.03.0
+
+  User defined options
+    buildtype          : debug
+    default_library    : static
+    libdir             : lib
+    prefix             : /root/project/stor/spdk/dpdk/build
+    c_args             : -fPIC -Wno-error 
+    c_link_args        : 
+    cpu_instruction_set: native
+    disable_apps       : test-eventdev,test-pipeline,test-acl,test-security-perf,test-mldev,pdump,test-dma-perf,graph,test,test-pmd,test-bbdev,proc-info,test-sad,test-flow-perf,test-crypto-perf,test-gpudev,dumpcap,test-regex,test-cmdline,test-fib,test-compress-perf
+    disable_libs       : node,metrics,cfgfile,port,pdump,gso,graph,bpf,bitratestats,regexdev,pdcp,rawdev,stack,dispatcher,efd,pipeline,gro,gpudev,bbdev,latencystats,rib,mldev,member,sched,jobstats,acl,pcapng,lpm,distributor,table,argparse,eventdev,ip_frag,fib,ipsec
+    enable_docs        : false
+    enable_drivers     : bus,bus/pci,bus/vdev,mempool/ring,power/acpi,power/amd_pstate,power/cppc,power/intel_pstate,power/intel_uncore,power/kvm_vm
+    enable_kmods       : false
+    max_lcores         : 128
+    tests              : false
+
+Found ninja-1.11.1.git.kitware.jobserver-1 at /usr/local/bin/ninja
+ninja: Entering directory `/root/project/stor/spdk/dpdk/build-tmp'
+[267/267] Linking target lib/librte_vhost.so.24.1
+  CC lib/ut_mock/mock.o
+  CC lib/log/log.o
+  CC lib/log/log_flags.o
+  CC lib/log/log_deprecated.o
+  CC lib/ut/ut.o
+  LIB libspdk_ut.a
+  LIB libspdk_ut_mock.a
+  LIB libspdk_log.a
+  CC lib/dma/dma.o
+  CXX lib/trace_parser/trace.o
+  CC lib/util/base64.o
+  CC lib/util/bit_array.o
+  CC lib/util/cpuset.o
+  CC lib/util/crc16.o
+  CC lib/util/crc32.o
+  CC lib/util/crc32c.o
+  CC lib/util/crc32_ieee.o
+  CC lib/util/crc64.o
+  CC lib/util/dif.o
+  CC lib/util/fd.o
+  CC lib/util/fd_group.o
+  CC lib/util/file.o
+  CC lib/util/hexlify.o
+  CC lib/util/iov.o
+  CC lib/ioat/ioat.o
+  CC lib/util/math.o
+  CC lib/util/net.o
+  CC lib/util/pipe.o
+  CC lib/util/strerror_tls.o
+  CC lib/util/string.o
+  CC lib/util/uuid.o
+  CC lib/util/xor.o
+  CC lib/util/zipf.o
+  CC lib/util/md5.o
+  CC lib/vfio_user/host/vfio_user_pci.o
+  CC lib/vfio_user/host/vfio_user.o
+  LIB libspdk_dma.a
+  LIB libspdk_ioat.a
+  LIB libspdk_vfio_user.a
+  LIB libspdk_util.a
+  CC lib/vmd/vmd.o
+  CC lib/vmd/led.o
+  CC lib/json/json_parse.o
+  CC lib/json/json_util.o
+  CC lib/json/json_write.o
+  CC lib/rdma_utils/rdma_utils.o
+  CC lib/conf/conf.o
+  CC lib/env_dpdk/env.o
+  CC lib/env_dpdk/memory.o
+  CC lib/env_dpdk/pci.o
+  CC lib/env_dpdk/init.o
+  CC lib/env_dpdk/threads.o
+  CC lib/env_dpdk/pci_ioat.o
+  CC lib/env_dpdk/pci_virtio.o
+  CC lib/env_dpdk/pci_idxd.o
+  CC lib/env_dpdk/pci_vmd.o
+  CC lib/env_dpdk/pci_event.o
+  CC lib/env_dpdk/sigbus_handler.o
+  CC lib/env_dpdk/pci_dpdk.o
+  CC lib/env_dpdk/pci_dpdk_2207.o
+  CC lib/env_dpdk/pci_dpdk_2211.o
+  LIB libspdk_conf.a
+  LIB libspdk_json.a
+  LIB libspdk_rdma_utils.a
+  LIB libspdk_trace_parser.a
+  LIB libspdk_vmd.a
+  CC lib/jsonrpc/jsonrpc_server.o
+  CC lib/jsonrpc/jsonrpc_server_tcp.o
+  CC lib/jsonrpc/jsonrpc_client.o
+  CC lib/jsonrpc/jsonrpc_client_tcp.o
+  CC lib/rdma_provider/common.o
+  CC lib/rdma_provider/rdma_provider_verbs.o
+  LIB libspdk_jsonrpc.a
+  LIB libspdk_rdma_provider.a
+  CC lib/rpc/rpc.o
+  LIB libspdk_env_dpdk.a
+  LIB libspdk_rpc.a
+  CC lib/keyring/keyring.o
+  CC lib/keyring/keyring_rpc.o
+  CC lib/trace/trace.o
+  CC lib/trace/trace_flags.o
+  CC lib/trace/trace_rpc.o
+  CC lib/notify/notify.o
+  CC lib/notify/notify_rpc.o
+  LIB libspdk_notify.a
+  LIB libspdk_trace.a
+  LIB libspdk_keyring.a
+  CC lib/thread/thread.o
+  CC lib/thread/iobuf.o
+  CC lib/sock/sock.o
+  CC lib/sock/sock_rpc.o
+  LIB libspdk_sock.a
+  CC lib/nvme/nvme_ctrlr_cmd.o
+  CC lib/nvme/nvme_ctrlr.o
+  CC lib/nvme/nvme_fabric.o
+  CC lib/nvme/nvme_ns_cmd.o
+  CC lib/nvme/nvme_ns.o
+  CC lib/nvme/nvme_pcie_common.o
+  CC lib/nvme/nvme_pcie.o
+  CC lib/nvme/nvme_qpair.o
+  CC lib/nvme/nvme.o
+  CC lib/nvme/nvme_quirks.o
+  CC lib/nvme/nvme_transport.o
+  CC lib/nvme/nvme_discovery.o
+  CC lib/nvme/nvme_ctrlr_ocssd_cmd.o
+  CC lib/nvme/nvme_ns_ocssd_cmd.o
+  CC lib/nvme/nvme_tcp.o
+  CC lib/nvme/nvme_opal.o
+  CC lib/nvme/nvme_io_msg.o
+  CC lib/nvme/nvme_poll_group.o
+  CC lib/nvme/nvme_stubs.o
+  CC lib/nvme/nvme_zns.o
+  CC lib/nvme/nvme_auth.o
+  CC lib/nvme/nvme_cuse.o
+  CC lib/nvme/nvme_rdma.o
+  LIB libspdk_thread.a
+  CC lib/accel/accel.o
+  CC lib/accel/accel_rpc.o
+  CC lib/init/json_config.o
+  CC lib/init/subsystem.o
+  CC lib/init/subsystem_rpc.o
+  CC lib/init/rpc.o
+  CC lib/blob/blobstore.o
+  CC lib/virtio/virtio.o
+  CC lib/blob/request.o
+  CC lib/virtio/virtio_vhost_user.o
+  CC lib/blob/zeroes.o
+  CC lib/virtio/virtio_vfio_user.o
+  CC lib/virtio/virtio_pci.o
+  CC lib/blob/blob_bs_dev.o
+  CC lib/fsdev/fsdev.o
+  CC lib/accel/accel_sw.o
+  CC lib/fsdev/fsdev_io.o
+  CC lib/fsdev/fsdev_rpc.o
+  LIB libspdk_init.a
+  LIB libspdk_fsdev.a
+  LIB libspdk_virtio.a
+  CC lib/event/app.o
+  CC lib/event/reactor.o
+  CC lib/event/log_rpc.o
+  CC lib/event/app_rpc.o
+  CC lib/event/scheduler_static.o
+  CC lib/fuse_dispatcher/fuse_dispatcher.o
+  LIB libspdk_accel.a
+  LIB libspdk_event.a
+  CC lib/bdev/bdev.o
+  CC lib/bdev/bdev_rpc.o
+  CC lib/bdev/bdev_zone.o
+  CC lib/bdev/part.o
+  CC lib/bdev/scsi_nvme.o
+  LIB libspdk_fuse_dispatcher.a
+  LIB libspdk_nvme.a
+  LIB libspdk_blob.a
+  CC lib/blobfs/blobfs.o
+  CC lib/blobfs/tree.o
+  CC lib/lvol/lvol.o
+  LIB libspdk_blobfs.a
+  LIB libspdk_lvol.a
+  LIB libspdk_bdev.a
+  CC lib/scsi/dev.o
+  CC lib/scsi/lun.o
+  CC lib/scsi/port.o
+  CC lib/scsi/scsi.o
+  CC lib/scsi/scsi_bdev.o
+  CC lib/scsi/scsi_pr.o
+  CC lib/scsi/scsi_rpc.o
+  CC lib/scsi/task.o
+  CC lib/ftl/ftl_core.o
+  CC lib/nbd/nbd.o
+  CC lib/nbd/nbd_rpc.o
+  CC lib/ftl/ftl_init.o
+  CC lib/ftl/ftl_layout.o
+  CC lib/ftl/ftl_io.o
+  CC lib/ftl/ftl_debug.o
+  CC lib/ftl/ftl_sb.o
+  CC lib/ftl/ftl_l2p.o
+  CC lib/nvmf/ctrlr.o
+  CC lib/ftl/ftl_l2p_flat.o
+  CC lib/ftl/ftl_nv_cache.o
+  CC lib/ftl/ftl_band.o
+  CC lib/nvmf/ctrlr_bdev.o
+  CC lib/nvmf/ctrlr_discovery.o
+  CC lib/ftl/ftl_band_ops.o
+  CC lib/ftl/ftl_writer.o
+  CC lib/ftl/ftl_rq.o
+  CC lib/nvmf/subsystem.o
+  CC lib/ftl/ftl_reloc.o
+  CC lib/nvmf/nvmf.o
+  CC lib/nvmf/nvmf_rpc.o
+  CC lib/ftl/ftl_l2p_cache.o
+  CC lib/nvmf/transport.o
+  CC lib/ftl/ftl_p2l.o
+  CC lib/nvmf/tcp.o
+  CC lib/ftl/ftl_p2l_log.o
+  CC lib/ftl/mngt/ftl_mngt.o
+  CC lib/ftl/mngt/ftl_mngt_bdev.o
+  CC lib/ftl/mngt/ftl_mngt_shutdown.o
+  CC lib/ftl/mngt/ftl_mngt_startup.o
+  CC lib/nvmf/stubs.o
+  CC lib/ftl/mngt/ftl_mngt_md.o
+  CC lib/nvmf/mdns_server.o
+  CC lib/ftl/mngt/ftl_mngt_misc.o
+  CC lib/nvmf/rdma.o
+  CC lib/ftl/mngt/ftl_mngt_ioch.o
+  CC lib/ftl/mngt/ftl_mngt_l2p.o
+  CC lib/ftl/mngt/ftl_mngt_band.o
+  CC lib/ftl/mngt/ftl_mngt_self_test.o
+  CC lib/ftl/mngt/ftl_mngt_p2l.o
+  CC lib/ftl/mngt/ftl_mngt_recovery.o
+  CC lib/ftl/mngt/ftl_mngt_upgrade.o
+  CC lib/ftl/utils/ftl_conf.o
+  CC lib/ftl/utils/ftl_md.o
+  CC lib/ftl/utils/ftl_mempool.o
+  CC lib/ftl/utils/ftl_bitmap.o
+  CC lib/ftl/utils/ftl_property.o
+  CC lib/ftl/utils/ftl_layout_tracker_bdev.o
+  CC lib/ftl/upgrade/ftl_layout_upgrade.o
+  CC lib/ftl/upgrade/ftl_sb_upgrade.o
+  CC lib/ftl/upgrade/ftl_p2l_upgrade.o
+  CC lib/ftl/upgrade/ftl_band_upgrade.o
+  CC lib/ftl/upgrade/ftl_chunk_upgrade.o
+  CC lib/ftl/upgrade/ftl_trim_upgrade.o
+  CC lib/ftl/upgrade/ftl_sb_v3.o
+  CC lib/ftl/upgrade/ftl_sb_v5.o
+  CC lib/ftl/nvc/ftl_nvc_dev.o
+  CC lib/ftl/nvc/ftl_nvc_bdev_vss.o
+  CC lib/ftl/nvc/ftl_nvc_bdev_non_vss.o
+  CC lib/ftl/nvc/ftl_nvc_bdev_common.o
+  CC lib/ftl/base/ftl_base_dev.o
+  CC lib/ftl/base/ftl_base_bdev.o
+  CC lib/ftl/ftl_trace.o
+  LIB libspdk_nbd.a
+  LIB libspdk_scsi.a
+  CC lib/iscsi/conn.o
+  CC lib/iscsi/init_grp.o
+  CC lib/iscsi/iscsi.o
+  CC lib/iscsi/param.o
+  CC lib/iscsi/portal_grp.o
+  CC lib/iscsi/tgt_node.o
+  CC lib/iscsi/iscsi_subsystem.o
+  CC lib/iscsi/iscsi_rpc.o
+  CC lib/iscsi/task.o
+  CC lib/vhost/vhost.o
+  CC lib/vhost/vhost_rpc.o
+  CC lib/vhost/vhost_scsi.o
+  CC lib/vhost/vhost_blk.o
+  CC lib/vhost/rte_vhost_user.o
+  LIB libspdk_ftl.a
+  LIB libspdk_nvmf.a
+  LIB libspdk_iscsi.a
+  LIB libspdk_vhost.a
+  CC module/env_dpdk/env_dpdk_rpc.o
+  CC module/keyring/linux/keyring.o
+  CC module/keyring/linux/keyring_rpc.o
+  CC module/fsdev/aio/fsdev_aio.o
+  CC module/fsdev/aio/fsdev_aio_rpc.o
+  CC module/sock/posix/posix.o
+  CC module/fsdev/aio/linux_aio_mgr.o
+  CC module/accel/ioat/accel_ioat.o
+  CC module/keyring/file/keyring.o
+  CC module/scheduler/gscheduler/gscheduler.o
+  CC module/accel/ioat/accel_ioat_rpc.o
+  CC module/keyring/file/keyring_rpc.o
+  CC module/accel/error/accel_error.o
+  CC module/accel/error/accel_error_rpc.o
+  CC module/blob/bdev/blob_bdev.o
+  CC module/scheduler/dynamic/scheduler_dynamic.o
+  CC module/scheduler/dpdk_governor/dpdk_governor.o
+  LIB libspdk_env_dpdk_rpc.a
+  LIB libspdk_keyring_linux.a
+  LIB libspdk_keyring_file.a
+  LIB libspdk_scheduler_gscheduler.a
+  LIB libspdk_accel_error.a
+  LIB libspdk_scheduler_dynamic.a
+  LIB libspdk_accel_ioat.a
+  LIB libspdk_scheduler_dpdk_governor.a
+  LIB libspdk_blob_bdev.a
+  LIB libspdk_fsdev_aio.a
+  CC module/blobfs/bdev/blobfs_bdev.o
+  CC module/blobfs/bdev/blobfs_bdev_rpc.o
+  CC module/bdev/delay/vbdev_delay.o
+  CC module/bdev/delay/vbdev_delay_rpc.o
+  CC module/bdev/gpt/gpt.o
+  CC module/bdev/gpt/vbdev_gpt.o
+  CC module/bdev/lvol/vbdev_lvol.o
+  CC module/bdev/malloc/bdev_malloc.o
+  CC module/bdev/lvol/vbdev_lvol_rpc.o
+  CC module/bdev/malloc/bdev_malloc_rpc.o
+  CC module/bdev/passthru/vbdev_passthru.o
+  CC module/bdev/error/vbdev_error.o
+  CC module/bdev/passthru/vbdev_passthru_rpc.o
+  CC module/bdev/error/vbdev_error_rpc.o
+  CC module/bdev/nvme/bdev_nvme.o
+  CC module/bdev/nvme/bdev_nvme_rpc.o
+  CC module/bdev/ftl/bdev_ftl.o
+  CC module/bdev/nvme/nvme_rpc.o
+  CC module/bdev/ftl/bdev_ftl_rpc.o
+  CC module/bdev/raid/bdev_raid.o
+  CC module/bdev/split/vbdev_split.o
+  CC module/bdev/nvme/bdev_mdns_client.o
+  CC module/bdev/raid/bdev_raid_rpc.o
+  CC module/bdev/split/vbdev_split_rpc.o
+  CC module/bdev/nvme/vbdev_opal.o
+  CC module/bdev/raid/bdev_raid_sb.o
+  CC module/bdev/null/bdev_null.o
+  CC module/bdev/nvme/vbdev_opal_rpc.o
+  CC module/bdev/null/bdev_null_rpc.o
+  CC module/bdev/raid/raid1.o
+  CC module/bdev/aio/bdev_aio.o
+  CC module/bdev/raid/raid0.o
+  CC module/bdev/raid/concat.o
+  CC module/bdev/aio/bdev_aio_rpc.o
+  CC module/bdev/virtio/bdev_virtio_scsi.o
+  CC module/bdev/nvme/bdev_nvme_cuse_rpc.o
+  CC module/bdev/virtio/bdev_virtio_blk.o
+  CC module/bdev/virtio/bdev_virtio_rpc.o
+  CC module/bdev/zone_block/vbdev_zone_block.o
+  CC module/bdev/zone_block/vbdev_zone_block_rpc.o
+  LIB libspdk_sock_posix.a
+  LIB libspdk_blobfs_bdev.a
+  LIB libspdk_bdev_null.a
+  LIB libspdk_bdev_gpt.a
+  LIB libspdk_bdev_split.a
+  LIB libspdk_bdev_malloc.a
+  LIB libspdk_bdev_ftl.a
+  LIB libspdk_bdev_aio.a
+  LIB libspdk_bdev_passthru.a
+  LIB libspdk_bdev_error.a
+  LIB libspdk_bdev_delay.a
+  LIB libspdk_bdev_virtio.a
+  LIB libspdk_bdev_zone_block.a
+  LIB libspdk_bdev_lvol.a
+  LIB libspdk_bdev_raid.a
+  LIB libspdk_bdev_nvme.a
+  CC module/event/subsystems/fsdev/fsdev.o
+  CC module/event/subsystems/iobuf/iobuf.o
+  CC module/event/subsystems/iobuf/iobuf_rpc.o
+  CC module/event/subsystems/sock/sock.o
+  CC module/event/subsystems/vhost_blk/vhost_blk.o
+  CC module/event/subsystems/vmd/vmd.o
+  CC module/event/subsystems/scheduler/scheduler.o
+  CC module/event/subsystems/vmd/vmd_rpc.o
+  CC module/event/subsystems/keyring/keyring.o
+  LIB libspdk_event_fsdev.a
+  LIB libspdk_event_keyring.a
+  LIB libspdk_event_vhost_blk.a
+  LIB libspdk_event_sock.a
+  LIB libspdk_event_scheduler.a
+  LIB libspdk_event_vmd.a
+  LIB libspdk_event_iobuf.a
+  CC module/event/subsystems/accel/accel.o
+  LIB libspdk_event_accel.a
+  CC module/event/subsystems/bdev/bdev.o
+  LIB libspdk_event_bdev.a
+  CC module/event/subsystems/scsi/scsi.o
+  CC module/event/subsystems/nbd/nbd.o
+  CC module/event/subsystems/nvmf/nvmf_rpc.o
+  CC module/event/subsystems/nvmf/nvmf_tgt.o
+  LIB libspdk_event_scsi.a
+  LIB libspdk_event_nbd.a
+  LIB libspdk_event_nvmf.a
+  CC module/event/subsystems/iscsi/iscsi.o
+  CC module/event/subsystems/vhost_scsi/vhost_scsi.o
+  LIB libspdk_event_vhost_scsi.a
+  LIB libspdk_event_iscsi.a
+  CC app/trace_record/trace_record.o
+  CXX app/trace/trace.o
+  CC app/spdk_nvme_perf/perf.o
+  CC app/spdk_nvme_discover/discovery_aer.o
+  CC app/spdk_top/spdk_top.o
+  CC app/spdk_nvme_identify/identify.o
+  CC app/spdk_lspci/spdk_lspci.o
+  CC test/rpc_client/rpc_client_test.o
+  TEST_HEADER include/spdk/ioat.h
+  TEST_HEADER include/spdk/blobfs.h
+  TEST_HEADER include/spdk/notify.h
+  TEST_HEADER include/spdk/fsdev.h
+  TEST_HEADER include/spdk/pipe.h
+  TEST_HEADER include/spdk/blob_bdev.h
+  TEST_HEADER include/spdk/version.h
+  TEST_HEADER include/spdk/config.h
+  TEST_HEADER include/spdk/opal_spec.h
+  TEST_HEADER include/spdk/uuid.h
+  TEST_HEADER include/spdk/likely.h
+  TEST_HEADER include/spdk/memory.h
+  TEST_HEADER include/spdk/hexlify.h
+  TEST_HEADER include/spdk/vfio_user_pci.h
+  TEST_HEADER include/spdk/dma.h
+  TEST_HEADER include/spdk/nbd.h
+  TEST_HEADER include/spdk/queue.h
+  TEST_HEADER include/spdk/nvme_zns.h
+  TEST_HEADER include/spdk/trace_parser.h
+  TEST_HEADER include/spdk/nvmf_spec.h
+  TEST_HEADER include/spdk/env_dpdk.h
+  TEST_HEADER include/spdk/fd_group.h
+  TEST_HEADER include/spdk/util.h
+  TEST_HEADER include/spdk/opal.h
+  TEST_HEADER include/spdk/bdev.h
+  TEST_HEADER include/spdk/base64.h
+  TEST_HEADER include/spdk/gpt_spec.h
+  TEST_HEADER include/spdk/assert.h
+  TEST_HEADER include/spdk/blobfs_bdev.h
+  TEST_HEADER include/spdk/nvme_ocssd.h
+  TEST_HEADER include/spdk/crc32.h
+  TEST_HEADER include/spdk/keyring.h
+  TEST_HEADER include/spdk/scsi_spec.h
+  TEST_HEADER include/spdk/zipf.h
+  TEST_HEADER include/spdk/nvmf.h
+  TEST_HEADER include/spdk/fsdev_module.h
+  TEST_HEADER include/spdk/ftl.h
+  TEST_HEADER include/spdk/crc64.h
+  TEST_HEADER include/spdk/pci_ids.h
+  TEST_HEADER include/spdk/thread.h
+  TEST_HEADER include/spdk/net.h
+  TEST_HEADER include/spdk/accel.h
+  TEST_HEADER include/spdk/keyring_module.h
+  TEST_HEADER include/spdk/file.h
+  TEST_HEADER include/spdk/endian.h
+  TEST_HEADER include/spdk/lvol.h
+  TEST_HEADER include/spdk/tree.h
+  TEST_HEADER include/spdk/env.h
+  CC test/thread/lock/spdk_lock.o
+  CC examples/util/zipf/zipf.o
+  CC test/env/vtophys/vtophys.o
+  TEST_HEADER include/spdk/nvme_ocssd_spec.h
+  CC test/env/env_dpdk_post_init/env_dpdk_post_init.o
+  TEST_HEADER include/spdk/fd.h
+  TEST_HEADER include/spdk/vhost.h
+  CC examples/ioat/perf/perf.o
+  TEST_HEADER include/spdk/bdev_module.h
+  TEST_HEADER include/spdk/nvme_intel.h
+  TEST_HEADER include/spdk/idxd_spec.h
+  TEST_HEADER include/spdk/mmio.h
+  TEST_HEADER include/spdk/bdev_zone.h
+  CC test/app/histogram_perf/histogram_perf.o
+  CC test/env/pci/pci_ut.o
+  CC test/app/jsoncat/jsoncat.o
+  CC test/env/memory/memory_ut.o
+  CC app/spdk_dd/spdk_dd.o
+  TEST_HEADER include/spdk/json.h
+  TEST_HEADER include/spdk/scsi.h
+  TEST_HEADER include/spdk/stdinc.h
+  TEST_HEADER include/spdk/nvmf_fc_spec.h
+  CC test/app/stub/stub.o
+  TEST_HEADER include/spdk/idxd.h
+  TEST_HEADER include/spdk/dif.h
+  TEST_HEADER include/spdk/reduce.h
+  TEST_HEADER include/spdk/event.h
+  TEST_HEADER include/spdk/blob.h
+  CC test/thread/poller_perf/poller_perf.o
+  CC examples/ioat/verify/verify.o
+  CC examples/interrupt_tgt/interrupt_tgt.o
+  TEST_HEADER include/spdk/crc16.h
+  CC app/iscsi_tgt/iscsi_tgt.o
+  TEST_HEADER include/spdk/vmd.h
+  TEST_HEADER include/spdk/init.h
+  TEST_HEADER include/spdk/xor.h
+  TEST_HEADER include/spdk/nvme.h
+  TEST_HEADER include/spdk/nvme_spec.h
+  CC app/nvmf_tgt/nvmf_main.o
+  TEST_HEADER include/spdk/cpuset.h
+  TEST_HEADER include/spdk/iscsi_spec.h
+  TEST_HEADER include/spdk/nvmf_transport.h
+  TEST_HEADER include/spdk/nvmf_cmd.h
+  TEST_HEADER include/spdk/log.h
+  TEST_HEADER include/spdk/histogram_data.h
+  TEST_HEADER include/spdk/barrier.h
+  TEST_HEADER include/spdk/trace.h
+  TEST_HEADER include/spdk/ioat_spec.h
+  TEST_HEADER include/spdk/ublk.h
+  TEST_HEADER include/spdk/conf.h
+  TEST_HEADER include/spdk/scheduler.h
+  TEST_HEADER include/spdk/string.h
+  TEST_HEADER include/spdk/bit_array.h
+  TEST_HEADER include/spdk/jsonrpc.h
+  TEST_HEADER include/spdk/md5.h
+  TEST_HEADER include/spdk/rpc.h
+  TEST_HEADER include/spdk/sock.h
+  TEST_HEADER include/spdk/accel_module.h
+  CC test/app/fuzz/iscsi_fuzz/iscsi_fuzz.o
+  TEST_HEADER include/spdk/vfio_user_spec.h
+  TEST_HEADER include/spdk/bit_pool.h
+  CXX test/cpp_headers/ioat.o
+  CXX test/cpp_headers/blobfs.o
+  CXX test/cpp_headers/notify.o
+  CC app/spdk_tgt/spdk_tgt.o
+  CXX test/cpp_headers/fsdev.o
+  CC test/app/fuzz/nvme_fuzz/nvme_fuzz.o
+  CXX test/cpp_headers/pipe.o
+  CXX test/cpp_headers/blob_bdev.o
+  CC test/dma/test_dma/test_dma.o
+  CXX test/cpp_headers/version.o
+  CXX test/cpp_headers/config.o
+  CXX test/cpp_headers/opal_spec.o
+  CXX test/cpp_headers/uuid.o
+  CXX test/cpp_headers/likely.o
+  CC test/env/mem_callbacks/mem_callbacks.o
+  CXX test/cpp_headers/hexlify.o
+  CXX test/cpp_headers/memory.o
+  CC test/app/bdev_svc/bdev_svc.o
+  CXX test/cpp_headers/vfio_user_pci.o
+  CXX test/cpp_headers/dma.o
+  CXX test/cpp_headers/nbd.o
+  CXX test/cpp_headers/queue.o
+  CXX test/cpp_headers/nvme_zns.o
+  CXX test/cpp_headers/trace_parser.o
+  CXX test/cpp_headers/env_dpdk.o
+  CXX test/cpp_headers/nvmf_spec.o
+  CXX test/cpp_headers/fd_group.o
+  CC test/app/fuzz/vhost_fuzz/vhost_fuzz_rpc.o
+  LINK spdk_lspci
+  CC test/app/fuzz/vhost_fuzz/vhost_fuzz.o
+  LINK rpc_client_test
+  CXX test/cpp_headers/util.o
+  CXX test/cpp_headers/opal.o
+  LINK spdk_trace_record
+  LINK spdk_nvme_discover
+  CXX test/cpp_headers/bdev.o
+  CXX test/cpp_headers/base64.o
+  CXX test/cpp_headers/gpt_spec.o
+  LINK env_dpdk_post_init
+  LINK vtophys
+  CXX test/cpp_headers/assert.o
+  CXX test/cpp_headers/blobfs_bdev.o
+  CXX test/cpp_headers/nvme_ocssd.o
+  CXX test/cpp_headers/crc32.o
+  CXX test/cpp_headers/keyring.o
+  CXX test/cpp_headers/scsi_spec.o
+  LINK zipf
+  LINK stub
+  LINK jsoncat
+  LINK ioat_perf
+  LINK verify
+  LINK histogram_perf
+  LINK poller_perf
+  CXX test/cpp_headers/zipf.o
+  CXX test/cpp_headers/nvmf.o
+  CXX test/cpp_headers/fsdev_module.o
+  CXX test/cpp_headers/ftl.o
+  LINK interrupt_tgt
+  CXX test/cpp_headers/crc64.o
+  CXX test/cpp_headers/pci_ids.o
+  CXX test/cpp_headers/thread.o
+  CXX test/cpp_headers/net.o
+  LINK iscsi_tgt
+  CC test/unit/lib/log/log.c/log_ut.o
+  CXX test/cpp_headers/accel.o
+  LINK nvmf_tgt
+  LINK pci_ut
+  CXX test/cpp_headers/keyring_module.o
+  CXX test/cpp_headers/file.o
+  CXX test/cpp_headers/endian.o
+  CC test/unit/include/spdk/histogram_data.h/histogram_ut.o
+  CXX test/cpp_headers/lvol.o
+  CXX test/cpp_headers/tree.o
+  CXX test/cpp_headers/env.o
+  LINK spdk_tgt
+  LINK bdev_svc
+  LINK nvme_fuzz
+  CXX test/cpp_headers/nvme_ocssd_spec.o
+  LINK spdk_dd
+  CXX test/cpp_headers/fd.o
+  LINK vhost_fuzz
+  CXX test/cpp_headers/vhost.o
+  CXX test/cpp_headers/bdev_module.o
+  CXX test/cpp_headers/nvme_intel.o
+  CXX test/cpp_headers/idxd_spec.o
+  CXX test/cpp_headers/mmio.o
+  CXX test/cpp_headers/bdev_zone.o
+  CXX test/cpp_headers/stdinc.o
+  CXX test/cpp_headers/json.o
+  CXX test/cpp_headers/scsi.o
+  CXX test/cpp_headers/nvmf_fc_spec.o
+  LINK spdk_trace
+  LINK spdk_nvme_identify
+  CXX test/cpp_headers/idxd.o
+  LINK spdk_top
+  CXX test/cpp_headers/dif.o
+  LINK histogram_ut
+  CC test/unit/lib/rdma/common.c/common_ut.o
+  LINK spdk_nvme_perf
+  CXX test/cpp_headers/reduce.o
+  CXX test/cpp_headers/event.o
+  CXX test/cpp_headers/blob.o
+  CXX test/cpp_headers/crc16.o
+  CXX test/cpp_headers/vmd.o
+  LINK mem_callbacks
+  CXX test/cpp_headers/init.o
+  LINK log_ut
+  CXX test/cpp_headers/xor.o
+  CXX test/cpp_headers/nvme.o
+  LINK test_dma
+  CXX test/cpp_headers/nvme_spec.o
+  CXX test/cpp_headers/cpuset.o
+  CXX test/cpp_headers/iscsi_spec.o
+  CXX test/cpp_headers/nvmf_cmd.o
+  CXX test/cpp_headers/nvmf_transport.o
+  LINK spdk_lock
+  CXX test/cpp_headers/histogram_data.o
+  CXX test/cpp_headers/log.o
+  CXX test/cpp_headers/barrier.o
+  CXX test/cpp_headers/trace.o
+  CXX test/cpp_headers/ioat_spec.o
+  CXX test/cpp_headers/conf.o
+  CXX test/cpp_headers/ublk.o
+  CXX test/cpp_headers/bit_array.o
+  CXX test/cpp_headers/scheduler.o
+  CXX test/cpp_headers/string.o
+  CXX test/cpp_headers/jsonrpc.o
+  CXX test/cpp_headers/sock.o
+  CXX test/cpp_headers/md5.o
+  CXX test/cpp_headers/rpc.o
+  CXX test/cpp_headers/vfio_user_spec.o
+  LINK memory_ut
+  CXX test/cpp_headers/accel_module.o
+  CXX test/cpp_headers/bit_pool.o
+  CC test/unit/lib/util/base64.c/base64_ut.o
+  LINK common_ut
+  CC test/unit/lib/util/crc16.c/crc16_ut.o
+  CC test/unit/lib/util/bit_array.c/bit_array_ut.o
+  CC test/unit/lib/util/file.c/file_ut.o
+  CC test/unit/lib/util/cpuset.c/cpuset_ut.o
+  CC test/unit/lib/util/crc32c.c/crc32c_ut.o
+  CC test/unit/lib/util/crc64.c/crc64_ut.o
+  CC test/unit/lib/util/crc32_ieee.c/crc32_ieee_ut.o
+  CC test/unit/lib/util/net.c/net_ut.o
+  LINK iscsi_fuzz
+  CC test/unit/lib/util/dif.c/dif_ut.o
+  CC test/unit/lib/util/iov.c/iov_ut.o
+  CC test/unit/lib/util/xor.c/xor_ut.o
+  CC test/unit/lib/dma/dma.c/dma_ut.o
+  CC test/unit/lib/util/pipe.c/pipe_ut.o
+  CC test/unit/lib/util/fd_group.c/fd_group_ut.o
+  CC test/unit/lib/util/string.c/string_ut.o
+  CC test/unit/lib/ioat/ioat.c/ioat_ut.o
+  CC app/vhost/vhost.o
+  LINK crc16_ut
+  LINK crc32_ieee_ut
+  LINK crc64_ut
+  LINK file_ut
+  LINK net_ut
+  LINK base64_ut
+  LINK crc32c_ut
+  LINK cpuset_ut
+  CC test/unit/lib/util/math.c/math_ut.o
+  CC examples/vmd/led/led.o
+  CC examples/vmd/lsvmd/lsvmd.o
+  LINK iov_ut
+  LINK bit_array_ut
+  LINK xor_ut
+  LINK fd_group_ut
+  CC examples/thread/thread/thread_ex.o
+  CC examples/sock/hello_world/hello_sock.o
+  LINK string_ut
+  LINK vhost
+  LINK dma_ut
+  LINK math_ut
+  LINK ioat_ut
+  LINK lsvmd
+  LINK led
+  LINK pipe_ut
+  LINK hello_sock
+  LINK thread
+  LINK dif_ut
+  CC test/unit/lib/json/json_util.c/json_util_ut.o
+  CC test/unit/lib/json/json_parse.c/json_parse_ut.o
+  CC test/unit/lib/env_dpdk/pci_event.c/pci_event_ut.o
+  CC test/unit/lib/json/json_write.c/json_write_ut.o
+  CC test/event/reactor/reactor.o
+  CC test/event/event_perf/event_perf.o
+  CC test/event/reactor_perf/reactor_perf.o
+  CC test/event/app_repeat/app_repeat.o
+  CC test/event/scheduler/scheduler.o
+  LINK reactor
+  LINK event_perf
+  LINK reactor_perf
+  LINK json_util_ut
+  LINK pci_event_ut
+  LINK app_repeat
+  LINK scheduler
+  LINK json_write_ut
+  CC examples/nvme/hello_world/hello_world.o
+  CC examples/nvme/reconnect/reconnect.o
+  CC examples/nvme/arbitration/arbitration.o
+  CC examples/nvme/nvme_manage/nvme_manage.o
+  CC examples/nvme/hotplug/hotplug.o
+  CC examples/nvme/cmb_copy/cmb_copy.o
+  CC examples/nvme/abort/abort.o
+  CC examples/nvme/pmr_persistence/pmr_persistence.o
+  LINK json_parse_ut
+  CC test/unit/lib/jsonrpc/jsonrpc_server.c/jsonrpc_server_ut.o
+  LINK pmr_persistence
+  LINK cmb_copy
+  LINK hello_world
+  LINK hotplug
+  LINK abort
+  LINK arbitration
+  LINK reconnect
+  LINK nvme_manage
+  LINK jsonrpc_server_ut
+  CC test/unit/lib/rpc/rpc.c/rpc_ut.o
+  LINK rpc_ut
+  CC test/unit/lib/sock/posix.c/posix_ut.o
+  CC test/unit/lib/sock/sock.c/sock_ut.o
+  CC test/unit/lib/thread/iobuf.c/iobuf_ut.o
+  CC test/unit/lib/thread/thread.c/thread_ut.o
+  CC test/unit/lib/notify/notify.c/notify_ut.o
+  CC test/unit/lib/keyring/keyring.c/keyring_ut.o
+  LINK keyring_ut
+  CC test/nvme/reset/reset.o
+  CC test/nvme/aer/aer.o
+  CC test/nvme/connect_stress/connect_stress.o
+  CC test/nvme/doorbell_aers/doorbell_aers.o
+  CC test/nvme/simple_copy/simple_copy.o
+  CC test/nvme/cuse/cuse.o
+  CC test/nvme/err_injection/err_injection.o
+  CC test/nvme/compliance/nvme_compliance.o
+  CC test/nvme/sgl/sgl.o
+  CC test/nvme/fdp/fdp.o
+  CC test/nvme/startup/startup.o
+  CC test/nvme/fused_ordering/fused_ordering.o
+  CC test/nvme/reserve/reserve.o
+  CC test/nvme/overhead/overhead.o
+  CC test/nvme/e2edp/nvme_dp.o
+  CC test/nvme/boot_partition/boot_partition.o
+  CC test/accel/dif/dif.o
+  CC test/blobfs/mkfs/mkfs.o
+  CC test/lvol/esnap/esnap.o
+  LINK notify_ut
+  LINK sgl
+  LINK iobuf_ut
+  LINK startup
+  LINK boot_partition
+  LINK fused_ordering
+  LINK err_injection
+  LINK connect_stress
+  LINK doorbell_aers
+  LINK aer
+  LINK simple_copy
+  LINK mkfs
+  LINK reset
+  LINK nvme_dp
+  LINK reserve
+  LINK posix_ut
+  LINK overhead
+  LINK fdp
+  LINK nvme_compliance
+  LINK dif
+  CC examples/accel/perf/accel_perf.o
+  LINK thread_ut
+  CC examples/blob/cli/blobcli.o
+  CC examples/fsdev/hello_world/hello_fsdev.o
+  CC examples/blob/hello_world/hello_blob.o
+  LINK sock_ut
+  LINK cuse
+  CC test/unit/lib/init/subsystem.c/subsystem_ut.o
+  CC test/unit/lib/init/rpc.c/rpc_ut.o
+  CC test/unit/lib/accel/accel.c/accel_ut.o
+  CC test/unit/lib/fsdev/fsdev.c/fsdev_ut.o
+  CC test/unit/lib/blob/blob_bdev.c/blob_bdev_ut.o
+  CC test/unit/lib/blob/blob.c/blob_ut.o
+  LINK accel_perf
+  LINK hello_fsdev
+  LINK hello_blob
+  LINK blobcli
+  CC test/unit/lib/nvme/nvme_ns.c/nvme_ns_ut.o
+  CC test/unit/lib/nvme/nvme.c/nvme_ut.o
+  CC test/unit/lib/nvme/nvme_ns_ocssd_cmd.c/nvme_ns_ocssd_cmd_ut.o
+  CC test/unit/lib/nvme/nvme_ctrlr_cmd.c/nvme_ctrlr_cmd_ut.o
+  CC test/unit/lib/nvme/nvme_ctrlr.c/nvme_ctrlr_ut.o
+  CC test/unit/lib/nvme/nvme_ctrlr_ocssd_cmd.c/nvme_ctrlr_ocssd_cmd_ut.o
+  CC test/unit/lib/nvme/nvme_ns_cmd.c/nvme_ns_cmd_ut.o
+  CC test/unit/lib/nvme/nvme_pcie.c/nvme_pcie_ut.o
+  LINK rpc_ut
+  CC test/unit/lib/nvme/nvme_poll_group.c/nvme_poll_group_ut.o
+  CC test/unit/lib/nvme/nvme_rdma.c/nvme_rdma_ut.o
+  CC test/unit/lib/nvme/nvme_tcp.c/nvme_tcp_ut.o
+  CC test/unit/lib/nvme/nvme_transport.c/nvme_transport_ut.o
+  CC test/unit/lib/nvme/nvme_quirks.c/nvme_quirks_ut.o
+  CC test/unit/lib/nvme/nvme_pcie_common.c/nvme_pcie_common_ut.o
+  CC test/unit/lib/nvme/nvme_opal.c/nvme_opal_ut.o
+  CC test/unit/lib/nvme/nvme_io_msg.c/nvme_io_msg_ut.o
+  CC test/unit/lib/nvme/nvme_qpair.c/nvme_qpair_ut.o
+  CC test/unit/lib/nvme/nvme_cuse.c/nvme_cuse_ut.o
+  LINK subsystem_ut
+  LINK blob_bdev_ut
+  CC test/unit/lib/nvme/nvme_fabric.c/nvme_fabric_ut.o
+  LINK fsdev_ut
+  LINK nvme_opal_ut
+  LINK nvme_quirks_ut
+  LINK nvme_ns_ut
+  LINK nvme_ctrlr_cmd_ut
+  CC test/unit/lib/event/reactor.c/reactor_ut.o
+  CC test/unit/lib/event/app.c/app_ut.o
+  LINK nvme_poll_group_ut
+  LINK nvme_ctrlr_ocssd_cmd_ut
+  LINK nvme_transport_ut
+  LINK nvme_io_msg_ut
+  LINK esnap
+  LINK nvme_ns_ocssd_cmd_ut
+  LINK accel_ut
+  LINK nvme_ut
+  LINK nvme_fabric_ut
+  CC examples/bdev/hello_world/hello_bdev.o
+  LINK nvme_pcie_ut
+  LINK nvme_qpair_ut
+  CC examples/bdev/bdevperf/bdevperf.o
+  LINK nvme_pcie_common_ut
+  LINK app_ut
+  LINK hello_bdev
+  CC test/unit/lib/bdev/scsi_nvme.c/scsi_nvme_ut.o
+  CC test/unit/lib/bdev/part.c/part_ut.o
+  CC test/unit/lib/bdev/bdev.c/bdev_ut.o
+  CC test/unit/lib/bdev/bdev_zone.c/bdev_zone_ut.o
+  CC test/unit/lib/bdev/vbdev_lvol.c/vbdev_lvol_ut.o
+  CC test/unit/lib/bdev/vbdev_zone_block.c/vbdev_zone_block_ut.o
+  CC test/unit/lib/bdev/gpt/gpt.c/gpt_ut.o
+  CC test/unit/lib/bdev/raid/bdev_raid.c/bdev_raid_ut.o
+  CC test/unit/lib/bdev/raid/bdev_raid_sb.c/bdev_raid_sb_ut.o
+  CC test/unit/lib/bdev/raid/concat.c/concat_ut.o
+  CC test/unit/lib/bdev/mt/bdev.c/bdev_ut.o
+  CC test/unit/lib/bdev/nvme/bdev_nvme.c/bdev_nvme_ut.o
+  CC test/unit/lib/bdev/raid/raid1.c/raid1_ut.o
+  CC test/unit/lib/bdev/raid/raid0.c/raid0_ut.o
+  LINK nvme_cuse_ut
+  LINK nvme_ns_cmd_ut
+  LINK scsi_nvme_ut
+  LINK reactor_ut
+  LINK bdevperf
+  LINK bdev_zone_ut
+  LINK nvme_tcp_ut
+  LINK nvme_rdma_ut
+  LINK gpt_ut
+  LINK nvme_ctrlr_ut
+  LINK bdev_raid_sb_ut
+  LINK vbdev_zone_block_ut
+  LINK raid0_ut
+  LINK concat_ut
+  LINK raid1_ut
+  LINK vbdev_lvol_ut
+  LINK bdev_raid_ut
+  LINK blob_ut
+  CC test/bdev/bdevio/bdevio.o
+  CC test/unit/lib/blobfs/tree.c/tree_ut.o
+  CC test/unit/lib/lvol/lvol.c/lvol_ut.o
+  CC test/unit/lib/blobfs/blobfs_bdev.c/blobfs_bdev_ut.o
+  CC test/unit/lib/blobfs/blobfs_sync_ut/blobfs_sync_ut.o
+  CC test/unit/lib/blobfs/blobfs_async_ut/blobfs_async_ut.o
+  LINK part_ut
+  LINK tree_ut
+  LINK bdev_ut
+  LINK blobfs_bdev_ut
+  LINK bdevio
+  LINK blobfs_sync_ut
+  LINK blobfs_async_ut
+  LINK bdev_nvme_ut
+  LINK bdev_ut
+  LINK lvol_ut
+  CC test/unit/lib/scsi/scsi_bdev.c/scsi_bdev_ut.o
+  CC test/unit/lib/scsi/dev.c/dev_ut.o
+  CC test/unit/lib/scsi/scsi.c/scsi_ut.o
+  CC test/unit/lib/nvmf/ctrlr.c/ctrlr_ut.o
+  CC test/unit/lib/scsi/lun.c/lun_ut.o
+  CC test/unit/lib/nvmf/ctrlr_bdev.c/ctrlr_bdev_ut.o
+  CC test/unit/lib/nvmf/tcp.c/tcp_ut.o
+  CC test/unit/lib/ftl/ftl_band.c/ftl_band_ut.o
+  CC test/unit/lib/ftl/ftl_l2p/ftl_l2p_ut.o
+  CC test/unit/lib/ftl/ftl_io.c/ftl_io_ut.o
+  CC test/unit/lib/ftl/ftl_mempool.c/ftl_mempool_ut.o
+  CC test/unit/lib/nvmf/nvmf.c/nvmf_ut.o
+  CC test/unit/lib/nvmf/auth.c/auth_ut.o
+  CC test/unit/lib/nvmf/subsystem.c/subsystem_ut.o
+  CC test/unit/lib/nvmf/ctrlr_discovery.c/ctrlr_discovery_ut.o
+  CC test/unit/lib/nvmf/rdma.c/rdma_ut.o
+  CC test/unit/lib/ftl/ftl_p2l.c/ftl_p2l_ut.o
+  CC test/unit/lib/nvmf/transport.c/transport_ut.o
+  CC test/unit/lib/ftl/ftl_mngt/ftl_mngt_ut.o
+  CC test/unit/lib/ftl/ftl_bitmap.c/ftl_bitmap_ut.o
+  CC test/unit/lib/ftl/ftl_sb/ftl_sb_ut.o
+  CC test/unit/lib/ftl/ftl_layout_upgrade/ftl_layout_upgrade_ut.o
+  CC test/unit/lib/scsi/scsi_pr.c/scsi_pr_ut.o
+  LINK scsi_ut
+  LINK ftl_bitmap_ut
+  LINK scsi_pr_ut
+  LINK dev_ut
+  LINK ftl_l2p_ut
+  LINK ftl_mngt_ut
+  LINK ftl_mempool_ut
+  LINK ftl_io_ut
+  LINK ftl_layout_upgrade_ut
+  LINK ctrlr_bdev_ut
+  LINK lun_ut
+  CC examples/nvmf/nvmf/nvmf.o
+  LINK nvmf_ut
+  LINK ftl_sb_ut
+  LINK ftl_p2l_ut
+  LINK scsi_bdev_ut
+  LINK ftl_band_ut
+  LINK auth_ut
+  LINK nvmf
+  CC test/unit/lib/vhost/vhost.c/vhost_ut.o
+  CC test/unit/lib/iscsi/portal_grp.c/portal_grp_ut.o
+  CC test/unit/lib/iscsi/conn.c/conn_ut.o
+  CC test/unit/lib/iscsi/init_grp.c/init_grp_ut.o
+  CC test/unit/lib/iscsi/tgt_node.c/tgt_node_ut.o
+  CC test/unit/lib/iscsi/param.c/param_ut.o
+  CC test/unit/lib/iscsi/iscsi.c/iscsi_ut.o
+  LINK ctrlr_discovery_ut
+  LINK ctrlr_ut
+  LINK subsystem_ut
+  LINK param_ut
+  LINK init_grp_ut
+  LINK rdma_ut
+  LINK transport_ut
+  LINK tcp_ut
+  LINK portal_grp_ut
+  LINK tgt_node_ut
+  LINK conn_ut
+  LINK iscsi_ut
+  LINK vhost_ut
+
+  

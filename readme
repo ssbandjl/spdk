@@ -1182,8 +1182,8 @@ nvmf_rdma_create(struct spdk_nvmf_transport_opts *opts)
 nvmf_rdma_accept
   nvmf_rdma_retry_listen_port -> nvmf/rdma：IB设备热插拔后重新创建资源和监听器，在修改bonding、IB设备的从属设备时，IB设备可能会被拔出和热插拔。 此补丁将在 IB 设备恢复后尝试重新创建 ibv 设备上下文、轮询器和侦听器
     nvmf_rdma_rescan_devices
-      ibv_get_device_list
-      ibv_open_device
+      ibv_get_device_list -> 1
+      ibv_open_device -> 1
       nvmf_rdma_find_ib_device
       rdma_get_devices
       nvmf_rdma_check_devices_context
@@ -2579,10 +2579,10 @@ blk_request_complete_cb
 static const struct spdk_vhost_dev_backend vhost_blk_device_backend = {
     .type = VHOST_BACKEND_BLK,
     .vhost_get_config = vhost_blk_get_config,
-        blkcfg.size_max = SPDK_BDEV_LARGE_BUF_MAX_SIZE;
+        blkcfg.size_max = SPDK_BDEV_LARGE_BUF_MAX_SIZE; -> (64 * 1024)
         blkcfg.seg_max = spdk_min(SPDK_VHOST_IOVS_MAX - 2 - 1, SPDK_BDEV_IO_NUM_CHILD_IOV - 2 - 1)
         blkcfg.capacity = (blkcnt * blk_size) / 512
-        blkcfg.num_queues = SPDK_VHOST_MAX_VQUEUES -> QEMU can overwrite this value when started
+        blkcfg.num_queues = SPDK_VHOST_MAX_VQUEUES -> 256 -> QEMU can overwrite this value when started 
         
     .dump_info_json = vhost_blk_dump_info_json,
     .write_config_json = vhost_blk_write_config_json,
@@ -4083,5 +4083,235 @@ vring_size(unsigned int num, unsigned long align)
 
 
 
+#define RTE_MAX_MEMSEG_PER_LIST 8192
+spdk_dma_malloc
+    rte_malloc_socket
 
 
+
+accel_fw.md
+accel.h
+_add_to_comp_list
+spdk_accel_submit_copy
+
+
+static struct spdk_accel_module_if g_sw_module = {
+	.module_init		= sw_accel_module_init,
+	.module_fini		= sw_accel_module_fini,
+	.write_config_json	= NULL,
+	.get_ctx_size		= sw_accel_module_get_ctx_size,
+	.name			= "software",
+	.supports_opcode	= sw_accel_supports_opcode,
+	.get_io_channel		= sw_accel_get_io_channel,
+	.submit_tasks		= sw_accel_submit_tasks,
+	.crypto_key_init	= sw_accel_crypto_key_init,
+	.crypto_key_deinit	= sw_accel_crypto_key_deinit,
+	.crypto_supports_tweak_mode	= sw_accel_crypto_supports_tweak_mode,
+	.crypto_supports_cipher	= sw_accel_crypto_supports_cipher,
+};
+
+enum accel_opcode {
+	ACCEL_OPC_COPY			= 0,
+	ACCEL_OPC_FILL			= 1,
+	ACCEL_OPC_DUALCAST		= 2,
+	ACCEL_OPC_COMPARE		= 3,
+	ACCEL_OPC_CRC32C		= 4,
+	ACCEL_OPC_COPY_CRC32C		= 5,
+	ACCEL_OPC_COMPRESS		= 6,
+	ACCEL_OPC_DECOMPRESS		= 7,
+	ACCEL_OPC_ENCRYPT		= 8,
+	ACCEL_OPC_DECRYPT		= 9,
+	ACCEL_OPC_XOR			= 10,
+	ACCEL_OPC_LAST			= 11,
+};
+
+
+
+struct spdk_io_channel {
+	struct spdk_thread		*thread;
+	struct io_device		*dev;  -> NVMe controller or soft entity(blobstore)
+	uint32_t			ref;
+	uint32_t			destroy_ref;
+	RB_ENTRY(spdk_io_channel)	node;
+	spdk_io_channel_destroy_cb	destroy_cb;
+	uint8_t				_padding[40];
+};
+模块将在该结构的末尾分配额外的内存来存储对特定于硬件的引用（即 NVMe 队列对，或对子设备 spdk_io_channels（即虚拟 bdevs）的引用
+
+
+
+
+struct virtio_blk_config {
+	/* The capacity (in 512-byte sectors). */
+	__u64 capacity;
+	/* The maximum segment size (if VIRTIO_BLK_F_SIZE_MAX) */
+	__u32 size_max;
+	/* The maximum number of segments (if VIRTIO_BLK_F_SEG_MAX) */
+	__u32 seg_max;
+	/* geometry of the device (if VIRTIO_BLK_F_GEOMETRY) */
+	struct virtio_blk_geometry {
+		__u16 cylinders;
+		__u8 heads;
+		__u8 sectors;
+	} geometry;
+
+	/* block size of device (if VIRTIO_BLK_F_BLK_SIZE) */
+	__u32 blk_size;
+
+	/* the next 4 entries are guarded by VIRTIO_BLK_F_TOPOLOGY  */
+	/* exponent for physical block per logical block. */
+	__u8 physical_block_exp;
+	/* alignment offset in logical blocks. */
+	__u8 alignment_offset;
+	/* minimum I/O size without performance penalty in logical blocks. */
+	__u16 min_io_size;
+	/* optimal sustained I/O size in logical blocks. */
+	__u32 opt_io_size;
+
+	/* writeback mode (if VIRTIO_BLK_F_CONFIG_WCE) */
+	__u8 wce;
+	__u8 unused;
+
+	/* number of vqs, only available when VIRTIO_BLK_F_MQ is set */
+	__u16 num_queues;
+
+	/* the next 3 entries are guarded by VIRTIO_BLK_F_DISCARD */
+	/*
+	 * The maximum discard sectors (in 512-byte sectors) for
+	 * one segment.
+	 */
+	__u32 max_discard_sectors;
+	/*
+	 * The maximum number of discard segments in a
+	 * discard command.
+	 */
+	__u32 max_discard_seg;
+	/* Discard commands must be aligned to this number of sectors. */
+	__u32 discard_sector_alignment;
+
+	/* the next 3 entries are guarded by VIRTIO_BLK_F_WRITE_ZEROES */
+	/*
+	 * The maximum number of write zeroes sectors (in 512-byte sectors) in
+	 * one segment.
+	 */
+	__u32 max_write_zeroes_sectors;
+	/*
+	 * The maximum number of segments in a write zeroes
+	 * command.
+	 */
+	__u32 max_write_zeroes_seg;
+	/*
+	 * Set if a VIRTIO_BLK_T_WRITE_ZEROES request may result in the
+	 * deallocation of one or more of the sectors.
+	 */
+	__u8 write_zeroes_may_unmap;
+
+	__u8 unused1[3];
+} __attribute__((packed));
+
+
+
+/**
+ * Admin opcodes
+ */
+enum spdk_nvme_admin_opcode {
+    ...
+	SPDK_NVME_OPC_GET_LOG_PAGE			= 0x02,
+};
+
+
+
+
+spdk_bdev_nvme_admin_passthru
+    bdev_io = bdev_channel_get_io(channel)
+    bdev_io->type = SPDK_BDEV_IO_TYPE_NVME_ADMIN
+    bdev_io_submit(bdev_io)
+        bdev_nvme_admin_passthru
+            spdk_nvme_ctrlr_cmd_admin_raw
+                nvme_ctrlr_submit_admin_request
+
+
+/** bdev I/O type */
+enum spdk_bdev_io_type {
+	SPDK_BDEV_IO_TYPE_INVALID = 0,
+	SPDK_BDEV_IO_TYPE_READ,
+	SPDK_BDEV_IO_TYPE_WRITE,
+	SPDK_BDEV_IO_TYPE_UNMAP,
+	SPDK_BDEV_IO_TYPE_FLUSH,
+	SPDK_BDEV_IO_TYPE_RESET,
+	SPDK_BDEV_IO_TYPE_NVME_ADMIN,
+	SPDK_BDEV_IO_TYPE_NVME_IO,
+	SPDK_BDEV_IO_TYPE_NVME_IO_MD,
+	SPDK_BDEV_IO_TYPE_WRITE_ZEROES,
+	SPDK_BDEV_IO_TYPE_ZCOPY,
+	SPDK_BDEV_IO_TYPE_GET_ZONE_INFO,
+	SPDK_BDEV_IO_TYPE_ZONE_MANAGEMENT,
+	SPDK_BDEV_IO_TYPE_ZONE_APPEND,
+	SPDK_BDEV_IO_TYPE_COMPARE,
+	SPDK_BDEV_IO_TYPE_COMPARE_AND_WRITE,
+	SPDK_BDEV_IO_TYPE_ABORT,
+	SPDK_BDEV_IO_TYPE_SEEK_HOLE,
+	SPDK_BDEV_IO_TYPE_SEEK_DATA,
+	SPDK_BDEV_IO_TYPE_COPY,
+	SPDK_BDEV_NUM_IO_TYPES /* Keep last */
+};
+
+
+
+fio:
+/* FIO imports this structure using dlsym */
+struct ioengine_ops ioengine = {
+	.name			= "spdk_bdev",
+	.version		= FIO_IOOPS_VERSION,
+	.flags			= FIO_RAWIO | FIO_NOEXTEND | FIO_NODISKUTIL | FIO_MEMALIGN | FIO_DISKLESSIO,
+	.setup			= spdk_fio_setup,
+	.init			= spdk_fio_init,
+	/* .prep		= unused, */
+	.queue			= spdk_fio_queue,
+	/* .commit		= unused, */
+	.getevents		= spdk_fio_getevents,
+	.event			= spdk_fio_event,
+	/* .errdetails		= unused, */
+	/* .cancel		= unused, */
+	.cleanup		= spdk_fio_cleanup,
+	.open_file		= spdk_fio_open,
+	.close_file		= spdk_fio_close,
+	.invalidate		= spdk_fio_invalidate,
+	/* .unlink_file		= unused, */
+	/* .get_file_size	= unused, */
+	/* .terminate		= unused, */
+	.iomem_alloc		= spdk_fio_iomem_alloc,
+	.iomem_free		= spdk_fio_iomem_free,
+	.io_u_init		= spdk_fio_io_u_init,
+	.io_u_free		= spdk_fio_io_u_free,
+#if FIO_HAS_ZBD
+	.get_zoned_model	= spdk_fio_get_zoned_model,
+	.report_zones		= spdk_fio_report_zones,
+	.reset_wp		= spdk_fio_reset_wp,
+#endif
+#if FIO_IOOPS_VERSION >= 30
+	.get_max_open_zones	= spdk_fio_get_max_open_zones,
+#endif
+	.option_struct_size	= sizeof(struct spdk_fio_options),
+	.options		= options,
+};
+
+
+spdk_fio_init
+    spdk_fio_init_env
+        pthread_create(&g_init_thread_id, NULL, &spdk_init_thread_poll, td->eo)
+            spdk_thread_lib_init(spdk_fio_schedule_thread, sizeof(struct spdk_fio_thread))
+            spdk_thread_send_msg(fio_thread->thread, spdk_fio_bdev_init_start, &done)
+    spdk_thread_send_msg(fio_thread->thread, spdk_fio_bdev_open, td)
+        for_each_file(td, f, i)
+            spdk_bdev_open_ext(f->file_name, true, fio_bdev_event_cb, NULL,
+            target->ch = spdk_bdev_get_io_channel(target->desc)
+    while (spdk_fio_poll_thread(fio_thread) > 0) {}
+        spdk_thread_poll(fio_thread->thread, 0, 0)
+
+
+
+
+
+
+iscsi_poll_group_poll
